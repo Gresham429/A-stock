@@ -27,6 +27,7 @@ import llm
 import portfolio
 import store
 import universe
+import websearch
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -64,7 +65,9 @@ def index() -> str:
 def api_config():
     """前端据此决定是否显示 AI 功能。"""
     return jsonify({"llm_enabled": config.llm_enabled(),
-                    "model": config.DEEPSEEK_MODEL if config.llm_enabled() else None})
+                    "model": config.DEEPSEEK_MODEL if config.llm_enabled() else None,
+                    "news_augment": True,
+                    "web_search": config.bocha_enabled()})
 
 
 @app.route("/api/overview")
@@ -180,12 +183,13 @@ def recommend_daily():
     rows = _overview_rows(store.load_watchlist())
     quotes = ds.tencent_quote(portfolio.codes()) if portfolio.codes() else {}
     holdings = portfolio.with_pnl(quotes)
+    web_ctx = _ai_web_context("market")
     try:
-        result = llm.daily_recommendation(rows, holdings)
+        result = llm.daily_recommendation(rows, holdings, web_ctx)
     except llm.LLMError as e:
         return jsonify({"ok": False, "msg": str(e)}), 502
     return jsonify({"ok": True, "result": result, "model": config.DEEPSEEK_MODEL,
-                    "updated": _now()})
+                    "web_search": config.bocha_enabled(), "updated": _now()})
 
 
 @app.route("/api/recommend/position/<code>", methods=["POST"])
@@ -211,12 +215,14 @@ def recommend_position(code: str):
         metrics, financials, news, kl = (f_metrics.result(), f_fin.result(),
                                          f_news.result(), f_kline.result())
     vol_hist = _vol_hist(kl)
+    web_ctx = _ai_web_context("position", code, q.get("name", ""))
     try:
-        advice = llm.position_advice(holding, q, metrics, financials, news, vol_hist)
+        advice = llm.position_advice(holding, q, metrics, financials, news, vol_hist, web_ctx)
     except llm.LLMError as e:
         return jsonify({"ok": False, "msg": str(e)}), 502
     return jsonify({"ok": True, "advice": advice, "financials": financials,
-                    "news": news[:5], "model": config.DEEPSEEK_MODEL})
+                    "news": news[:5], "web_search": config.bocha_enabled(),
+                    "model": config.DEEPSEEK_MODEL})
 
 
 @app.route("/api/recommend/screen", methods=["POST"])
@@ -233,12 +239,14 @@ def recommend_screen():
     rows = _screen_rows(capital)
     if not rows:
         return jsonify({"ok": False, "msg": "候选池行情拉取失败，请重试"}), 502
+    web_ctx = _ai_web_context("market")
     try:
-        result = llm.market_screen(rows, capital, focus)
+        result = llm.market_screen(rows, capital, focus, web_ctx)
     except llm.LLMError as e:
         return jsonify({"ok": False, "msg": str(e)}), 502
     return jsonify({"ok": True, "result": result, "candidates": len(rows),
                     "capital": capital, "focus": focus,
+                    "web_search": config.bocha_enabled(),
                     "model": config.DEEPSEEK_MODEL, "updated": _now()})
 
 
@@ -286,6 +294,24 @@ def _screen_rows(capital: float) -> list[dict]:
                      "range_pos": m.get("range_pos"), "net20": m.get("net20"),
                      "lot_cost": q.get("lot_cost")})
     return rows
+
+
+def _ai_web_context(scope: str, code: str = "", name: str = "") -> str:
+    """构建喂给 AI 的「联网知识」上下文：A=免费财经/政策快讯，B=博查联网搜索(可选)。"""
+    parts = []
+    news = ds.market_news_digest(12)
+    if news:
+        parts.append("最新财经/政策快讯：\n"
+                     + "\n".join(f"- {n['time']} {n['title']}" for n in news))
+    if config.bocha_enabled():
+        if scope == "position" and name:
+            query = f"{name} {code} 最新消息 政策 业绩 利好 利空"
+        else:
+            query = "A股 科技板块 半导体 AI 芯片 最新政策 行业动态"
+        dig = websearch.search_digest(query, count=6)
+        if dig:
+            parts.append("联网搜索（博查）：\n" + dig)
+    return "\n\n".join(parts)
 
 
 def _now() -> str:

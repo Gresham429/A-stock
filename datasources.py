@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -17,6 +18,7 @@ import re
 import time
 import urllib.parse
 import urllib.request
+import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -396,3 +398,57 @@ def stock_news(code: str, page_size: int = 8) -> list[dict[str, Any]]:
         "title": re.sub(r"<[^>]+>", "", a.get("title", "")),
         "source": a.get("mediaName", ""),
     } for a in arts]
+
+
+# ── 全市场财经/政策快讯（财联社 + 东财 7×24，用于 AI「自我更新知识」A 方案）──
+def cls_telegraph(page_size: int = 30) -> list[dict[str, Any]]:
+    """财联社电报（全市场实时快讯，v1 API + 本地签名，零 key）。"""
+    params = {"appName": "CailianpressWeb", "os": "web", "sv": "7.7.5",
+              "last_time": "", "refresh_type": "1", "rn": str(page_size)}
+    qs = "&".join(f"{k}={params[k]}" for k in sorted(params))
+    sign = hashlib.md5(hashlib.sha1(qs.encode()).hexdigest().encode()).hexdigest()
+    url = f"https://www.cls.cn/v1/roll/get_roll_list?{qs}&sign={sign}"
+    try:
+        t = _http_get(url, ref="https://www.cls.cn/")
+        rd = json.loads(t).get("data", {}).get("roll_data", []) or []
+    except (OSError, ValueError) as e:
+        logger.warning("财联社快讯请求失败: %s", e)
+        return []
+    out = []
+    for it in rd:
+        ts = it.get("ctime")
+        tm = datetime.fromtimestamp(ts).strftime("%m-%d %H:%M") if ts else ""
+        title = it.get("title") or it.get("brief") or ""
+        if title:
+            out.append({"time": tm, "title": title, "source": "财联社"})
+    return out
+
+
+def eastmoney_global_news(page_size: int = 30) -> list[dict[str, Any]]:
+    """东财 7×24 全球财经资讯。"""
+    url = "https://np-weblist.eastmoney.com/comm/web/getFastNewsList"
+    params = {"client": "web", "biz": "web_724", "fastColumn": "102",
+              "sortEnd": "", "pageSize": str(page_size), "req_trace": str(uuid.uuid4())}
+    try:
+        t = em_get(url + "?" + urllib.parse.urlencode(params),
+                   ref="https://kuaixun.eastmoney.com/")
+        lst = json.loads(t).get("data", {}).get("fastNewsList", []) or []
+    except (OSError, ValueError) as e:
+        logger.warning("东财全球资讯请求失败: %s", e)
+        return []
+    return [{"time": (it.get("showTime", "") or "")[5:16], "title": it.get("title", ""),
+             "source": "东财"} for it in lst if it.get("title")]
+
+
+def market_news_digest(limit: int = 12) -> list[dict[str, Any]]:
+    """聚合最新全市场财经/政策快讯（财联社优先，东财兜底），去重取前 limit 条。"""
+    news = cls_telegraph(limit + 8) + eastmoney_global_news(limit)
+    seen: set[str] = set()
+    out = []
+    for n in news:
+        key = n["title"][:18]
+        if not n["title"] or key in seen:
+            continue
+        seen.add(key)
+        out.append(n)
+    return out[:limit]

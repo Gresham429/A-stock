@@ -86,6 +86,14 @@ def _fmt(v: Any, suffix: str = "") -> str:
     return "—" if v is None else f"{v}{suffix}"
 
 
+def _web_block(web_context: str) -> str:
+    """近期新闻/联网搜索上下文块（供 AI 判断政策面与情绪；无则空）。"""
+    if not web_context:
+        return ""
+    return ("\n【近期财经/政策快讯 + 联网搜索（据此判断政策面/情绪面，"
+            "但仅作参考、勿编造）】\n" + web_context + "\n")
+
+
 def _watchlist_table(rows: list[dict[str, Any]]) -> str:
     """把自选股指标压成紧凑文本表喂给模型。"""
     lines = ["代码 名称 现价 涨跌% PE PB 年化波动% 20日涨% 区间位置% 主力5日亿 主力20日亿"]
@@ -114,7 +122,8 @@ def _holdings_table(holdings: list[dict[str, Any]]) -> str:
 
 
 def daily_recommendation(rows: list[dict[str, Any]],
-                         holdings: list[dict[str, Any]]) -> dict[str, Any]:
+                         holdings: list[dict[str, Any]],
+                         web_context: str = "") -> dict[str, Any]:
     """每日推荐：对自选股给 buy/sell/hold/watch，并结合持仓给操作提示。"""
     prompt = f"""基于以下 A股自选股实时指标和我的持仓，给出今日操作参考。
 
@@ -123,7 +132,7 @@ def daily_recommendation(rows: list[dict[str, Any]],
 
 【我的持仓】
 {_holdings_table(holdings)}
-
+{_web_block(web_context)}
 分析要点：估值(PE/PB是否偏贵)、动能(20日涨幅)、位置(区间位置越接近100越过热、越接近0越低位)、
 资金(主力净流入为正是流入)、波动(年化波动越高越刺激也越危险)。本金约1万元、偏好科技股与波动。
 
@@ -158,8 +167,9 @@ def _fin_table(financials: list[dict[str, Any]]) -> str:
 def position_advice(holding: dict[str, Any], quote: dict[str, Any],
                     metrics: dict[str, Any], financials: list[dict[str, Any]] | None = None,
                     news: list[dict[str, Any]] | None = None,
-                    vol_hist: dict[str, Any] | None = None) -> dict[str, Any]:
-    """单只持仓的卖出/买入时机建议（严格结合波动史 + 财报 + 近期新闻）。"""
+                    vol_hist: dict[str, Any] | None = None,
+                    web_context: str = "") -> dict[str, Any]:
+    """单只持仓的卖出/买入时机建议（严格结合波动史 + 财报 + 近期新闻 + 联网搜索）。"""
     news_txt = "\n".join(f"- {n.get('date','')[:10]} {n.get('title','')}"
                          for n in (news or [])[:6]) or "（暂无近期新闻）"
     vh = vol_hist or {}
@@ -178,8 +188,8 @@ def position_advice(holding: dict[str, Any], quote: dict[str, Any],
 
 【近期新闻(公司/题材/政策面)】
 {news_txt}
-
-要求：结合基本面(营收/利润增速)、估值、技术位置(区间/波动/支撑压力)、资金、新闻面综合判断。
+{_web_block(web_context)}
+要求：结合基本面(营收/利润增速)、估值、技术位置(区间/波动/支撑压力)、资金、新闻/政策面综合判断。
 严格返回 JSON：
 {{
   "action":"hold|add|reduce|sell",
@@ -197,7 +207,7 @@ def position_advice(holding: dict[str, Any], quote: dict[str, Any],
 
 
 def market_screen(rows: list[dict[str, Any]], capital: float,
-                  focus_sector: str = "") -> dict[str, Any]:
+                  focus_sector: str = "", web_context: str = "") -> dict[str, Any]:
     """从科技股候选池跨板块筛选（考虑资金规模与板块，侧重科技）。
 
     rows: 每项含 code/name/sector/price/pe_ttm/pb/vol/cum20/range_pos/net20/lot_cost。
@@ -220,7 +230,7 @@ def market_screen(rows: list[dict[str, Any]], capital: float,
 
 【候选池指标】
 {chr(10).join(lines)}
-
+{_web_block(web_context)}
 要求：
 1) 优先给 1手成本 ≤ {int(capital)} 元、买得起的标的；
 2) 兼顾不同子板块(别集中在一个板块)，科技方向可多给；

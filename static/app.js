@@ -306,7 +306,12 @@ async function loadConfig(){
     LLM=j.llm_enabled; MODEL=j.model||'';
     document.querySelectorAll('.ai-only').forEach(el=>el.style.display=LLM?'':'none');
     const chip=document.getElementById('aichip');
-    chip.textContent=LLM?`🤖 ${MODEL}`:'🤖 未配置'; chip.className='chip'+(LLM?' ok':'');
+    const web=j.web_search;
+    chip.textContent=LLM?`🤖 ${MODEL} · 📰新闻${web?' · 🌐联网':''}`:'🤖 未配置';
+    chip.className='chip'+(LLM?' ok':'');
+    chip.dataset.tip = web
+      ? 'AI 已接入：实时财经/政策快讯(A) + 博查联网搜索(B)。每次分析都会读最新资讯。'
+      : 'AI 已接入实时财经/政策快讯(A)。在 .env 填 BOCHA_API_KEY 即可启用联网搜索(B)。';
   }catch(e){}
 }
 

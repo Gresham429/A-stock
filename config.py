@@ -28,7 +28,16 @@ DEEPSEEK_API_KEY: str = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_MODEL: str = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro")
 DEEPSEEK_BASE_URL: str = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 
+# 博查（Bocha）联网搜索——可选。填了 key 才启用 B 方案（通用联网搜索）。
+BOCHA_API_KEY: str = os.environ.get("BOCHA_API_KEY", "")
+BOCHA_BASE_URL: str = os.environ.get("BOCHA_BASE_URL", "https://api.bochaai.com")
+
 
 def llm_enabled() -> bool:
     """是否已配置可用的 DeepSeek key。"""
     return bool(DEEPSEEK_API_KEY and DEEPSEEK_API_KEY.startswith("sk-"))
+
+
+def bocha_enabled() -> bool:
+    """是否已配置博查联网搜索 key（未配置则只用免费新闻增强）。"""
+    return len(BOCHA_API_KEY.strip()) >= 8

@@ -18,6 +18,7 @@ AI 功能读取根目录 `.env` 里的 DeepSeek 配置（已 `.gitignore`，不�
 DEEPSEEK_API_KEY=sk-xxxx
 DEEPSEEK_MODEL=deepseek-v4-pro       # 也可用 deepseek-v4-flash（更快更省）
 DEEPSEEK_BASE_URL=https://api.deepseek.com
+# BOCHA_API_KEY=sk-xxxx             # 可选：博查联网搜索(B)，填了才启用
 ```
 
 改 key 后重启后端生效。若 `.env` 未配置，AI 按钮自动隐藏，其余功能照常。
@@ -39,6 +40,15 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com
 
 约定：**红涨绿跌**（A 股惯例）。所有 AI 输出均标注「参考信号，不构成投资建议」。
 
+### AI 联网知识（自我更新）
+
+每次 AI 分析（自选推荐 / 全市场选股 / 何时卖）都会先抓取实时资讯再判断：
+
+- **A · 财经/政策快讯（免费，默认开）**：财联社快讯 + 东财 7×24 全球资讯，零 key。顶部芯片显示 `📰新闻`。
+- **B · 博查联网搜索（可选）**：配置 `BOCHA_API_KEY` 后启用通用网页搜索（政策原文、行业动态等），针对个股/板块联网检索喂给 DeepSeek。顶部芯片显示 `🌐联网`。
+  - 申请：[open.bochaai.com](https://open.bochaai.com/)（国内直连、人民币结算、DeepSeek 官方搜索，约 3.6 元/千次）→ 拿 key 填入 `.env` 的 `BOCHA_API_KEY=` → 重启。
+  - 未配置时自动跳过，只用 A，不影响任何功能。
+
 ## 数据源
 
 | 数据 | 源 | 说明 |
@@ -55,10 +65,11 @@ A-stock/
 ├── app.py              # Flask 路由（后端）
 ├── datasources.py      # 行情/指标/研报/龙虎榜/解禁/K线/财报/新闻
 ├── llm.py              # DeepSeek 集成：自选推荐 / 全市场筛选 / 持仓建议
+├── websearch.py        # 博查联网搜索（B 方案，可选开关）
 ├── portfolio.py        # 持仓记录 + 总盈亏 + 当日盈亏
 ├── universe.py         # 科技股候选池（按板块分组，供全市场筛选）
 ├── store.py            # 自选股持久化
-├── config.py           # 读取 .env（密钥不硬编码）
+├── config.py           # 读取 .env（DeepSeek + 博查密钥，不硬编码）
 ├── templates/index.html# 看板结构 + 样式（深色终端风）
 ├── static/app.js       # 前端逻辑（对比/深挖/持仓/AI/名词解释）
 ├── .env                # DeepSeek 密钥（gitignore，勿提交）

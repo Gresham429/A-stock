@@ -70,6 +70,16 @@ def api_config():
                     "web_search": config.bocha_enabled()})
 
 
+@app.route("/api/websearch/status")
+def websearch_status():
+    """博查 key 健康检测（用于到期/失效提醒）。?probe=1 主动测一次。"""
+    if not config.bocha_enabled():
+        return jsonify({"configured": False})
+    if request.args.get("probe") == "1":
+        return jsonify(websearch.probe())
+    return jsonify({"configured": True, **websearch.status()})
+
+
 @app.route("/api/overview")
 def overview():
     """自选股全量对比：一次腾讯批量行情 + 并发拉各自波动/资金指标。"""

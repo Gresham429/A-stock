@@ -36,7 +36,7 @@ const COLS=[
   {k:'spark',t:'走势30D',s:null,tip:'近30日收盘价走势迷你图'},
   {k:'del',t:'',s:null,tip:''},
 ];
-let DATA=[], sortKey='net20', sortDir=-1, autoTimer=null, LLM=false, MODEL='';
+let DATA=[], sortKey='net20', sortDir=-1, autoTimer=null, LLM=false, MODEL='', WEB=false;
 
 const clr=v=> v>0?'up':v<0?'down':'flat';
 const sgn=v=> v>0?'+':'';
@@ -303,15 +303,34 @@ function boxplot(vals){
 async function loadConfig(){
   try{
     const j=await (await fetch('/api/config')).json();
-    LLM=j.llm_enabled; MODEL=j.model||'';
+    LLM=j.llm_enabled; MODEL=j.model||''; WEB=j.web_search;
     document.querySelectorAll('.ai-only').forEach(el=>el.style.display=LLM?'':'none');
     const chip=document.getElementById('aichip');
-    const web=j.web_search;
-    chip.textContent=LLM?`🤖 ${MODEL} · 📰新闻${web?' · 🌐联网':''}`:'🤖 未配置';
+    chip.textContent=LLM?`🤖 ${MODEL} · 📰新闻${WEB?' · 🌐联网':''}`:'🤖 未配置';
     chip.className='chip'+(LLM?' ok':'');
-    chip.dataset.tip = web
+    chip.dataset.tip = WEB
       ? 'AI 已接入：实时财经/政策快讯(A) + 博查联网搜索(B)。每次分析都会读最新资讯。'
       : 'AI 已接入实时财经/政策快讯(A)。在 .env 填 BOCHA_API_KEY 即可启用联网搜索(B)。';
+    if(WEB) checkWebSearch(true);   // 启动时探测博查 key 是否有效 → 到期提醒
+  }catch(e){}
+}
+async function checkWebSearch(probe){
+  if(!WEB) return;
+  const warn=document.getElementById('webWarn');
+  try{
+    const j=await (await fetch('/api/websearch/status'+(probe?'?probe=1':''))).json();
+    if(j.configured && j.ok===false){
+      document.getElementById('webWarnMsg').innerHTML=
+        '⚠ 博查联网搜索(B)当前不可用：'+(j.reason||'未知错误')+(j.checked_at?`　·　检测于 ${j.checked_at}`:'');
+      warn.style.display='flex';
+      const chip=document.getElementById('aichip');
+      if(chip.textContent.includes('🌐联网')&&!chip.textContent.includes('⚠'))
+        chip.textContent=chip.textContent.replace('🌐联网','🌐联网⚠');
+    }else{
+      warn.style.display='none';
+      const chip=document.getElementById('aichip');
+      chip.textContent=chip.textContent.replace('🌐联网⚠','🌐联网');
+    }
   }catch(e){}
 }
 

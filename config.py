@@ -29,7 +29,9 @@ DEEPSEEK_MODEL: str = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro")
 DEEPSEEK_BASE_URL: str = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 
 # 博查（Bocha）联网搜索——可选。填了 key 才启用 B 方案（通用联网搜索）。
-BOCHA_API_KEY: str = os.environ.get("BOCHA_API_KEY", "")
+# 兼容两种常见变量名：BOCHA_API_KEY / BOCHAAI_API_KEY。
+BOCHA_API_KEY: str = (os.environ.get("BOCHA_API_KEY")
+                      or os.environ.get("BOCHAAI_API_KEY") or "")
 BOCHA_BASE_URL: str = os.environ.get("BOCHA_BASE_URL", "https://api.bochaai.com")
 
 

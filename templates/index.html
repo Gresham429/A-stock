@@ -124,6 +124,10 @@
   .akv span{display:block;color:var(--muted);font-size:10.5px;font-family:var(--mono);margin-bottom:2px}
   .paneempty{color:var(--muted);font-size:13px;padding:20px 0;text-align:center}
 
+  /* 联网搜索到期提醒 */
+  .webwarn{margin-top:14px;background:rgba(255,77,94,.12);border:1px solid var(--up);border-radius:10px;padding:12px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:13px;color:var(--up);font-weight:600}
+  .webwarn .btn{color:var(--txt);font-weight:400;white-space:nowrap}
+
   /* 筛选控制条 */
   .recControls{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:12px 18px;border-bottom:1px solid var(--line);background:rgba(224,169,46,.04)}
   .recControls label{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:7px}
@@ -215,6 +219,12 @@
       <button class="btn" onclick="load();loadPortfolio()">↻ 刷新</button>
     </div>
   </header>
+
+  <!-- 博查联网搜索 到期/失效提醒 -->
+  <div id="webWarn" class="webwarn" style="display:none">
+    <span id="webWarnMsg"></span>
+    <button class="btn" onclick="checkWebSearch(true)">重新检测</button>
+  </div>
 
   <!-- AI 推荐 / 全市场筛选 -->
   <section class="recPanel" id="recPanel">

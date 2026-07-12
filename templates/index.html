@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>观察台 · A-SHARE WATCHDESK</title>
+<style>
+  :root{
+    --bg:#0a0d12; --bg2:#0e131b; --panel:#12171f; --panel2:#161c26;
+    --line:#212b38; --line2:#2c3846;
+    --txt:#cdd6e0; --muted:#6b7686; --dim:#4b5563;
+    --up:#ff4d5e; --down:#22c98b; --flat:#8a94a2;
+    --gold:#e0a92e; --gold-dim:#8a6d24; --hot:#ff4d5e; --cold:#22c98b;
+    --mono:"SF Mono","JetBrains Mono","Roboto Mono",Menlo,Consolas,"Courier New",monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Hiragino Sans GB","Segoe UI",sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:
+      radial-gradient(1200px 600px at 78% -8%, rgba(224,169,46,.06), transparent 60%),
+      radial-gradient(900px 500px at 0% 100%, rgba(34,201,139,.05), transparent 55%),
+      var(--bg);
+    color:var(--txt); font-family:var(--sans);
+    font-feature-settings:"tnum" 1; -webkit-font-smoothing:antialiased;
+  }
+  body::before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.35;z-index:0;
+    background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);
+    background-size:48px 48px;mask-image:radial-gradient(circle at 50% 30%,#000,transparent 85%)}
+  .wrap{position:relative;z-index:1;max-width:1360px;margin:0 auto;padding:22px 26px 70px}
+
+  header{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;flex-wrap:wrap;
+    padding-bottom:16px;border-bottom:1px solid var(--line)}
+  .brand h1{font-size:22px;font-weight:800;letter-spacing:-.5px;display:flex;align-items:center;gap:10px}
+  .brand .dot{width:9px;height:9px;border-radius:50%;background:var(--up);box-shadow:0 0 12px var(--up);animation:pulse 2.4s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  .brand .sub{font-family:var(--mono);font-size:10.5px;color:var(--gold);letter-spacing:3px;margin-top:5px;text-transform:uppercase}
+  .tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .chip{font-family:var(--mono);font-size:11px;color:var(--muted);border:1px solid var(--line2);
+    border-radius:20px;padding:5px 11px}
+  .chip.ok{color:var(--gold);border-color:var(--gold-dim)}
+  .addbox{display:flex;align-items:center;background:var(--panel);border:1px solid var(--line2);border-radius:8px;overflow:hidden}
+  .addbox input{background:transparent;border:0;color:var(--txt);font-family:var(--mono);font-size:13px;padding:9px 12px;width:150px;outline:none}
+  .addbox input::placeholder{color:var(--dim)}
+  .addbox button{background:var(--gold);color:#1a1206;border:0;font-weight:700;font-size:13px;padding:9px 15px;cursor:pointer;font-family:var(--sans)}
+  .addbox button:hover{filter:brightness(1.1)}
+  .btn{background:var(--panel);border:1px solid var(--line2);color:var(--muted);border-radius:8px;padding:9px 13px;font-size:12.5px;cursor:pointer;font-family:var(--sans)}
+  .btn:hover{border-color:var(--gold-dim);color:var(--txt)}
+  .btn.on{color:var(--gold);border-color:var(--gold-dim)}
+  .btn.ai{background:linear-gradient(135deg,#3a2a08,#241a06);border-color:var(--gold-dim);color:var(--gold);font-weight:700}
+  .btn.ai:hover{filter:brightness(1.2)}
+  .stamp{font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .stamp b{color:var(--down)}
+  .muted{color:var(--muted)} .small{font-size:11px}
+
+  /* 每日推荐面板 */
+  .recPanel{margin-top:16px;border:1px solid var(--gold-dim);border-radius:12px;
+    background:linear-gradient(180deg,#171307,var(--bg2));overflow:hidden;max-height:0;
+    transition:max-height .35s ease,opacity .3s;opacity:0}
+  .recPanel.open{max-height:1600px;opacity:1}
+  .recHead{display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid var(--line)}
+  .recHead .t{font-weight:800;color:var(--gold);font-size:15px}
+  .recBody{padding:16px 18px}
+  .mview{font-size:13.5px;background:var(--panel);border-left:3px solid var(--gold);padding:11px 14px;border-radius:6px;margin-bottom:14px;line-height:1.6}
+  .reccards{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:11px}
+  .reccard{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:12px 13px;border-left-width:3px}
+  .reccard.a-buy{border-left-color:var(--up)} .reccard.a-sell{border-left-color:var(--down)}
+  .reccard.a-hold{border-left-color:var(--flat)} .reccard.a-watch{border-left-color:var(--gold)}
+  .rc-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .badge{font-size:11px;font-weight:800;padding:2px 9px;border-radius:5px;color:#0c0f14}
+  .badge.a-buy{background:var(--up)} .badge.a-sell{background:var(--down)}
+  .badge.a-hold{background:var(--flat)} .badge.a-watch{background:var(--gold)}
+  .rc-name{font-weight:700;font-size:13.5px} .rc-name em{font-family:var(--mono);font-size:11px;color:var(--muted);font-style:normal}
+  .rc-conf{margin-left:auto;font-size:10.5px;color:var(--muted);font-family:var(--mono)}
+  .rc-reason{font-size:12.5px;color:var(--txt);margin-top:8px;line-height:1.55}
+  .rc-risk{font-size:11.5px;color:var(--up);margin-top:6px}
+  .hnote{margin-top:14px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:11px 14px;font-size:13px}
+  .disc{margin-top:12px;font-size:10.5px;color:var(--dim);line-height:1.6}
+
+  .tablecard{margin-top:18px;border:1px solid var(--line);border-radius:12px;background:linear-gradient(180deg,var(--panel),var(--bg2));overflow:hidden;box-shadow:0 20px 50px -30px rgba(0,0,0,.9)}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  thead th{font-family:var(--mono);font-size:10.5px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);text-align:right;padding:13px 12px;border-bottom:1px solid var(--line);cursor:pointer;user-select:none;white-space:nowrap}
+  thead th:first-child{text-align:left}
+  thead th:hover{color:var(--gold)}
+  thead th .ar{color:var(--gold);font-size:9px;margin-left:3px}
+  tbody td{padding:13px 12px;text-align:right;border-bottom:1px solid rgba(33,43,56,.5);font-family:var(--mono);white-space:nowrap}
+  tbody tr{cursor:pointer;transition:background .12s}
+  tbody tr:hover{background:rgba(224,169,46,.05)}
+  .nm{text-align:left;font-family:var(--sans)}
+  .nm .n{font-weight:700;font-size:14px} .nm .c{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-top:2px}
+  .up{color:var(--up)} .down{color:var(--down)} .flat{color:var(--flat)}
+  .price{font-size:14px;font-weight:700}
+  .pill{display:inline-block;padding:2px 7px;border-radius:5px;font-size:11px;font-weight:700}
+  .rp{display:inline-flex;flex-direction:column;align-items:flex-end;gap:3px;min-width:74px}
+  .rp .track{width:74px;height:5px;border-radius:3px;background:var(--line2);position:relative;overflow:hidden}
+  .rp .mk{position:absolute;top:-2px;width:3px;height:9px;border-radius:2px;transform:translateX(-50%)}
+  .rp .lbl{font-size:9.5px;color:var(--muted)}
+  .spark{width:88px;height:26px;display:block;margin-left:auto}
+  .del{color:var(--dim);font-family:var(--sans);font-size:15px;padding:0 4px;border:0;background:none;cursor:pointer;line-height:1}
+  .del:hover{color:var(--up)}
+  .empty{padding:60px;text-align:center;color:var(--muted);font-size:14px}
+  .spin{display:inline-block;width:15px;height:15px;border:2px solid var(--line2);border-top-color:var(--gold);border-radius:50%;animation:sp .7s linear infinite;vertical-align:-3px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  .legend{margin-top:14px;display:flex;gap:18px;flex-wrap:wrap;font-size:11px;color:var(--muted);font-family:var(--mono)}
+  .legend b{color:var(--txt);font-weight:600}
+  .legend .sw{display:inline-block;width:9px;height:9px;border-radius:2px;vertical-align:middle;margin-right:4px}
+
+  /* 持仓 */
+  .sectitle{margin:26px 0 12px;display:flex;align-items:center;gap:10px;font-size:16px;font-weight:800}
+  .sectitle .tag2{font-family:var(--mono);font-size:10px;color:var(--gold);border:1px solid var(--gold-dim);border-radius:4px;padding:2px 6px;letter-spacing:1px}
+  .folioSum{display:flex;gap:20px;flex-wrap:wrap;font-family:var(--mono);font-size:13px;padding:12px 16px;background:var(--panel);border:1px solid var(--line);border-radius:10px}
+  .folioSum b{font-size:15px}
+  .folioForm{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
+  .folioForm input{background:var(--panel);border:1px solid var(--line2);border-radius:7px;color:var(--txt);font-family:var(--mono);font-size:13px;padding:8px 11px;outline:none}
+  .folioForm input:focus{border-color:var(--gold-dim)}
+  .folioForm .w-code{width:150px} .folioForm .w-num{width:110px} .folioForm .w-date{width:140px}
+  .acts{display:flex;gap:6px;justify-content:flex-end}
+  .mini{background:var(--panel);border:1px solid var(--line2);color:var(--muted);border-radius:6px;font-size:11px;padding:5px 9px;cursor:pointer;font-family:var(--sans)}
+  .mini:hover{color:var(--txt);border-color:var(--gold-dim)}
+  .mini.ai{color:var(--gold);border-color:var(--gold-dim)}
+  .mini.danger:hover{color:var(--up);border-color:var(--up)}
+  .advrow{display:none} .advrow.open{display:table-row}
+  .advrow td{background:var(--bg2);padding:0 12px}
+  .advice{padding:14px;border:1px solid var(--gold-dim);border-radius:9px;margin:8px 0;background:var(--panel)}
+  .akv{display:grid;grid-template-columns:repeat(2,1fr);gap:8px 16px;margin:10px 0;font-size:12.5px}
+  .akv span{display:block;color:var(--muted);font-size:10.5px;font-family:var(--mono);margin-bottom:2px}
+  .paneempty{color:var(--muted);font-size:13px;padding:20px 0;text-align:center}
+
+  /* 抽屉 */
+  .scrim{position:fixed;inset:0;background:rgba(4,7,11,.66);backdrop-filter:blur(3px);opacity:0;pointer-events:none;transition:opacity .25s;z-index:40}
+  .scrim.open{opacity:1;pointer-events:auto}
+  .drawer{position:fixed;top:0;right:0;height:100%;width:min(680px,94vw);z-index:50;background:linear-gradient(180deg,var(--panel2),var(--bg));border-left:1px solid var(--line2);box-shadow:-40px 0 80px -30px rgba(0,0,0,.9);transform:translateX(100%);transition:transform .3s cubic-bezier(.2,.7,.2,1);display:flex;flex-direction:column}
+  .drawer.open{transform:translateX(0)}
+  .dhead{padding:20px 24px;border-bottom:1px solid var(--line);display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
+  .dhead .t1{font-size:21px;font-weight:800} .dhead .t2{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:3px}
+  .dhead .px{font-family:var(--mono);text-align:right} .dhead .px .p{font-size:22px;font-weight:800}
+  .xclose{background:none;border:0;color:var(--muted);font-size:24px;cursor:pointer;line-height:1}
+  .xclose:hover{color:var(--txt)}
+  .tabs{display:flex;gap:4px;padding:10px 18px 0;border-bottom:1px solid var(--line);flex-wrap:wrap}
+  .tab{background:none;border:0;color:var(--muted);font-family:var(--sans);font-size:13px;font-weight:600;padding:9px 14px;cursor:pointer;border-bottom:2px solid transparent}
+  .tab:hover{color:var(--txt)} .tab.on{color:var(--gold);border-bottom-color:var(--gold)}
+  .dbody{flex:1;overflow-y:auto;padding:20px 24px 40px}
+  .pane{display:none} .pane.on{display:block}
+  .kv{display:grid;grid-template-columns:repeat(2,1fr);gap:10px 16px;margin-bottom:18px}
+  .kv .cell{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:11px 13px}
+  .kv .k{font-size:10.5px;color:var(--muted);font-family:var(--mono);text-transform:uppercase;letter-spacing:.4px}
+  .kv .v{font-size:18px;font-weight:800;font-family:var(--mono);margin-top:4px}
+  .band{background:var(--panel);border:1px solid var(--gold-dim);border-radius:9px;padding:14px;margin-bottom:16px}
+  .band .h{font-size:12px;color:var(--gold);font-weight:700;margin-bottom:9px}
+  .band .row{display:flex;justify-content:space-between;font-family:var(--mono);font-size:13px;padding:3px 0}
+  .band .row span:first-child{color:var(--muted)}
+  .note{font-size:11px;color:var(--muted);margin-top:8px;line-height:1.6}
+  .item{border-bottom:1px solid var(--line);padding:12px 0} .item:last-child{border-bottom:0}
+  .item .top{display:flex;justify-content:space-between;gap:12px;align-items:baseline}
+  .item .ttl{font-size:13.5px;font-weight:600;line-height:1.45}
+  .item .ttl a{color:var(--txt);text-decoration:none} .item .ttl a:hover{color:var(--gold);text-decoration:underline}
+  .item .meta{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:5px;display:flex;gap:12px;flex-wrap:wrap}
+  .tag{font-size:10.5px;padding:2px 7px;border-radius:5px;background:rgba(224,169,46,.12);color:var(--gold);font-weight:700;white-space:nowrap}
+  .risk-high{background:rgba(255,77,94,.15);color:var(--up)} .risk-mid{background:rgba(224,169,46,.15);color:var(--gold)} .risk-none{background:rgba(34,201,139,.13);color:var(--down)}
+  .seat{display:flex;justify-content:space-between;font-family:var(--mono);font-size:12px;padding:6px 0;border-bottom:1px dashed var(--line)}
+  .seat .inst{color:var(--gold);font-size:9px;border:1px solid var(--gold-dim);border-radius:3px;padding:0 3px;margin-left:5px}
+  .subh{font-size:11px;color:var(--muted);font-family:var(--mono);text-transform:uppercase;letter-spacing:1px;margin:18px 0 8px;border-left:2px solid var(--gold);padding-left:8px}
+
+  /* 名词解释弹窗 */
+  .modal{position:fixed;inset:0;z-index:60;background:rgba(4,7,11,.72);backdrop-filter:blur(4px);display:none;align-items:center;justify-content:center;padding:24px}
+  .modal.open{display:flex}
+  .modalcard{width:min(720px,96vw);max-height:86vh;overflow-y:auto;background:linear-gradient(180deg,var(--panel2),var(--bg));border:1px solid var(--line2);border-radius:14px;padding:24px 26px}
+  .modalcard h2{font-size:18px;margin-bottom:4px} .modalcard .sub2{font-size:12px;color:var(--muted);margin-bottom:16px}
+  .gitem{display:grid;grid-template-columns:130px 1fr;gap:14px;padding:11px 0;border-bottom:1px solid var(--line)}
+  .gitem:last-child{border-bottom:0}
+  .gk{font-weight:700;font-size:13px;color:var(--gold)} .gv{font-size:13px;line-height:1.65;color:var(--txt)}
+
+  /* 浮动 tooltip */
+  #tip{position:fixed;z-index:80;display:none;max-width:320px;background:#05070b;border:1px solid var(--gold-dim);border-radius:8px;padding:9px 12px;font-size:12px;line-height:1.55;color:var(--txt);box-shadow:0 10px 30px -8px rgba(0,0,0,.8);pointer-events:none}
+  @media(max-width:640px){.akv,.kv{grid-template-columns:1fr}.gitem{grid-template-columns:1fr;gap:2px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand"><h1><span class="dot"></span>观察台</h1><div class="sub">A-Share Watchdesk</div></div>
+    <div class="tools">
+      <span class="chip" id="aichip">🤖 …</span>
+      <span class="stamp" id="stamp">—</span>
+      <button class="btn ai ai-only" onclick="runDaily()">🤖 每日推荐</button>
+      <button class="btn" onclick="openGloss()">📖 名词解释</button>
+      <div class="addbox">
+        <input id="addcode" placeholder="加自选 代码/名称" maxlength="9" onkeydown="if(event.key==='Enter')addStock()">
+        <button onclick="addStock()">＋加入</button>
+      </div>
+      <button class="btn" id="autobtn" onclick="toggleAuto()">自动刷新 关</button>
+      <button class="btn" onclick="load();loadPortfolio()">↻ 刷新</button>
+    </div>
+  </header>
+
+  <!-- 每日 AI 推荐 -->
+  <section class="recPanel" id="recPanel">
+    <div class="recHead"><div class="t">🤖 今日 AI 推荐</div><button class="del" style="font-size:18px" onclick="closeRec()">✕</button></div>
+    <div class="recBody" id="recBody"></div>
+  </section>
+
+  <!-- 自选股对比 -->
+  <div class="sectitle">自选股对比 <span class="tag2">WATCHLIST</span></div>
+  <div class="tablecard">
+    <table><thead><tr id="head"></tr></thead>
+    <tbody id="rows"><tr><td colspan="12" class="empty"><span class="spin"></span> 加载中…</td></tr></tbody></table>
+  </div>
+  <div class="legend">
+    <span><span class="sw" style="background:var(--up)"></span><b>红=涨</b> / <span class="sw" style="background:var(--down)"></span><b>绿=跌</b>（A股惯例）</span>
+    <span>把鼠标悬到<b>表头 ⓘ</b> 看名词解释</span>
+    <span class="muted">点任意一行 → 深挖研报/龙虎榜/解禁/资金流</span>
+  </div>
+
+  <!-- 持仓 -->
+  <div class="sectitle">我的持仓 <span class="tag2">PORTFOLIO</span></div>
+  <div class="folioSum" id="folioSum"><span class="muted">加载中…</span></div>
+  <div class="folioForm">
+    <input id="h_code" class="w-code" placeholder="代码 如 002415">
+    <input id="h_shares" class="w-num" placeholder="股数 如 100" inputmode="numeric">
+    <input id="h_cost" class="w-num" placeholder="成本价 如 34.5" inputmode="decimal">
+    <input id="h_date" class="w-date" placeholder="买入日 2026-07-10">
+    <button class="btn ai" onclick="addHolding()">＋ 记录持仓</button>
+  </div>
+  <div class="tablecard">
+    <table><thead><tr>
+      <th style="text-align:left">名称</th><th>股数</th><th data-tip="你买入时的每股价格">成本价 ⓘ</th>
+      <th>现价</th><th>市值</th><th data-tip="（现价-成本）÷成本。红=赚 绿=亏">盈亏 ⓘ</th><th>买入日</th><th></th>
+    </tr></thead><tbody id="folioRows"></tbody></table>
+  </div>
+  <div class="legend"><span class="muted">「持仓」只是本地记录，方便算盈亏和让 AI 结合你的成本给卖出/止损建议；不连券商、不影响真实账户。</span></div>
+</div>
+
+<!-- 深挖抽屉 -->
+<div class="scrim" id="scrim" onclick="closeDrawer()"></div>
+<aside class="drawer" id="drawer">
+  <div class="dhead">
+    <div><div class="t1" id="d_name">—</div><div class="t2" id="d_code">—</div></div>
+    <div style="display:flex;gap:14px;align-items:flex-start">
+      <div class="px"><div class="p" id="d_price">—</div><div id="d_chg" class="small">—</div></div>
+      <button class="xclose" onclick="closeDrawer()">×</button>
+    </div>
+  </div>
+  <div class="tabs" id="tabs">
+    <button class="tab on" data-p="ov" onclick="tab('ov')">概览</button>
+    <button class="tab" data-p="rp" onclick="tab('rp')">研报</button>
+    <button class="tab" data-p="lhb" onclick="tab('lhb')">龙虎榜</button>
+    <button class="tab" data-p="lk" onclick="tab('lk')">解禁风险</button>
+    <button class="tab" data-p="ff" onclick="tab('ff')">资金流</button>
+  </div>
+  <div class="dbody">
+    <div class="pane on" id="pane_ov"></div><div class="pane" id="pane_rp"></div>
+    <div class="pane" id="pane_lhb"></div><div class="pane" id="pane_lk"></div><div class="pane" id="pane_ff"></div>
+  </div>
+</aside>
+
+<!-- 名词解释弹窗 -->
+<div class="modal" id="glossModal" onclick="if(event.target===this)closeGloss()">
+  <div class="modalcard">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start">
+      <div><h2>📖 名词解释</h2><div class="sub2">看板上每个名词的新手向说明 · A股红涨绿跌</div></div>
+      <button class="xclose" onclick="closeGloss()">×</button>
+    </div>
+    <div id="glossBody"></div>
+  </div>
+</div>
+
+<div id="tip"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

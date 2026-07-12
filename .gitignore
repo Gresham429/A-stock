@@ -1,0 +1,36 @@
+# ── 密钥 / 敏感信息（绝不提交）──
+.env
+.env.*
+
+# ── 本地工具 / 编辑器配置 ──
+.claude/
+.vscode/
+.idea/
+*.code-workspace
+
+# ── 本地数据（应用自动生成）──
+watchlist.json
+portfolio.json
+
+# ── Python 编译产物 / 缓存 ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# ── 操作系统 / 日志 ──
+.DS_Store
+Thumbs.db
+*.swp
+*.log
+logs/

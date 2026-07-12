@@ -122,10 +122,11 @@ async function addStock(){
 async function delStock(code){
   await fetch('/api/watchlist/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code})}); load();
 }
+const REFRESH_MS=30000;   // 自动刷新间隔 30 秒
 function toggleAuto(){
   const b=document.getElementById('autobtn');
   if(autoTimer){clearInterval(autoTimer);autoTimer=null;b.textContent='自动刷新 关';b.classList.remove('on');}
-  else{autoTimer=setInterval(()=>{load();loadPortfolio();},60000);b.textContent='自动刷新 开·60s';b.classList.add('on');}
+  else{autoTimer=setInterval(()=>{load();loadPortfolio();},REFRESH_MS);b.textContent='自动刷新 开·30s';b.classList.add('on');}
 }
 
 /* ── 深挖抽屉 ── */
@@ -515,3 +516,4 @@ initTooltips();
 loadConfig();
 load();
 loadPortfolio();
+toggleAuto();   // 默认开启自动刷新（30s）

@@ -37,6 +37,8 @@ const COLS=[
   {k:'del',t:'',s:null,tip:''},
 ];
 let DATA=[], sortKey='net20', sortDir=-1, autoTimer=null, LLM=false, MODEL='', WEB=false;
+// 请求令牌：每次发起自增；异步响应回来前若已非最新，则丢弃（防面板/抽屉切换时旧响应错位）
+let recSeq=0, detailSeq=0;
 
 const clr=v=> v>0?'up':v<0?'down':'flat';
 const sgn=v=> v>0?'+':'';
@@ -135,6 +137,7 @@ function tab(p){
 function closeDrawer(){document.getElementById('drawer').classList.remove('open');document.getElementById('scrim').classList.remove('open');}
 function loading(id){document.getElementById(id).innerHTML='<div class="paneempty"><span class="spin"></span> 拉取中…</div>';}
 async function openDetail(code){
+  const gen=++detailSeq;   // 快速切换股票时，作废上一只的在飞请求
   document.getElementById('drawer').classList.add('open');
   document.getElementById('scrim').classList.add('open');
   tab('ov');
@@ -143,11 +146,12 @@ async function openDetail(code){
   document.getElementById('d_price').textContent='—'; document.getElementById('d_chg').textContent='';
   ['ov','kl','rp','lhb','lk','ff'].forEach(p=>loading('pane_'+p));
   // K线独立并行加载(快)，先渲染
-  fetch('/api/kline/'+code).then(r=>r.json()).then(k=>renderKline(k.kline||[]))
-    .catch(()=>{document.getElementById('pane_kl').innerHTML='<div class="paneempty">K线加载失败</div>';});
+  fetch('/api/kline/'+code).then(r=>r.json()).then(k=>{ if(gen!==detailSeq)return; renderKline(k.kline||[]); })
+    .catch(()=>{ if(gen!==detailSeq)return; document.getElementById('pane_kl').innerHTML='<div class="paneempty">K线加载失败</div>'; });
   let j;
   try{ j=await (await fetch('/api/detail/'+code)).json(); }
-  catch(e){ document.getElementById('pane_ov').innerHTML='<div class="paneempty">加载失败：'+e+'</div>'; return; }
+  catch(e){ if(gen!==detailSeq)return; document.getElementById('pane_ov').innerHTML='<div class="paneempty">加载失败：'+e+'</div>'; return; }
+  if(gen!==detailSeq) return;   // 已切到别的股票，丢弃过期响应
   renderDetail(j);
 }
 function renderDetail(j){
@@ -337,6 +341,7 @@ async function checkWebSearch(probe){
 /* ── 每日 AI 推荐 ── */
 const ACT={buy:['买入','a-buy'],add:['加仓','a-buy'],hold:['持有','a-hold'],reduce:['减仓','a-sell'],sell:['卖出','a-sell'],watch:['观望','a-watch']};
 async function runDaily(){
+  const gen=++recSeq;
   const box=document.getElementById('recBody'); const panel=document.getElementById('recPanel');
   document.getElementById('recTitle').textContent='🤖 自选股推荐（含持仓）';
   document.getElementById('recControls').style.display='none';
@@ -344,7 +349,8 @@ async function runDaily(){
   box.innerHTML='<div class="paneempty"><span class="spin"></span> '+MODEL+' 正在分析自选股与持仓…（推理模型约需 15~40 秒）</div>';
   let j;
   try{ j=await (await fetch('/api/recommend/daily',{method:'POST'})).json(); }
-  catch(e){ box.innerHTML='<div class="paneempty">请求失败：'+e+'</div>'; return; }
+  catch(e){ if(gen!==recSeq)return; box.innerHTML='<div class="paneempty">请求失败：'+e+'</div>'; return; }
+  if(gen!==recSeq) return;   // 已切到别的请求，丢弃这次过期响应
   if(!j.ok){ box.innerHTML='<div class="paneempty">生成失败：'+(j.msg||'')+'</div>'; return; }
   const r=j.result||{};
   let h=`<div class="mview">📊 ${r.market_view||''}</div>`;
@@ -359,16 +365,18 @@ async function runDaily(){
   h+=`<div class="disc">以上为 ${j.model} 基于当前客观数据生成的参考信号，${j.updated} · 不构成投资建议，据此操作风险自负。</div>`;
   box.innerHTML=h;
 }
-function closeRec(){document.getElementById('recPanel').classList.remove('open');}
+function closeRec(){ ++recSeq; document.getElementById('recPanel').classList.remove('open'); }
 
 /* ── 全市场筛选 ── */
 function openScreen(){
+  ++recSeq;   // 作废在飞的旧请求，避免其晚返回覆盖本面板
   document.getElementById('recTitle').textContent='🔍 全市场选股（跨板块 · 侧重科技）';
   document.getElementById('recControls').style.display='flex';
   document.getElementById('recPanel').classList.add('open');
   document.getElementById('recBody').innerHTML='<div class="paneempty">选资金规模与侧重板块 → 点「开始筛选」。DeepSeek 会从 44 只科技股里按你的资金和板块跨板块选股。</div>';
 }
 async function runScreen(){
+  const gen=++recSeq;
   const cap=+document.getElementById('scr_capital').value;
   const focus=document.getElementById('scr_focus').value;
   const box=document.getElementById('recBody');
@@ -376,7 +384,8 @@ async function runScreen(){
   let j;
   try{ j=await (await fetch('/api/recommend/screen',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({capital:cap,focus_sector:focus})})).json(); }
-  catch(e){ box.innerHTML='<div class="paneempty">请求失败：'+e+'</div>'; return; }
+  catch(e){ if(gen!==recSeq)return; box.innerHTML='<div class="paneempty">请求失败：'+e+'</div>'; return; }
+  if(gen!==recSeq) return;   // 已切到别的请求，丢弃这次过期响应
   if(!j.ok){ box.innerHTML='<div class="paneempty">筛选失败：'+(j.msg||'')+'</div>'; return; }
   const r=j.result||{};
   let h=`<div class="mview">🔍 候选 ${j.candidates} 只 · 资金 ${(+j.capital).toLocaleString()} 元${j.focus?' · 侧重 '+j.focus:''}<br>📊 ${r.overall||''}</div>`;

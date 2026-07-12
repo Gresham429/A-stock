@@ -108,8 +108,6 @@
   /* 持仓 */
   .sectitle{margin:26px 0 12px;display:flex;align-items:center;gap:10px;font-size:16px;font-weight:800}
   .sectitle .tag2{font-family:var(--mono);font-size:10px;color:var(--gold);border:1px solid var(--gold-dim);border-radius:4px;padding:2px 6px;letter-spacing:1px}
-  .folioSum{display:flex;gap:20px;flex-wrap:wrap;font-family:var(--mono);font-size:13px;padding:12px 16px;background:var(--panel);border:1px solid var(--line);border-radius:10px}
-  .folioSum b{font-size:15px}
   .folioForm{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
   .folioForm input{background:var(--panel);border:1px solid var(--line2);border-radius:7px;color:var(--txt);font-family:var(--mono);font-size:13px;padding:8px 11px;outline:none}
   .folioForm input:focus{border-color:var(--gold-dim)}
@@ -125,6 +123,30 @@
   .akv{display:grid;grid-template-columns:repeat(2,1fr);gap:8px 16px;margin:10px 0;font-size:12.5px}
   .akv span{display:block;color:var(--muted);font-size:10.5px;font-family:var(--mono);margin-bottom:2px}
   .paneempty{color:var(--muted);font-size:13px;padding:20px 0;text-align:center}
+
+  /* 筛选控制条 */
+  .recControls{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:12px 18px;border-bottom:1px solid var(--line);background:rgba(224,169,46,.04)}
+  .recControls label{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:7px}
+  .recControls select{background:var(--panel);border:1px solid var(--line2);color:var(--txt);border-radius:7px;padding:7px 10px;font-family:var(--sans);font-size:13px;outline:none}
+  .recControls select:focus{border-color:var(--gold-dim)}
+  .pick-add{margin-left:auto;font-size:10.5px;padding:3px 8px;border-radius:5px;background:var(--panel);border:1px solid var(--line2);color:var(--gold);cursor:pointer}
+  .pick-add:hover{border-color:var(--gold-dim)}
+  .rc-sector{font-size:10px;color:var(--muted);border:1px solid var(--line2);border-radius:4px;padding:1px 6px}
+  .rc-lot{font-family:var(--mono);font-size:11px;color:var(--txt)}
+  .planbox{margin-top:14px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 14px;font-size:12.5px;line-height:1.7}
+  .planbox b{color:var(--gold)}
+
+  /* 资产总览 */
+  .assetGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+  .assetCard{background:linear-gradient(180deg,var(--panel),var(--bg2));border:1px solid var(--line);border-radius:11px;padding:14px 16px}
+  .assetCard .lab{font-size:10.5px;color:var(--muted);font-family:var(--mono);text-transform:uppercase;letter-spacing:.5px}
+  .assetCard .big{font-size:23px;font-weight:800;font-family:var(--mono);margin-top:6px;letter-spacing:-.5px}
+  .assetCard .sub{font-size:11.5px;font-family:var(--mono);margin-top:3px}
+  .assetCard.hl{border-color:var(--gold-dim)}
+
+  /* K线 / 箱形图 */
+  .chartwrap{width:100%;overflow-x:auto}
+  .chartcap{font-size:11px;color:var(--muted);margin:4px 0 10px;line-height:1.6}
 
   /* 抽屉 */
   .scrim{position:fixed;inset:0;background:rgba(4,7,11,.66);backdrop-filter:blur(3px);opacity:0;pointer-events:none;transition:opacity .25s;z-index:40}
@@ -182,7 +204,8 @@
     <div class="tools">
       <span class="chip" id="aichip">🤖 …</span>
       <span class="stamp" id="stamp">—</span>
-      <button class="btn ai ai-only" onclick="runDaily()">🤖 每日推荐</button>
+      <button class="btn ai ai-only" onclick="runDaily()">🤖 自选推荐</button>
+      <button class="btn ai ai-only" onclick="openScreen()">🔍 全市场选股</button>
       <button class="btn" onclick="openGloss()">📖 名词解释</button>
       <div class="addbox">
         <input id="addcode" placeholder="加自选 代码/名称" maxlength="9" onkeydown="if(event.key==='Enter')addStock()">
@@ -193,9 +216,34 @@
     </div>
   </header>
 
-  <!-- 每日 AI 推荐 -->
+  <!-- AI 推荐 / 全市场筛选 -->
   <section class="recPanel" id="recPanel">
-    <div class="recHead"><div class="t">🤖 今日 AI 推荐</div><button class="del" style="font-size:18px" onclick="closeRec()">✕</button></div>
+    <div class="recHead"><div class="t" id="recTitle">🤖 AI 推荐</div><button class="del" style="font-size:18px" onclick="closeRec()">✕</button></div>
+    <div class="recControls" id="recControls" style="display:none">
+      <label>资金规模
+        <select id="scr_capital">
+          <option value="10000">1 万</option><option value="20000">2 万</option>
+          <option value="30000">3 万</option><option value="50000">5 万</option>
+          <option value="100000">10 万</option>
+        </select>
+      </label>
+      <label>侧重板块
+        <select id="scr_focus">
+          <option value="">不限（全科技）</option>
+          <option value="半导体设备材料">半导体设备材料</option>
+          <option value="半导体设计">半导体设计</option>
+          <option value="晶圆制造封测">晶圆制造封测</option>
+          <option value="AI算力光模块">AI算力光模块</option>
+          <option value="软件信创SaaS">软件信创SaaS</option>
+          <option value="消费电子果链">消费电子果链</option>
+          <option value="通信网络设备">通信网络设备</option>
+          <option value="安防与视觉">安防与视觉</option>
+          <option value="面板显示PCB">面板显示PCB</option>
+        </select>
+      </label>
+      <button class="btn ai" onclick="runScreen()">🔍 开始筛选</button>
+      <span class="small muted">从 44 只科技股跨板块筛选，约 40~80 秒</span>
+    </div>
     <div class="recBody" id="recBody"></div>
   </section>
 
@@ -211,9 +259,9 @@
     <span class="muted">点任意一行 → 深挖研报/龙虎榜/解禁/资金流</span>
   </div>
 
-  <!-- 持仓 -->
-  <div class="sectitle">我的持仓 <span class="tag2">PORTFOLIO</span></div>
-  <div class="folioSum" id="folioSum"><span class="muted">加载中…</span></div>
+  <!-- 资产总览 + 持仓 -->
+  <div class="sectitle">资产总览 <span class="tag2">ASSETS</span></div>
+  <div class="assetGrid" id="assetGrid"><div class="muted small" style="padding:12px">加载中…</div></div>
   <div class="folioForm">
     <input id="h_code" class="w-code" placeholder="代码 如 002415">
     <input id="h_shares" class="w-num" placeholder="股数 如 100" inputmode="numeric">
@@ -224,7 +272,8 @@
   <div class="tablecard">
     <table><thead><tr>
       <th style="text-align:left">名称</th><th>股数</th><th data-tip="你买入时的每股价格">成本价 ⓘ</th>
-      <th>现价</th><th>市值</th><th data-tip="（现价-成本）÷成本。红=赚 绿=亏">盈亏 ⓘ</th><th>买入日</th><th></th>
+      <th>现价</th><th>市值</th><th data-tip="（现价-成本）÷成本。红=赚 绿=亏">总盈亏 ⓘ</th>
+      <th data-tip="当日盈亏=股数×(现价-昨收)">当日 ⓘ</th><th>买入日</th><th></th>
     </tr></thead><tbody id="folioRows"></tbody></table>
   </div>
   <div class="legend"><span class="muted">「持仓」只是本地记录，方便算盈亏和让 AI 结合你的成本给卖出/止损建议；不连券商、不影响真实账户。</span></div>
@@ -242,13 +291,14 @@
   </div>
   <div class="tabs" id="tabs">
     <button class="tab on" data-p="ov" onclick="tab('ov')">概览</button>
+    <button class="tab" data-p="kl" onclick="tab('kl')">K线/箱形</button>
     <button class="tab" data-p="rp" onclick="tab('rp')">研报</button>
     <button class="tab" data-p="lhb" onclick="tab('lhb')">龙虎榜</button>
-    <button class="tab" data-p="lk" onclick="tab('lk')">解禁风险</button>
+    <button class="tab" data-p="lk" onclick="tab('lk')">解禁</button>
     <button class="tab" data-p="ff" onclick="tab('ff')">资金流</button>
   </div>
   <div class="dbody">
-    <div class="pane on" id="pane_ov"></div><div class="pane" id="pane_rp"></div>
+    <div class="pane on" id="pane_ov"></div><div class="pane" id="pane_kl"></div><div class="pane" id="pane_rp"></div>
     <div class="pane" id="pane_lhb"></div><div class="pane" id="pane_lk"></div><div class="pane" id="pane_ff"></div>
   </div>
 </aside>

@@ -26,6 +26,7 @@ import datasources as ds
 import llm
 import portfolio
 import store
+import universe
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -74,27 +75,38 @@ def overview():
 
 @app.route("/api/detail/<code>")
 def detail(code: str):
-    """单只深挖：研报 + 龙虎榜 + 解禁 + 资金流序列。"""
+    """单只深挖：研报 + 龙虎榜 + 解禁 + 资金流 + 财报 + 新闻。"""
     code = ds.normalize(code)
     quotes = ds.tencent_quote([code])
     q = quotes.get(code, {})
     metrics = ds.sina_metrics(code)
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        fut_reports = pool.submit(ds.eastmoney_reports, code)
-        fut_lhb = pool.submit(ds.dragon_tiger, code)
-        fut_lock = pool.submit(ds.lockup_expiry, code)
-        reports = fut_reports.result()
-        lhb = fut_lhb.result()
-        lockup = fut_lock.result()
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futs = {
+            "reports": pool.submit(ds.eastmoney_reports, code),
+            "lhb": pool.submit(ds.dragon_tiger, code),
+            "lock": pool.submit(ds.lockup_expiry, code),
+            "fin": pool.submit(ds.financial_summary, code),
+            "news": pool.submit(ds.stock_news, code),
+        }
+        out = {k: f.result() for k, f in futs.items()}
     return jsonify({
         "code": code,
         "quote": q,
         "metrics": metrics,
         "band": ds.scenario_band(q.get("price", 0), metrics.get("vol")),
-        "reports": reports,
-        "dragon_tiger": lhb,
-        "lockup": lockup,
+        "reports": out["reports"],
+        "dragon_tiger": out["lhb"],
+        "lockup": out["lock"],
+        "financials": out["fin"],
+        "news": out["news"],
     })
+
+
+@app.route("/api/kline/<code>")
+def kline(code: str):
+    """日K线 OHLC（蜡烛图 + 箱形图用）。"""
+    return jsonify({"code": ds.normalize(code),
+                    "kline": ds.sina_kline(ds.normalize(code), num=120)})
 
 
 @app.route("/api/watchlist")
@@ -178,7 +190,7 @@ def recommend_daily():
 
 @app.route("/api/recommend/position/<code>", methods=["POST"])
 def recommend_position(code: str):
-    """单只持仓的卖出/加仓/止损建议。"""
+    """单只持仓的卖出/加仓/止损建议（结合波动史 + 财报 + 新闻）。"""
     if not config.llm_enabled():
         return jsonify({"ok": False, "msg": "未配置 DeepSeek key"}), 400
     code = ds.normalize(code)
@@ -190,12 +202,90 @@ def recommend_position(code: str):
     enriched = [h for h in portfolio.with_pnl(quotes) if h.get("code") == code]
     if enriched:
         holding = enriched[0]
-    metrics = ds.sina_metrics(code)
+    # 并发拉取：波动指标 / 财报 / 新闻 / K线(算60日高低+振幅)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        f_metrics = pool.submit(ds.sina_metrics, code)
+        f_fin = pool.submit(ds.financial_summary, code)
+        f_news = pool.submit(ds.stock_news, code)
+        f_kline = pool.submit(ds.sina_kline, code, 60)
+        metrics, financials, news, kl = (f_metrics.result(), f_fin.result(),
+                                         f_news.result(), f_kline.result())
+    vol_hist = _vol_hist(kl)
     try:
-        advice = llm.position_advice(holding, q, metrics)
+        advice = llm.position_advice(holding, q, metrics, financials, news, vol_hist)
     except llm.LLMError as e:
         return jsonify({"ok": False, "msg": str(e)}), 502
-    return jsonify({"ok": True, "advice": advice, "model": config.DEEPSEEK_MODEL})
+    return jsonify({"ok": True, "advice": advice, "financials": financials,
+                    "news": news[:5], "model": config.DEEPSEEK_MODEL})
+
+
+@app.route("/api/recommend/screen", methods=["POST"])
+def recommend_screen():
+    """全市场科技股筛选：跨板块 + 按资金规模。body: {capital?, focus_sector?}。"""
+    if not config.llm_enabled():
+        return jsonify({"ok": False, "msg": "未配置 DeepSeek key"}), 400
+    body = request.json or {}
+    try:
+        capital = float(body.get("capital", 10000))
+    except (TypeError, ValueError):
+        capital = 10000.0
+    focus = body.get("focus_sector", "") or ""
+    rows = _screen_rows(capital)
+    if not rows:
+        return jsonify({"ok": False, "msg": "候选池行情拉取失败，请重试"}), 502
+    try:
+        result = llm.market_screen(rows, capital, focus)
+    except llm.LLMError as e:
+        return jsonify({"ok": False, "msg": str(e)}), 502
+    return jsonify({"ok": True, "result": result, "candidates": len(rows),
+                    "capital": capital, "focus": focus,
+                    "model": config.DEEPSEEK_MODEL, "updated": _now()})
+
+
+def _vol_hist(kl: list[dict]) -> dict:
+    """从日K算 60日高低/当前 + 近20日日振幅均值(%)。"""
+    if not kl:
+        return {}
+    closes = [k["close"] for k in kl]
+    recent = kl[-20:]
+    atr = [((k["high"] - k["low"]) / k["close"] * 100) for k in recent if k["close"]]
+    return {
+        "hi": round(max(k["high"] for k in kl), 2),
+        "lo": round(min(k["low"] for k in kl), 2),
+        "cur": closes[-1],
+        "atr_pct": round(sum(atr) / len(atr), 1) if atr else None,
+    }
+
+
+def _screen_rows(capital: float) -> list[dict]:
+    """候选池行情 + 指标（负担得起优先，跨板块，控数量以省 token）。"""
+    codes = universe.all_codes()
+    quotes = ds.tencent_quote(codes)
+    if not quotes:
+        return []
+    # 先按 1 手成本可负担过滤，再按板块限量，避免喂给 LLM 过多
+    affordable = [c for c in codes if quotes.get(c, {}).get("lot_cost", 9e9) <= capital]
+    pool_codes = affordable or codes  # 若资金太小买不起任何 1 手，则退回全池给参考
+    per_sector: dict[str, int] = {}
+    picked: list[str] = []
+    for c in pool_codes:
+        sec = universe.sector_of(c)
+        if per_sector.get(sec, 0) < 5:          # 每板块最多 5 只
+            per_sector[sec] = per_sector.get(sec, 0) + 1
+            picked.append(c)
+        if len(picked) >= 28:                    # 总量上限，控 token 与时延
+            break
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        metrics_list = list(pool.map(ds.sina_metrics, picked))
+    rows = []
+    for c, m in zip(picked, metrics_list):
+        q = quotes.get(c, {})
+        rows.append({"code": c, "name": q.get("name", c), "sector": universe.sector_of(c),
+                     "price": q.get("price"), "pe_ttm": q.get("pe_ttm"), "pb": q.get("pb"),
+                     "vol": m.get("vol"), "cum20": m.get("cum20"),
+                     "range_pos": m.get("range_pos"), "net20": m.get("net20"),
+                     "lot_cost": q.get("lot_cost")})
+    return rows
 
 
 def _now() -> str:

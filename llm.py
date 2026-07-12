@@ -144,27 +144,101 @@ picks 覆盖全部自选股，按操作优先级排序(该买/该卖的排前面
     return _parse_json(content)
 
 
+def _fin_table(financials: list[dict[str, Any]]) -> str:
+    if not financials:
+        return "（暂无财报数据）"
+    lines = ["报告期 营收(亿) 营收同比% 归母净利(亿) 净利同比%"]
+    for f in financials:
+        lines.append(" ".join([f.get("period", ""), _fmt(f.get("revenue_yi")),
+                               _fmt(f.get("revenue_yoy")), _fmt(f.get("profit_yi")),
+                               _fmt(f.get("profit_yoy"))]))
+    return "\n".join(lines)
+
+
 def position_advice(holding: dict[str, Any], quote: dict[str, Any],
-                    metrics: dict[str, Any]) -> dict[str, Any]:
-    """单只持仓的卖出/买入时机建议。"""
-    prompt = f"""我持有下面这只股票，请给出明确的卖出/加仓/止损时机参考。
+                    metrics: dict[str, Any], financials: list[dict[str, Any]] | None = None,
+                    news: list[dict[str, Any]] | None = None,
+                    vol_hist: dict[str, Any] | None = None) -> dict[str, Any]:
+    """单只持仓的卖出/买入时机建议（严格结合波动史 + 财报 + 近期新闻）。"""
+    news_txt = "\n".join(f"- {n.get('date','')[:10]} {n.get('title','')}"
+                         for n in (news or [])[:6]) or "（暂无近期新闻）"
+    vh = vol_hist or {}
+    prompt = f"""我持有下面这只股票，请**严格结合**下列客观数据给出卖出/加仓/止损时机参考。
 
-股票：{quote.get('name','')} {holding.get('code','')}
+【标的】{quote.get('name','')} {holding.get('code','')}
 持股数：{holding.get('shares')}  成本价：{holding.get('cost_price')}  买入日：{holding.get('buy_date','')}
-现价：{quote.get('price')}  当前盈亏：{holding.get('pnl_pct')}%
-PE：{quote.get('pe_ttm')}  PB：{quote.get('pb')}
-年化波动：{metrics.get('vol')}%  20日涨幅：{metrics.get('cum20')}%
-区间位置：{metrics.get('range_pos')}%(越接近100越过热)  主力20日净流入：{metrics.get('net20')}亿
+现价：{quote.get('price')}  当前盈亏：{holding.get('pnl_pct')}%  PE：{quote.get('pe_ttm')}  PB：{quote.get('pb')}
 
+【波动与位置】年化波动：{metrics.get('vol')}%  20日涨幅：{metrics.get('cum20')}%
+区间位置：{metrics.get('range_pos')}%(越接近100越过热)  主力20日净流入：{metrics.get('net20')}亿
+近60日最高/最低/当前：{vh.get('hi')}/{vh.get('lo')}/{vh.get('cur')}  近20日振幅均值：{vh.get('atr_pct')}%
+
+【财报(利润表)】
+{_fin_table(financials or [])}
+
+【近期新闻(公司/题材/政策面)】
+{news_txt}
+
+要求：结合基本面(营收/利润增速)、估值、技术位置(区间/波动/支撑压力)、资金、新闻面综合判断。
 严格返回 JSON：
 {{
   "action":"hold|add|reduce|sell",
-  "sell_trigger":"什么条件/价位应卖出(具体)",
-  "add_trigger":"什么条件/价位可加仓(具体)",
-  "stop_loss":"建议止损价位或跌幅",
-  "take_profit":"建议止盈参考",
-  "reason":"综合判断理由(60字内)"
+  "sell_trigger":"具体价位/条件应卖出",
+  "add_trigger":"具体价位/条件可加仓",
+  "stop_loss":"止损价位或跌幅",
+  "take_profit":"止盈参考价位",
+  "fundamental":"基本面一句话(结合财报增速与估值)",
+  "policy_news":"新闻/政策面一句话(若新闻不足则说明)",
+  "reason":"综合结论(80字内)"
 }}"""
     content = _chat([{"role": "system", "content": _DISCLAIMER},
-                     {"role": "user", "content": prompt}], max_tokens=4000)
+                     {"role": "user", "content": prompt}], max_tokens=5000)
+    return _parse_json(content)
+
+
+def market_screen(rows: list[dict[str, Any]], capital: float,
+                  focus_sector: str = "") -> dict[str, Any]:
+    """从科技股候选池跨板块筛选（考虑资金规模与板块，侧重科技）。
+
+    rows: 每项含 code/name/sector/price/pe_ttm/pb/vol/cum20/range_pos/net20/lot_cost。
+    capital: 可用资金(元)，用于判断 1 手是否买得起。
+    """
+    focus = f"用户特别侧重【{focus_sector}】板块，请多给该板块机会。\n" if focus_sector else ""
+    header = ("代码 名称 板块 现价 PE PB 年化波动% 20日涨% 区间位置% 主力20日亿 1手成本元")
+    lines = [header]
+    for r in rows:
+        lines.append(" ".join([
+            r.get("code", ""), r.get("name", ""), r.get("sector", ""),
+            _fmt(r.get("price")), _fmt(r.get("pe_ttm")), _fmt(r.get("pb")),
+            _fmt(r.get("vol")), _fmt(r.get("cum20")), _fmt(r.get("range_pos")),
+            _fmt(r.get("net20")), _fmt(r.get("lot_cost")),
+        ]))
+    prompt = f"""从下面这批 A股科技股候选中，为我做一次跨板块筛选选股。
+
+我的可用资金约 {int(capital)} 元（A股按1手=100股买入，1手成本必须≤资金才买得起）。
+{focus}用户是计算机从业者，偏好科技板块与有波动的标的，但要控制风险、注重板块分散。
+
+【候选池指标】
+{chr(10).join(lines)}
+
+要求：
+1) 优先给 1手成本 ≤ {int(capital)} 元、买得起的标的；
+2) 兼顾不同子板块(别集中在一个板块)，科技方向可多给；
+3) 结合估值(PE别过高)、动能(20日涨)、位置(区间位置越接近100越追高危险)、资金(主力净流入为正更好)、波动(要有波动但非纯投机)；
+4) 给出不同资金情况的建议(如满仓1手 vs 分散多只)。
+
+严格返回 JSON：
+{{
+  "overall":"当前科技板块整体情绪/风险一句话",
+  "picks":[
+    {{"code":"","name":"","sector":"","action":"buy|watch",
+      "confidence":"high|mid|low","lot_cost":0,
+      "reason":"为何入选(结合数据,40字内)","risk":"主要风险(20字内)"}}
+  ],
+  "budget_plan":"1万左右资金的具体配置建议(买哪几只各1手/如何分散)",
+  "sector_view":"各板块简评(半导体/AI算力/软件/消费电子等哪些强哪些弱)"
+}}
+picks 给 6~10 只，按吸引力排序，覆盖至少3个不同板块。"""
+    content = _chat([{"role": "system", "content": _DISCLAIMER},
+                     {"role": "user", "content": prompt}], max_tokens=9000)
     return _parse_json(content)

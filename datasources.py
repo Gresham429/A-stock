@@ -13,6 +13,7 @@ import json
 import logging
 import math
 import random
+import re
 import time
 import urllib.parse
 import urllib.request
@@ -106,6 +107,8 @@ def tencent_quote(codes: list[str]) -> dict[str, dict[str, Any]]:
             "code": code,
             "name": vals[1],
             "price": f(3),
+            "last_close": f(4),      # 昨收（当日盈亏用）
+            "change_amt": f(31),     # 涨跌额
             "chg_pct": f(32),
             "turnover": f(38),
             "pe_ttm": f(39),
@@ -307,3 +310,89 @@ def lockup_expiry(code: str, forward_days: int = 365) -> dict[str, Any]:
         max_ratio = max(u["ratio_pct"] for u in near)
         risk = "high" if max_ratio >= 5 else "mid"
     return {"history": history, "upcoming": upcoming, "risk": risk}
+
+
+# ── 日K线 OHLC（新浪，用于蜡烛图 + 箱形图） ────────────────────────────────
+def sina_kline(code: str, num: int = 120) -> list[dict[str, Any]]:
+    """新浪日K线（前复权口径）。返回时间正序 [{date, open, high, low, close, volume}]。"""
+    sym = market_prefix(code) + code
+    url = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+           f"CN_MarketData.getKLineData?symbol={sym}&scale=240&ma=no&datalen={num}")
+    try:
+        arr = json.loads(_http_get(url, ref="https://finance.sina.com.cn/"))
+    except (OSError, ValueError) as e:
+        logger.warning("新浪K线请求失败 %s: %s", code, e)
+        return []
+    out = []
+    for x in arr:
+        try:
+            out.append({
+                "date": x["day"],
+                "open": float(x["open"]), "high": float(x["high"]),
+                "low": float(x["low"]), "close": float(x["close"]),
+                "volume": float(x.get("volume", 0)),
+            })
+        except (KeyError, ValueError):
+            continue
+    return out
+
+
+# ── 财报摘要（新浪利润表：营收/归母净利 + 同比） ──────────────────────────
+def financial_summary(code: str, periods: int = 4) -> list[dict[str, Any]]:
+    """最近 periods 期利润表关键项。返回 [{period, revenue_yi, revenue_yoy, profit_yi, profit_yoy}]。"""
+    sym = market_prefix(code) + code
+    url = ("https://quotes.sina.cn/cn/api/openapi.php/"
+           "CompanyFinanceService.getFinanceReport2022"
+           f"?paperCode={sym}&source=lrb&type=0&page=1&num={periods}")
+    try:
+        d = json.loads(_http_get(url, ref="https://finance.sina.com.cn/"))
+        report_list = d.get("result", {}).get("data", {}).get("report_list", {}) or {}
+    except (OSError, ValueError) as e:
+        logger.warning("新浪财报请求失败 %s: %s", code, e)
+        return []
+
+    def _pick(items: list[dict], titles: tuple[str, ...]) -> tuple[Any, Any]:
+        for t in titles:
+            for it in items:
+                if it.get("item_title") == t and it.get("item_value") not in (None, ""):
+                    return it.get("item_value"), it.get("item_tongbi")
+        return None, None
+
+    out = []
+    for period in sorted(report_list.keys(), reverse=True)[:periods]:
+        items = report_list[period].get("data", []) or []
+        rev, rev_yoy = _pick(items, ("营业总收入", "营业收入"))
+        prof, prof_yoy = _pick(items, ("归属于母公司所有者的净利润", "净利润"))
+        out.append({
+            "period": f"{period[:4]}-{period[4:6]}-{period[6:8]}",
+            "revenue_yi": round(float(rev) / 1e8, 2) if rev else None,
+            "revenue_yoy": round(float(rev_yoy) * 100, 1) if rev_yoy not in (None, "") else None,
+            "profit_yi": round(float(prof) / 1e8, 2) if prof else None,
+            "profit_yoy": round(float(prof_yoy) * 100, 1) if prof_yoy not in (None, "") else None,
+        })
+    return out
+
+
+# ── 个股新闻（东财 search-api，公司/题材新闻，政策面参考） ──────────────────
+def stock_news(code: str, page_size: int = 8) -> list[dict[str, Any]]:
+    """东财个股新闻。返回 [{date, title, source}]。（部分住宅 IP 间歇返回空，安全降级为 []）"""
+    inner = json.dumps({
+        "uid": "", "keyword": code, "type": ["cmsArticleWebOld"],
+        "client": "web", "clientType": "web", "clientVersion": "curr",
+        "param": {"cmsArticleWebOld": {"searchScope": "default", "sort": "default",
+                  "pageIndex": 1, "pageSize": page_size, "preTag": "", "postTag": ""}},
+    }, separators=(",", ":"))
+    url = ("https://search-api-web.eastmoney.com/search/jsonp?cb=jQ&param="
+           + urllib.parse.quote(inner))
+    try:
+        t = em_get(url, ref="https://so.eastmoney.com/")
+        d = json.loads(t[t.index("(") + 1:t.rindex(")")])
+        arts = d.get("result", {}).get("cmsArticleWebOld", []) or []
+    except (OSError, ValueError) as e:
+        logger.warning("东财个股新闻请求失败 %s: %s", code, e)
+        return []
+    return [{
+        "date": a.get("date", ""),
+        "title": re.sub(r"<[^>]+>", "", a.get("title", "")),
+        "source": a.get("mediaName", ""),
+    } for a in arts]

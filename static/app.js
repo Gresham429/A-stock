@@ -141,7 +141,10 @@ async function openDetail(code){
   document.getElementById('d_name').textContent='加载中…';
   document.getElementById('d_code').textContent=code;
   document.getElementById('d_price').textContent='—'; document.getElementById('d_chg').textContent='';
-  ['ov','rp','lhb','lk','ff'].forEach(p=>loading('pane_'+p));
+  ['ov','kl','rp','lhb','lk','ff'].forEach(p=>loading('pane_'+p));
+  // K线独立并行加载(快)，先渲染
+  fetch('/api/kline/'+code).then(r=>r.json()).then(k=>renderKline(k.kline||[]))
+    .catch(()=>{document.getElementById('pane_kl').innerHTML='<div class="paneempty">K线加载失败</div>';});
   let j;
   try{ j=await (await fetch('/api/detail/'+code)).json(); }
   catch(e){ document.getElementById('pane_ov').innerHTML='<div class="paneempty">加载失败：'+e+'</div>'; return; }
@@ -171,6 +174,20 @@ function renderDetail(j){
       <div class="row"><span>±1σ（约68%概率落此区间）</span><b>${b.low1} ~ ${b.high1} 元（±${b.sigma_pct}%）</b></div>
       <div class="row"><span>±2σ（约95%概率，极端波动）</span><b>${b.low2} ~ ${b.high2} 元</b></div>
       <div class="note">σ 由近20日实际波动年化后折算到1个月。区间只描述“波动幅度”，不代表方向；涨跌概率各半。</div></div>`;
+  }
+  // 财报（利润表）
+  const fin=j.financials||[];
+  if(fin.length){
+    ov+='<div class="subh">财报 · 营收/归母净利 + 同比</div><div class="kv">'+fin.slice(0,4).map(f=>
+      `<div class="cell"><div class="k">${f.period}</div><div class="v" style="font-size:12.5px;line-height:1.6">`
+      +`营收 ${f.revenue_yi??'—'}亿 <span class="${clr(f.revenue_yoy)}" style="font-size:11px">${f.revenue_yoy!=null?sgn(f.revenue_yoy)+f.revenue_yoy+'%':''}</span><br>`
+      +`净利 ${f.profit_yi??'—'}亿 <span class="${clr(f.profit_yoy)}" style="font-size:11px">${f.profit_yoy!=null?sgn(f.profit_yoy)+f.profit_yoy+'%':''}</span></div></div>`).join('')+'</div>';
+  }
+  // 近期新闻
+  const news=j.news||[];
+  if(news.length){
+    ov+='<div class="subh">近期新闻（公司/题材/政策面）</div>'+news.slice(0,5).map(nw=>
+      `<div class="item"><div class="ttl small">${nw.title}</div><div class="meta"><span>${(nw.date||'').slice(0,10)}</span><span>${nw.source||''}</span></div></div>`).join('');
   }
   ov+=`<div class="subh">近30日走势</div>${bigSpark(m.series)}`;
   if(LLM) ov+=`<button class="btn ai" style="margin-top:14px" onclick="askDetailAdvice('${j.code}')">🤖 让 ${MODEL} 分析这只该买还是该卖</button><div id="detailAdvice"></div>`;
@@ -228,6 +245,60 @@ function flowChart(series){
     <text x="${pad}" y="${h-4}" fill="var(--muted)" font-size="10" font-family="monospace">-${mx.toFixed(1)}亿</text></svg>`;
 }
 
+/* ── K线蜡烛图 + 箱形图 ── */
+function renderKline(kl){
+  const pane=document.getElementById('pane_kl');
+  if(!kl||!kl.length){ pane.innerHTML='<div class="paneempty">暂无K线数据</div>'; return; }
+  const win=kl.slice(-60);
+  pane.innerHTML=`<div class="subh">日K线 · 近${win.length}日（红涨绿跌 · MA5/MA20 · 成交量）</div>`
+    +'<div class="chartwrap">'+candlestick(win)+'</div>'
+    +'<div class="chartcap">蜡烛体=当日开盘↔收盘，上下影线=最高/最低价；<span class="up">红实体=收阳(涨)</span>、<span class="down">绿实体=收阴(跌)</span>。橙线 MA5、蓝线 MA20，下方为成交量。</div>'
+    +'<div class="subh">箱形图 · 近'+win.length+'日收盘价分布</div>'
+    +'<div class="chartwrap">'+boxplot(win.map(k=>k.close))+'</div>'
+    +'<div class="chartcap">箱体=价格中间50%区间（下沿 Q1 / 中线=中位数 / 上沿 Q3），须线到最高/最低；<b>★=当前价</b>。价格长期停在箱体内、一旦突破箱体常有方向性行情。</div>';
+}
+function candlestick(kl){
+  const w=640,h=260,padL=46,padR=8,padT=10,volH=50,cH=h-volH-padT-18;
+  const hi=Math.max(...kl.map(k=>k.high)),lo=Math.min(...kl.map(k=>k.low)),rng=hi-lo||1;
+  const n=kl.length,cw=(w-padL-padR)/n,bw=Math.max(1.5,cw*0.62);
+  const yP=p=>padT+(hi-p)/rng*cH;
+  const ma=(i,m)=>{ if(i<m-1)return null; let s=0; for(let k=i-m+1;k<=i;k++)s+=kl[k].close; return s/m; };
+  const maLine=(m,col)=>{let pts=[];for(let i=0;i<n;i++){const v=ma(i,m);if(v!=null)pts.push(`${(padL+i*cw+cw/2).toFixed(1)},${yP(v).toFixed(1)}`);}return pts.length>1?`<polyline points="${pts.join(' ')}" fill="none" stroke="${col}" stroke-width="1.1" opacity=".9"/>`:'';};
+  let candles='';
+  for(let i=0;i<n;i++){const k=kl[i],x=padL+i*cw+cw/2,up=k.close>=k.open,col=up?'var(--up)':'var(--down)';
+    const yO=yP(k.open),yC=yP(k.close),top=Math.min(yO,yC),bh=Math.max(1,Math.abs(yC-yO));
+    candles+=`<line x1="${x.toFixed(1)}" y1="${yP(k.high).toFixed(1)}" x2="${x.toFixed(1)}" y2="${yP(k.low).toFixed(1)}" stroke="${col}" stroke-width="1"/>`
+      +`<rect x="${(x-bw/2).toFixed(1)}" y="${top.toFixed(1)}" width="${bw.toFixed(1)}" height="${bh.toFixed(1)}" fill="${col}"/>`;}
+  const vmax=Math.max(...kl.map(k=>k.volume),1),vY=h-18;
+  let vols='';
+  for(let i=0;i<n;i++){const k=kl[i],x=padL+i*cw+cw/2,vh=k.volume/vmax*volH;
+    vols+=`<rect x="${(x-bw/2).toFixed(1)}" y="${(vY-vh).toFixed(1)}" width="${bw.toFixed(1)}" height="${vh.toFixed(1)}" fill="${k.close>=k.open?'var(--up)':'var(--down)'}" opacity=".5"/>`;}
+  let grid='';
+  for(let g=0;g<=4;g++){const p=hi-rng*g/4,y=padT+cH*g/4;
+    grid+=`<line x1="${padL}" y1="${y.toFixed(1)}" x2="${w-padR}" y2="${y.toFixed(1)}" stroke="var(--line)" stroke-width=".5"/>`
+      +`<text x="4" y="${(y+3).toFixed(1)}" fill="var(--muted)" font-size="9" font-family="monospace">${p.toFixed(2)}</text>`;}
+  return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;min-width:520px;height:${h}px">
+    ${grid}${maLine(5,'var(--gold)')}${maLine(20,'#4aa3ff')}${candles}${vols}
+    <text x="${padL}" y="${h-4}" fill="var(--muted)" font-size="9" font-family="monospace">${kl[0].date.slice(5)}</text>
+    <text x="${w-padR-28}" y="${h-4}" fill="var(--muted)" font-size="9" font-family="monospace">${kl[n-1].date.slice(5)}</text></svg>`;
+}
+function boxplot(vals){
+  const s=[...vals].sort((a,b)=>a-b),n=s.length;
+  const q=p=>{const idx=(n-1)*p,l=Math.floor(idx),h2=Math.ceil(idx);return s[l]+(s[h2]-s[l])*(idx-l);};
+  const min=s[0],q1=q(.25),med=q(.5),q3=q(.75),max=s[n-1],cur=vals[vals.length-1];
+  const w=640,h=128,padL=30,padR=30,y=52,bh=34,rng=(max-min)||1;
+  const X=p=>padL+(p-min)/rng*(w-padL-padR);
+  const lbl=(p,t,dy)=>`<line x1="${X(p).toFixed(1)}" y1="${y-4}" x2="${X(p).toFixed(1)}" y2="${y+bh+4}" stroke="var(--line2)" stroke-width=".5"/><text x="${X(p).toFixed(1)}" y="${dy}" fill="var(--muted)" font-size="9" font-family="monospace" text-anchor="middle">${t}${p.toFixed(2)}</text>`;
+  return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;min-width:520px;height:${h}px">
+    <line x1="${X(min)}" y1="${y+bh/2}" x2="${X(max)}" y2="${y+bh/2}" stroke="var(--muted)" stroke-width="1"/>
+    <line x1="${X(min)}" y1="${y+7}" x2="${X(min)}" y2="${y+bh-7}" stroke="var(--muted)"/>
+    <line x1="${X(max)}" y1="${y+7}" x2="${X(max)}" y2="${y+bh-7}" stroke="var(--muted)"/>
+    <rect x="${X(q1).toFixed(1)}" y="${y}" width="${(X(q3)-X(q1)).toFixed(1)}" height="${bh}" fill="rgba(224,169,46,.14)" stroke="var(--gold)" stroke-width="1"/>
+    <line x1="${X(med).toFixed(1)}" y1="${y}" x2="${X(med).toFixed(1)}" y2="${y+bh}" stroke="var(--gold)" stroke-width="1.6"/>
+    <text x="${X(cur).toFixed(1)}" y="${y-7}" fill="var(--txt)" font-size="13" text-anchor="middle">★</text>
+    ${lbl(min,'低',24)}${lbl(q1,'Q1',108)}${lbl(med,'中',24)}${lbl(q3,'Q3',108)}${lbl(max,'高',24)}</svg>`;
+}
+
 /* ── 配置 / AI 可用性 ── */
 async function loadConfig(){
   try{
@@ -243,6 +314,8 @@ async function loadConfig(){
 const ACT={buy:['买入','a-buy'],add:['加仓','a-buy'],hold:['持有','a-hold'],reduce:['减仓','a-sell'],sell:['卖出','a-sell'],watch:['观望','a-watch']};
 async function runDaily(){
   const box=document.getElementById('recBody'); const panel=document.getElementById('recPanel');
+  document.getElementById('recTitle').textContent='🤖 自选股推荐（含持仓）';
+  document.getElementById('recControls').style.display='none';
   panel.classList.add('open');
   box.innerHTML='<div class="paneempty"><span class="spin"></span> '+MODEL+' 正在分析自选股与持仓…（推理模型约需 15~40 秒）</div>';
   let j;
@@ -263,6 +336,47 @@ async function runDaily(){
   box.innerHTML=h;
 }
 function closeRec(){document.getElementById('recPanel').classList.remove('open');}
+
+/* ── 全市场筛选 ── */
+function openScreen(){
+  document.getElementById('recTitle').textContent='🔍 全市场选股（跨板块 · 侧重科技）';
+  document.getElementById('recControls').style.display='flex';
+  document.getElementById('recPanel').classList.add('open');
+  document.getElementById('recBody').innerHTML='<div class="paneempty">选资金规模与侧重板块 → 点「开始筛选」。DeepSeek 会从 44 只科技股里按你的资金和板块跨板块选股。</div>';
+}
+async function runScreen(){
+  const cap=+document.getElementById('scr_capital').value;
+  const focus=document.getElementById('scr_focus').value;
+  const box=document.getElementById('recBody');
+  box.innerHTML='<div class="paneempty"><span class="spin"></span> '+MODEL+' 正在拉取候选池行情并跨板块筛选…（约 40~90 秒）</div>';
+  let j;
+  try{ j=await (await fetch('/api/recommend/screen',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({capital:cap,focus_sector:focus})})).json(); }
+  catch(e){ box.innerHTML='<div class="paneempty">请求失败：'+e+'</div>'; return; }
+  if(!j.ok){ box.innerHTML='<div class="paneempty">筛选失败：'+(j.msg||'')+'</div>'; return; }
+  const r=j.result||{};
+  let h=`<div class="mview">🔍 候选 ${j.candidates} 只 · 资金 ${(+j.capital).toLocaleString()} 元${j.focus?' · 侧重 '+j.focus:''}<br>📊 ${r.overall||''}</div>`;
+  h+='<div class="reccards">'+(r.picks||[]).map(p=>{
+    const a=ACT[p.action]||['关注','a-watch'];
+    return `<div class="reccard ${a[1]}"><div class="rc-top"><span class="badge ${a[1]}">${a[0]}</span>
+      <span class="rc-name">${p.name||''} <em>${p.code||''}</em></span>
+      <span class="rc-sector">${p.sector||''}</span></div>
+      <div class="rc-reason">${p.reason||''}</div>
+      <div class="rc-top" style="margin-top:8px">
+        <span class="rc-lot">1手 ${p.lot_cost?(+p.lot_cost).toLocaleString():'—'}元</span>
+        ${p.risk?`<span class="rc-risk" style="margin:0">⚠ ${p.risk}</span>`:''}
+        <button class="pick-add" onclick="addPick('${p.code}')">＋自选</button>
+      </div></div>`;
+  }).join('')+'</div>';
+  if(r.budget_plan) h+=`<div class="planbox"><b>💰 ${(+j.capital).toLocaleString()}元 配置建议：</b>${r.budget_plan}</div>`;
+  if(r.sector_view) h+=`<div class="planbox"><b>🧭 板块简评：</b>${r.sector_view}</div>`;
+  h+=`<div class="disc">${j.model} 基于候选池客观指标的筛选参考，${j.updated} · 不构成投资建议。</div>`;
+  box.innerHTML=h;
+}
+async function addPick(code){
+  const j=await (await fetch('/api/watchlist/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code})})).json();
+  if(j.ok){ load(); alert(`已加入自选：${j.name||code}`); } else alert(j.msg||'加入失败');
+}
 
 /* 抽屉里让 AI 分析单只（不必持仓） */
 async function askDetailAdvice(code){
@@ -290,20 +404,25 @@ function adviceHTML(a,model){
     <div><span>加仓条件</span>${a.add_trigger||'—'}</div>
     <div><span>止损参考</span>${a.stop_loss||'—'}</div>
     <div><span>止盈参考</span>${a.take_profit||'—'}</div></div>
-    <div class="rc-reason">${a.reason||''}</div>
-    <div class="disc">AI 参考信号，不构成投资建议。</div></div>`;
+    ${a.fundamental?`<div class="rc-reason"><b>📊 基本面：</b>${a.fundamental}</div>`:''}
+    ${a.policy_news?`<div class="rc-reason"><b>📰 政策/新闻：</b>${a.policy_news}</div>`:''}
+    <div class="rc-reason"><b>结论：</b>${a.reason||''}</div>
+    <div class="disc">AI 参考信号，结合了波动史/财报/新闻，但不构成投资建议。</div></div>`;
 }
 
 /* ── 持仓 ── */
 async function loadPortfolio(){
   let j; try{ j=await (await fetch('/api/portfolio')).json(); }catch(e){return;}
   const s=j.summary||{}, hs=j.holdings||[];
-  const sb=document.getElementById('folioSum');
+  const ag=document.getElementById('assetGrid');
   if(s.count){
-    sb.innerHTML=`<span>持仓 <b>${s.count}</b> 只</span><span>市值 <b>${fmtInt(s.market_value)}</b> 元</span>
-      <span>成本 ${fmtInt(s.cost_value)} 元</span>
-      <span class="${clr(s.pnl_amount)}">盈亏 <b>${sgn(s.pnl_amount)}${fmtInt(s.pnl_amount)}</b> 元（${s.pnl_pct!=null?sgn(s.pnl_pct)+s.pnl_pct+'%':'—'}）</span>`;
-  }else sb.innerHTML='<span class="muted">还没有持仓记录。填下面的表单：代码 + 股数 + 你的买入成本价。</span>';
+    const card=(lab,big,cls,sub)=>`<div class="assetCard${cls?' hl':''}"><div class="lab">${lab}</div><div class="big ${cls}">${big}</div><div class="sub ${cls}">${sub}</div></div>`;
+    ag.innerHTML=
+      card('总市值', fmtInt(s.market_value)+'元','','成本 '+fmtInt(s.cost_value)+'元')
+     +card('总盈亏', (s.pnl_amount>=0?'+':'')+fmtInt(s.pnl_amount)+'元', clr(s.pnl_amount), s.pnl_pct!=null?sgn(s.pnl_pct)+s.pnl_pct+'%':'—')
+     +card('当日盈亏', (s.today_pnl>=0?'+':'')+fmtInt(s.today_pnl)+'元', clr(s.today_pnl), s.today_pnl_pct!=null?sgn(s.today_pnl_pct)+s.today_pnl_pct+'%':'—')
+     +card('持仓', s.count+' 只','','分散度');
+  }else ag.innerHTML='<div class="assetCard" style="grid-column:1/-1"><div class="lab">暂无持仓</div><div class="sub muted" style="margin-top:8px">在下方表单录入「代码 + 股数 + 成本价」，即可看总盈亏与当日盈亏，并让 AI 给卖出建议。</div></div>';
   const tb=document.getElementById('folioRows');
   tb.innerHTML = hs.length ? hs.map(h=>`
     <tr>
@@ -313,14 +432,14 @@ async function loadPortfolio(){
       <td class="${clr(h.chg_pct)}">${fmt(h.price)}</td>
       <td>${fmtInt(h.market_value)}</td>
       <td class="${clr(h.pnl_pct)}"><b>${h.pnl_pct!=null?sgn(h.pnl_pct)+h.pnl_pct+'%':'—'}</b><div class="small">${sgn(h.pnl_amount)}${fmtInt(h.pnl_amount)}元</div></td>
+      <td class="${clr(h.today_pnl)}"><b>${h.today_pnl!=null?(h.today_pnl>=0?'+':'')+fmtInt(h.today_pnl):'—'}</b><div class="small ${clr(h.chg_pct)}">${sgn(h.chg_pct)}${fmt(h.chg_pct)}%</div></td>
       <td>${h.buy_date||'—'}</td>
       <td class="acts">
         ${LLM?`<button class="mini ai" onclick="folioAdvice('${h.code}')">🤖 何时卖</button>`:''}
         <button class="mini" onclick="openDetail('${h.code}')">深挖</button>
         <button class="mini danger" onclick="delHolding('${h.code}','${(h.name||h.code)}')">清仓</button>
       </td>
-    </tr><tr class="advrow" id="adv_${h.code}"><td colspan="8"></td></tr>`).join('') : '';
-  if(!hs.length) tb.innerHTML='';
+    </tr><tr class="advrow" id="adv_${h.code}"><td colspan="9"></td></tr>`).join('') : '';
 }
 async function addHolding(){
   const code=document.getElementById('h_code').value.trim();

@@ -70,12 +70,15 @@ def with_pnl(quotes: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     for h in load():
         q = quotes.get(h["code"], {})
         price = q.get("price", 0) or 0
+        last_close = q.get("last_close", 0) or 0
         shares = h.get("shares", 0) or 0
         cost = h.get("cost_price", 0) or 0
         market_value = round(price * shares, 2)
         cost_value = round(cost * shares, 2)
         pnl_amount = round(market_value - cost_value, 2)
         pnl_pct = round((price / cost - 1) * 100, 2) if cost > 0 else None
+        # 当日盈亏 = 股数 ×（现价 - 昨收）
+        today_pnl = round((price - last_close) * shares, 2) if last_close else 0.0
         out.append({
             **h,
             "name": q.get("name", h["code"]),
@@ -85,18 +88,22 @@ def with_pnl(quotes: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
             "cost_value": cost_value,
             "pnl_amount": pnl_amount,
             "pnl_pct": pnl_pct,
+            "today_pnl": today_pnl,
         })
     return out
 
 
 def summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """组合总市值/总成本/总盈亏。"""
+    """组合总市值/总成本/总盈亏/当日盈亏。"""
     mv = sum(r["market_value"] for r in rows)
     cv = sum(r["cost_value"] for r in rows)
+    today = sum(r.get("today_pnl", 0) for r in rows)
     return {
         "market_value": round(mv, 2),
         "cost_value": round(cv, 2),
         "pnl_amount": round(mv - cv, 2),
         "pnl_pct": round((mv / cv - 1) * 100, 2) if cv > 0 else None,
+        "today_pnl": round(today, 2),
+        "today_pnl_pct": round(today / (mv - today) * 100, 2) if (mv - today) > 0 else None,
         "count": len(rows),
     }

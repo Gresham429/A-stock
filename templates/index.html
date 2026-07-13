@@ -231,6 +231,17 @@
   /* AI 结果时间戳/缓存 meta 行 */
   .aimeta{font-size:11px;color:var(--muted);font-family:var(--mono);margin:2px 0 10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
   .aimeta .mini{padding:3px 8px;font-size:11px}
+
+  /* 热点新闻 modal */
+  .news-ctl{display:flex;justify-content:space-between;align-items:center;gap:10px;margin:12px 0;flex-wrap:wrap}
+  .news-chips{display:flex;gap:6px;flex-wrap:wrap}
+  .news-chip{background:var(--panel);border:1px solid var(--line2);color:var(--muted);border-radius:14px;padding:4px 11px;font-size:11.5px;cursor:pointer;font-family:var(--sans)}
+  .news-chip.on{border-color:var(--gold);color:var(--gold);background:rgba(224,169,46,.08)}
+  .news-item{padding:9px 2px;border-bottom:1px solid var(--line);font-size:13px;line-height:1.55}
+  .news-item .nm2{display:flex;gap:7px;align-items:baseline;flex-wrap:wrap;margin-bottom:3px}
+  .news-item .nd{font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .news-item .nk{font-size:10px;border:1px solid var(--line2);border-radius:4px;padding:0 5px;color:var(--muted)}
+  .news-item a{color:var(--txt);text-decoration:none} .news-item a:hover{color:var(--gold)}
 </style>
 </head>
 <body>
@@ -242,6 +253,7 @@
       <span class="stamp" id="stamp">—</span>
       <button class="btn ai ai-only" onclick="runDaily()">🤖 自选推荐</button>
       <button class="btn ai ai-only" onclick="openScreen()">🔍 全市场选股</button>
+      <button class="btn" onclick="openNews()">📰 新闻</button>
       <button class="btn" onclick="openGloss()">📖 名词解释</button>
       <div class="addbox">
         <input id="addcode" placeholder="加自选 代码/名称" maxlength="9" onkeydown="if(event.key==='Enter')addStock()">
@@ -355,6 +367,20 @@
       <button class="xclose" onclick="closeGloss()">×</button>
     </div>
     <div id="glossBody"></div>
+  </div>
+</div>
+
+<div class="modal" id="newsModal" onclick="if(event.target===this)closeNews()">
+  <div class="modalcard">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start">
+      <div><h2>📰 热点新闻 / 政策</h2><div class="sub2" id="newsStat">本地资讯库 · 近1年滚动</div></div>
+      <button class="xclose" onclick="closeNews()">×</button>
+    </div>
+    <div class="news-ctl">
+      <div class="news-chips" id="newsChips"></div>
+      <button class="btn" id="newsRefreshBtn" onclick="refreshNews()">🔄 刷新</button>
+    </div>
+    <div id="newsBody"></div>
   </div>
 </div>
 

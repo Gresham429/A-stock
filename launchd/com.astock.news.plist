@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  L2 新闻库每日定时抓取（macOS launchd）。
+  安装：
+    1) 按需修改下方 python3 路径（which python3）与仓库路径；
+    2) cp launchd/com.astock.news.plist ~/Library/LaunchAgents/
+    3) launchctl load ~/Library/LaunchAgents/com.astock.news.plist
+    卸载：launchctl unload ~/Library/LaunchAgents/com.astock.news.plist
+  触发点：交易日 08:40/11:40/14:00/15:30/20:30；非交易日门控在 fetch_news.py（仅 20:30 真抓）。
+  Mac 睡眠时错过的任务会在下次唤醒补跑。
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.astock.news</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>/Volumes/Elements/workspace/A-stock/fetch_news.py</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Volumes/Elements/workspace/A-stock</string>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Hour</key><integer>8</integer><key>Minute</key><integer>40</integer></dict>
+    <dict><key>Hour</key><integer>11</integer><key>Minute</key><integer>40</integer></dict>
+    <dict><key>Hour</key><integer>14</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>15</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Hour</key><integer>20</integer><key>Minute</key><integer>30</integer></dict>
+  </array>
+  <key>StandardOutPath</key>
+  <string>/Volumes/Elements/workspace/A-stock/data/fetch_news.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Volumes/Elements/workspace/A-stock/data/fetch_news.log</string>
+</dict>
+</plist>

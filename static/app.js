@@ -47,6 +47,14 @@ const clr=v=> v>0?'up':v<0?'down':'flat';
 const sgn=v=> v>0?'+':'';
 const fmt=(v,d=2)=> v==null||v===''?'—':Number(v).toFixed(d);
 const fmtInt=v=> v==null?'—':Math.round(v).toLocaleString();
+// AI 结果的时间戳/缓存 meta 行 + 强制刷新按钮（onclick 传重新请求的调用串）
+function aiMeta(j,onclick){
+  const when=j.analyzed_at?j.analyzed_at.replace('T',' ').slice(0,16):(j.updated||'');
+  const age=j.age_min!=null?(j.age_min<1?'刚刚':j.age_min+'分钟前'):'';
+  const tag=j.cached?'命中缓存':'实时';
+  return `<div class="aimeta">🕐 分析于 ${when}${age?'（'+age+'）':''} · ${tag}`
+    +(onclick?` <button class="mini" onclick="${onclick}">🔄 强制刷新</button>`:'')+`</div>`;
+}
 
 /* ── 浮动 tooltip（避开表格 overflow 裁剪） ── */
 function initTooltips(){
@@ -422,7 +430,7 @@ function boxplot(vals){
 }
 
 /* ── 大盘研判条 ── */
-async function loadMarket(){
+async function loadMarket(force){
   const gen=++mktSeq;
   // 1) 先拉指数(快) → 即时渲染行情条
   try{
@@ -430,9 +438,9 @@ async function loadMarket(){
     if(gen!==mktSeq) return;
     renderMarketIdx(q);
   }catch(e){}
-  // 2) 再拉完整(含情绪 + AI 研判；首次较慢，之后走 5 分钟缓存)
+  // 2) 再拉完整(含情绪 + AI 研判；命中缓存则秒回，force 时强制重算)
   try{
-    const j=await (await fetch('/api/market/overview')).json();
+    const j=await (await fetch('/api/market/overview'+(force?'?refresh=1':''))).json();
     if(gen!==mktSeq) return;
     renderMarketIdx(j); renderMarketDetail(j);
   }catch(e){}
@@ -461,7 +469,11 @@ function renderMarketDetail(j){
   if(b.bottom_industries&&b.bottom_industries.length) rows.push(['领跌行业', b.bottom_industries.map(ind).join('　')]);
   let h=rows.map(([k,v])=>`<div class="mrow"><div class="mk">${k}</div><div class="mv">${v}</div></div>`).join('');
   if(!ai&&!rows.length) h='<div class="mrow"><div class="mv muted">大盘研判暂不可用（未配置 AI 或数据拉取失败）。</div></div>';
-  h+=`<div class="mkt-disc">${j.model||''} 大盘研判为参考信号，只据当日客观数据、不预测方向，不构成投资建议。${j.updated?' 更新 '+j.updated:''}${j.cached?' · 缓存':''}</div>`;
+  const when=j.analyzed_at?j.analyzed_at.replace('T',' ').slice(0,16):(j.updated||'');
+  const age=j.age_min!=null?'（'+(j.age_min<1?'刚刚':j.age_min+'分钟前')+'）':'';
+  h+=`<div class="mkt-disc">${j.model||''} 大盘研判为参考信号，只据当日客观数据、不预测方向，不构成投资建议。`
+    +`　🕐 ${when}${age} · ${j.cached?'命中缓存':'实时'} `
+    +`<button class="mini" onclick="loadMarket(true)">🔄 强制刷新</button></div>`;
   document.getElementById('mktDetail').innerHTML=h;
 }
 function toggleMkt(){ document.getElementById('mktBar').classList.toggle('open'); }
@@ -516,20 +528,20 @@ async function checkWebSearch(probe){
 
 /* ── 每日 AI 推荐 ── */
 const ACT={buy:['买入','a-buy'],add:['加仓','a-buy'],hold:['持有','a-hold'],reduce:['减仓','a-sell'],sell:['卖出','a-sell'],watch:['观望','a-watch']};
-async function runDaily(){
+async function runDaily(force){
   const gen=++recSeq;
   const box=document.getElementById('recBody'); const panel=document.getElementById('recPanel');
   document.getElementById('recTitle').textContent='🤖 自选股推荐（含持仓）';
   document.getElementById('recControls').style.display='none';
   panel.classList.add('open');
-  box.innerHTML='<div class="paneempty"><span class="spin"></span> '+MODEL+' 正在分析自选股与持仓…（推理模型约需 15~40 秒）</div>';
+  box.innerHTML='<div class="paneempty"><span class="spin"></span> '+MODEL+(force?' 重新分析':' 正在分析')+'自选股与持仓…（命中缓存则秒回，否则推理约 15~40 秒）</div>';
   let j;
-  try{ j=await (await fetch('/api/recommend/daily',{method:'POST'})).json(); }
+  try{ j=await (await fetch('/api/recommend/daily',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({force:!!force})})).json(); }
   catch(e){ if(gen!==recSeq)return; box.innerHTML='<div class="paneempty">请求失败：'+e+'</div>'; return; }
   if(gen!==recSeq) return;   // 已切到别的请求，丢弃这次过期响应
   if(!j.ok){ box.innerHTML='<div class="paneempty">生成失败：'+(j.msg||'')+'</div>'; return; }
   const r=j.result||{};
-  let h=`<div class="mview">📊 ${r.market_view||''}</div>`;
+  let h=aiMeta(j,'runDaily(true)')+`<div class="mview">📊 ${r.market_view||''}</div>`;
   h+='<div class="reccards">'+(r.picks||[]).map(p=>{
     const a=ACT[p.action]||['?','a-hold'];
     return `<div class="reccard ${a[1]}"><div class="rc-top"><span class="badge ${a[1]}">${a[0]}</span>
@@ -538,7 +550,7 @@ async function runDaily(){
       <div class="rc-reason">${p.reason||''}</div>${p.risk?`<div class="rc-risk">⚠ ${p.risk}</div>`:''}</div>`;
   }).join('')+'</div>';
   if(r.holdings_note&&r.holdings_note!=='无') h+=`<div class="hnote">💼 持仓提醒：${r.holdings_note}</div>`;
-  h+=`<div class="disc">以上为 ${j.model} 基于当前客观数据生成的参考信号，${j.updated} · 不构成投资建议，据此操作风险自负。</div>`;
+  h+=`<div class="disc">以上为 ${j.model} 基于当前客观数据生成的参考信号，不构成投资建议，据此操作风险自负。</div>`;
   box.innerHTML=h;
 }
 function closeRec(){ ++recSeq; document.getElementById('recPanel').classList.remove('open'); }
@@ -551,21 +563,21 @@ function openScreen(){
   document.getElementById('recPanel').classList.add('open');
   document.getElementById('recBody').innerHTML='<div class="paneempty">选资金规模与侧重板块（可选整个一级或某个二级细分）→ 点「开始筛选」。DeepSeek 会先看当前大盘，再从全市场候选里跨板块为你选股。</div>';
 }
-async function runScreen(){
+async function runScreen(force){
   const gen=++recSeq;
   const cap=+document.getElementById('scr_capital').value;
   const focus=document.getElementById('scr_focus').value;
   const box=document.getElementById('recBody');
-  box.innerHTML='<div class="paneempty"><span class="spin"></span> '+MODEL+' 正在拉取候选池行情并跨板块筛选…（约 40~90 秒）</div>';
+  box.innerHTML='<div class="paneempty"><span class="spin"></span> '+MODEL+(force?' 重新筛选':' 正在拉取候选池行情并跨板块筛选')+'…（命中缓存则秒回，否则约 40~90 秒）</div>';
   let j;
   try{ j=await (await fetch('/api/recommend/screen',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({capital:cap,focus_sector:focus})})).json(); }
+    body:JSON.stringify({capital:cap,focus_sector:focus,force:!!force})})).json(); }
   catch(e){ if(gen!==recSeq)return; box.innerHTML='<div class="paneempty">请求失败：'+e+'</div>'; return; }
   if(gen!==recSeq) return;   // 已切到别的请求，丢弃这次过期响应
   if(!j.ok){ box.innerHTML='<div class="paneempty">筛选失败：'+(j.msg||'')+'</div>'; return; }
   const r=j.result||{};
   const regime=j.market_regime||r.market_regime;
-  let h=`<div class="mview">🔍 候选 ${j.candidates} 只 · 资金 ${(+j.capital).toLocaleString()} 元${j.focus?' · 侧重 '+j.focus:''}${regime?' · 大盘 '+regime:''}<br>📊 ${r.overall||''}</div>`;
+  let h=aiMeta(j,'runScreen(true)')+`<div class="mview">🔍 候选 ${j.candidates||'—'} 只 · 资金 ${(+j.capital).toLocaleString()} 元${j.focus?' · 侧重 '+j.focus:''}${regime?' · 大盘 '+regime:''}<br>📊 ${r.overall||''}</div>`;
   h+='<div class="reccards">'+(r.picks||[]).map(p=>{
     const a=ACT[p.action]||['关注','a-watch'];
     const sec=[p.primary,p.sub||p.sector].filter(Boolean).join('·');
@@ -581,7 +593,7 @@ async function runScreen(){
   }).join('')+'</div>';
   if(r.budget_plan) h+=`<div class="planbox"><b>💰 ${(+j.capital).toLocaleString()}元 配置建议：</b>${r.budget_plan}</div>`;
   if(r.sector_view) h+=`<div class="planbox"><b>🧭 板块简评：</b>${r.sector_view}</div>`;
-  h+=`<div class="disc">${j.model} 基于候选池客观指标的筛选参考，${j.updated} · 不构成投资建议。</div>`;
+  h+=`<div class="disc">${j.model} 基于候选池客观指标的筛选参考，不构成投资建议。</div>`;
   box.innerHTML=h;
 }
 async function addPick(code){
@@ -590,16 +602,16 @@ async function addPick(code){
 }
 
 /* 抽屉里让 AI 分析单只（不必持仓） */
-async function askDetailAdvice(code){
+async function askDetailAdvice(code,force){
   const box=document.getElementById('detailAdvice');
-  box.innerHTML='<div class="paneempty small"><span class="spin"></span> '+MODEL+' 分析中…</div>';
+  box.innerHTML='<div class="paneempty small"><span class="spin"></span> '+MODEL+(force?' 重新分析…':' 分析中…')+'</div>';
   const inPortfolio=await isHeld(code);
   if(!inPortfolio){
     box.innerHTML='<div class="advice"><div class="note">提示：先在下方“持仓”里记录这只（含成本价），AI 才能给出结合你成本的卖出/止损建议。当前给通用参考。</div></div>';
   }
   try{
-    const j=await (await fetch('/api/recommend/position/'+code,{method:'POST'})).json();
-    if(j.ok){ box.innerHTML=adviceHTML(j.advice, j.model); }
+    const j=await (await fetch('/api/recommend/position/'+code,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({force:!!force})})).json();
+    if(j.ok){ box.innerHTML=aiMeta(j,`askDetailAdvice('${code}',true)`)+adviceHTML(j.advice, j.model); }
     else if(j.msg && j.msg.includes('不在持仓')){
       box.innerHTML='<div class="advice"><div class="note">这只不在持仓中，无法给结合成本的建议。可在下方“持仓”记录后再试；或直接参考上方“每日推荐”。</div></div>';
     } else box.innerHTML='<div class="paneempty small">失败：'+(j.msg||'')+'</div>';
@@ -678,19 +690,22 @@ async function delHolding(code,name){
   await fetch('/api/portfolio/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code})});
   loadPortfolio();
 }
-async function folioAdvice(code){
+function folioAdvice(code){   // 「🤖 何时卖」按钮：展开/收起切换
   const row=document.getElementById('adv_'+code); if(!row) return;
-  const cell=row.firstElementChild;
   if(row.classList.contains('open')){   // 再次点击=收起
-    row.classList.remove('open'); cell.innerHTML=''; delete FOLIO_ADV[code]; return;
+    row.classList.remove('open'); row.firstElementChild.innerHTML=''; delete FOLIO_ADV[code]; return;
   }
   row.classList.add('open');
+  loadFolioAdvice(code, false);
+}
+async function loadFolioAdvice(code, force){   // 真正拉取（强制刷新走这里，不切换开合）
+  const row=document.getElementById('adv_'+code); if(!row) return;
   FOLIO_ADV[code]={loading:true};   // 标记「用户要看」，刷新时据此重注入(spinner/结果)
-  cell.innerHTML='<div class="paneempty small"><span class="spin"></span> '+MODEL+' 分析何时卖/加/止损…</div>';
+  row.firstElementChild.innerHTML='<div class="paneempty small"><span class="spin"></span> '+MODEL+(force?' 重新分析…':' 分析何时卖/加/止损…')+'</div>';
   let html;
   try{
-    const j=await (await fetch('/api/recommend/position/'+code,{method:'POST'})).json();
-    html = j.ok ? adviceHTML(j.advice,j.model) : '<div class="paneempty small">失败：'+(j.msg||'')+'</div>';
+    const j=await (await fetch('/api/recommend/position/'+code,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({force:!!force})})).json();
+    html = j.ok ? (aiMeta(j,`loadFolioAdvice('${code}',true)`)+adviceHTML(j.advice,j.model)) : '<div class="paneempty small">失败：'+(j.msg||'')+'</div>';
   }catch(e){ html='<div class="paneempty small">失败：'+e+'</div>'; }
   if(!FOLIO_ADV[code]) return;   // 请求返回前用户已收起 → 丢弃
   FOLIO_ADV[code]={html};        // 缓存结果，跨自动刷新保留

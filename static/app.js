@@ -266,10 +266,9 @@ function flowChart(series){
     <text x="${pad}" y="${h-4}" fill="var(--muted)" font-size="10" font-family="monospace">-${mx.toFixed(1)}亿</text></svg>`;
 }
 
-/* ── 波动多周期（当日分时 / 5日 / 30日 / 60日 / 当季 / 当年） ── */
-const WAVE_PERIODS=[['day','当日分时'],['5d','5日'],['30d','30日'],['60d','60日'],['quarter','当季'],['year','当年']];
-function _yearStart(){ return new Date().getFullYear()+'-01-01'; }
-function _quarterStart(){ const n=new Date(),m=Math.floor(n.getMonth()/3)*3+1; return n.getFullYear()+'-'+String(m).padStart(2,'0')+'-01'; }
+/* ── 波动多周期（当日分时 / 5日 / 30日 / 60日 / 90天 / 近1年） ── */
+const WAVE_PERIODS=[['day','当日分时'],['5d','5日'],['30d','30日'],['60d','60日'],['90d','90天'],['1y','近1年']];
+function _daysAgo(n){ const d=new Date(); d.setDate(d.getDate()-n); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
 function waveSeries(period){
   const W=WAVE||{};
   if(period==='day') return {pts:(W.intraday||[]).map(p=>({label:p.t,value:p.price})), base:W.prev_close, kind:'intra'};
@@ -277,8 +276,8 @@ function waveSeries(period){
   let d=W.daily||[];
   if(period==='30d') d=d.slice(-30);
   else if(period==='60d') d=d.slice(-60);
-  else if(period==='quarter'){ const qs=_quarterStart(); d=d.filter(x=>x.date>=qs); }
-  else if(period==='year'){ const ys=_yearStart(); d=d.filter(x=>x.date>=ys); }
+  else if(period==='90d'){ const c=_daysAgo(90); d=d.filter(x=>x.date>=c); }
+  else if(period==='1y'){ const c=_daysAgo(365); d=d.filter(x=>x.date>=c); }
   return {pts:d.map(p=>({label:p.date,value:p.close})), base:null, kind:'daily'};
 }
 function _annVol(vals){

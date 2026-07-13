@@ -194,11 +194,31 @@ def _report_rows(code: str, page_size: int = 20) -> list[dict[str, Any]]:
     return rows
 
 
+def _universe_slice(n: int = 15) -> list[str]:
+    """从全市场候选池轮询取 n 只（游标存 db meta），让各板块持续有新闻、又不每次抓满 170 只。"""
+    codes = universe.all_codes()
+    if not codes:
+        return []
+    try:
+        cur = int(get_meta("uni_cursor") or 0) % len(codes)
+    except ValueError:
+        cur = 0
+    sl = codes[cur:cur + n]
+    if len(sl) < n:  # 环形补齐
+        sl += codes[:n - len(sl)]
+    set_meta("uni_cursor", str((cur + n) % len(codes)))
+    return sl
+
+
 def fetch_incremental() -> dict[str, Any]:
-    """增量抓取：全市场快讯 + 自选股新闻（各 1 页）。写库去重 + 清理 + 记 last_fetch。"""
+    """增量：全市场快讯 + 自选股新闻 + 轮询一批全池龙头（覆盖各板块）。去重 + 清理 + 记 last_fetch。"""
     init()
     added = insert_many(_market_rows(40))
-    for code in store.load_watchlist():
+    seen: set[str] = set()
+    for code in store.load_watchlist() + _universe_slice(15):
+        if code in seen:
+            continue
+        seen.add(code)
         added += insert_many(_stock_rows(code, page_size=10))
     purged = purge(365)
     set_meta("last_fetch", datetime.now().isoformat(timespec="seconds"))
@@ -206,12 +226,13 @@ def fetch_incremental() -> dict[str, Any]:
     return {"added": added, "purged": purged}
 
 
-def backfill(page_size: int = 60) -> dict[str, Any]:
-    """一次性较重回填：自选股深翻页新闻 + 研报（补 1–2 季度 + 基本面历史）。"""
+def backfill(page_size: int = 50) -> dict[str, Any]:
+    """一次性较重回填：**全市场候选池 170 只龙头**深翻页新闻（每个板块都有历史）+ 自选股研报。"""
     init()
     added = insert_many(_market_rows(60))
-    for code in store.load_watchlist():
+    for code in universe.all_codes():  # 全池龙头 → 覆盖全部一级/二级板块
         added += insert_many(_stock_rows(code, page_size=page_size))
+    for code in store.load_watchlist():  # 自选股额外拉研报（基本面历史）
         added += insert_many(_report_rows(code, page_size=30))
     set_meta("last_backfill", datetime.now().isoformat(timespec="seconds"))
     logger.info("news 回填：+%d 条", added)

@@ -71,7 +71,7 @@ python app.py                        # http://127.0.0.1:5000
 - **私域信息笔记（L5）**：`notes_store.py`（SQLite `data/notes.db`，gitignore，**永久保留不清理**，每条带 `created_at`）。打字/贴文本记录；`llm.structure_note`（**deepseek-v4-flash 快模型**，`_chat(model=)` 覆盖）把笔记 AI 结构化为 `{summary,codes,sectors,tags,kind}`，存前确认。`GET/POST /api/notes`、`POST /api/notes/structure`、`DELETE /api/notes/<id>`；前端「📝 笔记」modal。`_ai_web_context` 注入相关笔记标注【我的私域笔记·日期】与客观数据区分。**隐私**：AI 整理会把内容发 DeepSeek，纯手动存不外发。
 - **AI 输出短期缓存（L1）**：`ai_cache.py` 把 4 个 AI 调用（daily/screen/position/market）结果落盘 `ai_cache.json`（gitignore）。key = `kind:输入指纹:当日`，**指纹只哈希影响结论的输入（自选/持仓/资金/板块/代码），排除实时价格**；TTL 个股/每日/选股 30min、大盘 5min；命中且未过期→秒回（跳过取数+LLM），输入变/跨交易日/TTL 过期/带 `force`(body 或 `?refresh=1`)→重算。响应带 `cached/analyzed_at/age_min`，前端每个 AI 面板显示 `aiMeta()` 时间戳行 +「🔄 强制刷新」。`position` 缓存与 `FOLIO_ADV` 持久化叠加（`folioAdvice` 切换开合、`loadFolioAdvice` 真正拉取）。这是「知识与缓存架构 L1–L5」的第一层，见 `plan/2026-07-13-knowledge-cache-architecture.md`。
 - **选股候选池两级化**：`focus` 可传一级板块名 / 二级细分名 / 空（全市场）；`_screen_rows` 按 `codes_of(focus)` 取数 + 可负担过滤 + `_balanced_pick` 跨一级轮询均衡采样（每二级≤3 只、全市场 cap 36；下钻二级时放宽到 6）。前端 `scr_focus` 用 `<optgroup>` 由 `taxonomy` 动态渲染。
-- **单股波动多周期**（深挖抽屉「波动」标签）：`GET /api/wave/<code>` 一次并发返回 `{intraday(腾讯分时), min5(新浪5分钟×5日), daily(新浪日K×260), prev_close}`；前端按 当日/5日/30日/60日/当季/当年 **纯前端切片**（当年/当季按 `年初/季初` 日期过滤 daily）。内联 SVG 折线 + `waveHover` 十字准星，复用 `#tip` 逐点显示 时间/价/涨跌%。分时基准=昨收，日线周期算年化波动。异步随 `detailSeq`。
+- **单股波动多周期**（深挖抽屉「波动」标签）：`GET /api/wave/<code>` 一次并发返回 `{intraday(腾讯分时), min5(新浪5分钟×5日), daily(新浪日K×260), prev_close}`；前端按 当日/5日/30日/60日/90天/近1年 **纯前端切片**（90天/近1年按 `今天−90/−365 天` 滚动日期窗口过滤 daily，daily 取 260 根≈覆盖1年）。内联 SVG 折线 + `waveHover` 十字准星，复用 `#tip` 逐点显示 时间/价/涨跌%。分时基准=昨收，日线周期算年化波动。异步随 `detailSeq`。
 
 ## 冒烟测试（改完自测）
 

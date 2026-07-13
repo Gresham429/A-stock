@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
 from flask import Flask, jsonify, render_template, request
 
@@ -28,6 +29,7 @@ import datasources as ds
 import llm
 import news_store
 import notes_store
+import paper_store
 import portfolio
 import rules_store
 import store
@@ -42,6 +44,7 @@ app = Flask(__name__)
 news_store.init()  # 确保 news.db 表存在（廉价，幂等）
 notes_store.init()  # 私域笔记表
 rules_store.init()  # 交易规则库（首次灌入蒸馏种子）
+paper_store.init()  # 模拟交易存档
 _news_refreshing = [False]
 
 
@@ -285,6 +288,92 @@ def rules_scenario():
     v = (request.get_json(silent=True) or {}).get("scenario", "")
     rules_store.set_scenario(v)
     return jsonify({"ok": True, "scenario": rules_store.get_scenario()})
+
+
+# ── 模拟委托交易（多存档，按真实行情+A股规则撮合） ────────────────────────
+def _market_open() -> bool:
+    now = datetime.now()
+    if not news_store.is_trading_day(now.date()):
+        return False
+    t = now.hour * 60 + now.minute
+    return (9 * 60 + 30) <= t <= (11 * 60 + 30) or (13 * 60) <= t <= (15 * 60)
+
+
+def _account_summary(acct: dict, quotes: dict) -> dict:
+    rows = []
+    mv = 0.0
+    for p in paper_store.positions_of(acct["id"]):
+        q = quotes.get(p["code"], {})
+        price = q.get("price") or p["avg_cost"]
+        val = price * p["shares"]
+        mv += val
+        rows.append({**p, "price": price, "value": round(val, 2),
+                     "pnl": round((price - p["avg_cost"]) * p["shares"], 2),
+                     "pnl_pct": round((price / p["avg_cost"] - 1) * 100, 2) if p["avg_cost"] else 0,
+                     "chg_pct": q.get("chg_pct")})
+    total = acct["cash"] + mv
+    init = acct["init_capital"] or 1
+    return {"positions": rows, "market_value": round(mv, 2), "cash": round(acct["cash"], 2),
+            "total": round(total, 2), "pnl": round(total - acct["init_capital"], 2),
+            "pnl_pct": round((total / init - 1) * 100, 2)}
+
+
+@app.route("/api/paper/accounts")
+def paper_accounts():
+    accts = paper_store.list_accounts()
+    codes = {p["code"] for a in accts for p in paper_store.positions_of(a["id"])}
+    quotes = ds.tencent_quote(list(codes)) if codes else {}
+    out = [{**a, **_account_summary(a, quotes)} for a in accts]
+    return jsonify({"accounts": out, "market_open": _market_open()})
+
+
+@app.route("/api/paper/accounts", methods=["POST"])
+def paper_account_add():
+    b = request.get_json(silent=True) or {}
+    try:
+        capital = float(b.get("capital", 100000))
+    except (TypeError, ValueError):
+        capital = 100000.0
+    if capital <= 0:
+        return jsonify({"ok": False, "msg": "本金须大于 0"}), 400
+    return jsonify({"ok": True, "id": paper_store.create_account((b.get("name") or "").strip(), capital)})
+
+
+@app.route("/api/paper/accounts/<int:aid>", methods=["DELETE"])
+def paper_account_del(aid: int):
+    paper_store.delete_account(aid)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/paper/account/<int:aid>")
+def paper_account_detail(aid: int):
+    acct = paper_store.get_account(aid)
+    if not acct:
+        return jsonify({"ok": False, "msg": "存档不存在"}), 404
+    codes = [p["code"] for p in paper_store.positions_of(aid)]
+    quotes = ds.tencent_quote(codes) if codes else {}
+    return jsonify({"ok": True, "account": {**acct, **_account_summary(acct, quotes)},
+                    "orders": paper_store.orders_of(aid), "market_open": _market_open()})
+
+
+@app.route("/api/paper/order/<int:aid>", methods=["POST"])
+def paper_order(aid: int):
+    b = request.get_json(silent=True) or {}
+    code = ds.normalize(b.get("code", ""))
+    side = b.get("side", "buy")
+    otype = b.get("otype", "market")
+    try:
+        shares = int(b.get("shares", 0))
+        req_price = float(b.get("price", 0) or 0)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "msg": "股数/价格须为数字"}), 400
+    if not (code.isdigit() and len(code) == 6):
+        return jsonify({"ok": False, "msg": "代码无效"}), 400
+    q = ds.tencent_quote([code]).get(code, {})
+    if not q.get("name"):
+        return jsonify({"ok": False, "msg": f"查不到该股票: {code}"}), 404
+    res = paper_store.order(aid, code, q["name"], side, otype, req_price, shares, q, _market_open())
+    return jsonify(res)
 
 
 @app.route("/api/detail/<code>")

@@ -929,7 +929,78 @@ async function saveRule(){
 async function toggleRule(id,en){ await fetch('/api/rules/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:en})}); loadRules(); }
 async function delRule(id){ if(!confirm('删除这条规则？'))return; await fetch('/api/rules/'+id,{method:'DELETE'}); loadRules(); }
 
-document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeDrawer();closeGloss();closeRec();closeNews();closeNotes();closeRules();}});
+/* ── 模拟委托交易（多存档，按真实行情+A股规则撮合） ── */
+let PAPER_ACCTS=[], PAPER_SEL=null;
+function openPaper(){ loadPaperAccounts(); document.getElementById('paperModal').classList.add('open'); }
+function closePaper(){ document.getElementById('paperModal').classList.remove('open'); }
+async function loadPaperAccounts(){
+  let j; try{ j=await (await fetch('/api/paper/accounts')).json(); }catch(e){ return; }
+  PAPER_ACCTS=j.accounts||[];
+  document.getElementById('paperStat').textContent=`${PAPER_ACCTS.length} 个存档 · 按真实行情+A股规则(整手/涨跌停/T+1/手续费)撮合 · 市场${j.market_open?'开市中':'已收市(下单会被拒)'}`;
+  if(PAPER_SEL && !PAPER_ACCTS.find(a=>a.id===PAPER_SEL)) PAPER_SEL=null;
+  if(!PAPER_SEL && PAPER_ACCTS.length) PAPER_SEL=PAPER_ACCTS[0].id;
+  document.getElementById('paperAccts').innerHTML=PAPER_ACCTS.map(a=>`
+    <div class="paper-acct ${a.id===PAPER_SEL?'on':''}" onclick="selectPaper(${a.id})">
+      <div class="pn">${esc(a.name)}</div>
+      <div class="pp">总 ${fmtInt(a.total)} · <span class="${clr(a.pnl)}">${sgn(a.pnl)}${fmtInt(a.pnl)}(${sgn(a.pnl_pct)}${a.pnl_pct}%)</span></div>
+    </div>`).join('') || '<div class="paneempty small">还没有存档，下方新建一个。</div>';
+  renderPaperDetail();
+}
+function selectPaper(id){ PAPER_SEL=id; loadPaperAccounts(); }
+async function createPaperAccount(){
+  const name=document.getElementById('pa_name').value.trim();
+  const cap=+document.getElementById('pa_cap').value||100000;
+  const j=await (await fetch('/api/paper/accounts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,capital:cap})})).json();
+  if(j.ok){ document.getElementById('pa_name').value=''; document.getElementById('pa_cap').value=''; PAPER_SEL=j.id; loadPaperAccounts(); } else alert(j.msg||'新建失败');
+}
+async function delPaperAccount(id){ if(!confirm('删除这个存档？持仓与订单一并清除。'))return; await fetch('/api/paper/accounts/'+id,{method:'DELETE'}); PAPER_SEL=null; loadPaperAccounts(); }
+async function renderPaperDetail(){
+  const box=document.getElementById('paperDetail');
+  if(!PAPER_SEL){ box.innerHTML=''; return; }
+  let j; try{ j=await (await fetch('/api/paper/account/'+PAPER_SEL)).json(); }catch(e){ box.innerHTML='<div class="paneempty">读取失败</div>'; return; }
+  if(!j.ok){ box.innerHTML='<div class="paneempty">'+(j.msg||'')+'</div>'; return; }
+  const a=j.account;
+  let h=`<div class="paper-sum">
+    <div>现金 <b>${fmtInt(a.cash)}</b></div><div>持仓市值 <b>${fmtInt(a.market_value)}</b></div>
+    <div>总资产 <b>${fmtInt(a.total)}</b></div>
+    <div>盈亏 <b class="${clr(a.pnl)}">${sgn(a.pnl)}${fmtInt(a.pnl)}(${sgn(a.pnl_pct)}${a.pnl_pct}%)</b></div>
+    <div class="muted">本金 ${fmtInt(a.init_capital)}</div>
+    <button class="mini danger" style="margin-left:auto" onclick="delPaperAccount(${a.id})">删存档</button></div>`;
+  h+=`<div class="order-form">
+    <input id="ord_code" placeholder="代码" maxlength="6" style="width:80px">
+    <select id="ord_side"><option value="buy">买入</option><option value="sell">卖出</option></select>
+    <select id="ord_otype"><option value="market">市价</option><option value="limit">限价</option></select>
+    <input id="ord_price" placeholder="限价(市价留空)" style="width:110px">
+    <input id="ord_shares" placeholder="股数(100整数倍)" style="width:130px">
+    <button class="btn ai" onclick="placeOrder()">下单</button></div>`;
+  const pos=a.positions||[];
+  h+='<div class="subh">持仓</div>';
+  h+= pos.length ? `<table class="paper-tbl"><thead><tr><th>股票</th><th>股数</th><th>可卖</th><th>成本</th><th>现价</th><th>市值</th><th>盈亏</th><th></th></tr></thead><tbody>`+pos.map(p=>`
+    <tr><td>${esc(p.name)}<span style="color:var(--muted)"> ${p.code}</span></td>
+      <td>${p.shares}</td><td>${p.sellable}</td><td>${fmt(p.avg_cost)}</td>
+      <td class="${clr(p.chg_pct)}">${fmt(p.price)}</td><td>${fmtInt(p.value)}</td>
+      <td class="${clr(p.pnl)}">${sgn(p.pnl)}${fmtInt(p.pnl)} <span class="small">${sgn(p.pnl_pct)}${p.pnl_pct}%</span></td>
+      <td><button class="mini" onclick="quickSell('${p.code}',${p.sellable})">卖</button></td></tr>`).join('')+'</tbody></table>'
+    : '<div class="paneempty small">空仓。用上面的下单框买入。</div>';
+  const ords=j.orders||[];
+  if(ords.length){ h+='<div class="subh">最近委托</div>'+ords.slice(0,15).map(o=>`
+    <div class="ord-log ${o.status==='rejected'?'rej':''}">${(o.ts||'').replace('T',' ').slice(5,16)} ${o.side==='buy'?'买':'卖'} ${esc(o.name)} ${o.shares}股 @${fmt(o.price)} · ${o.status==='filled'?'成交(费'+fmt(o.fee)+')':'✗ '+esc(o.note||'拒单')}</div>`).join(''); }
+  box.innerHTML=h;
+}
+function quickSell(code,sellable){ document.getElementById('ord_code').value=code; document.getElementById('ord_side').value='sell'; document.getElementById('ord_shares').value=sellable||''; }
+async function placeOrder(){
+  if(!PAPER_SEL) return;
+  const code=document.getElementById('ord_code').value.trim();
+  const side=document.getElementById('ord_side').value, otype=document.getElementById('ord_otype').value;
+  const price=+document.getElementById('ord_price').value||0, shares=+document.getElementById('ord_shares').value||0;
+  if(!/^\d{6}$/.test(code)){ alert('请输入 6 位代码'); return; }
+  if(shares<=0){ alert('请输入股数'); return; }
+  const j=await (await fetch('/api/paper/order/'+PAPER_SEL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code,side,otype,price,shares})})).json();
+  if(j.ok){ document.getElementById('ord_shares').value=''; loadPaperAccounts(); }
+  else alert('未成交：'+(j.msg||''));
+}
+
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeDrawer();closeGloss();closeRec();closeNews();closeNotes();closeRules();closePaper();}});
 initTooltips();
 loadConfig();
 load();

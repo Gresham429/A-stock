@@ -273,6 +273,21 @@
   .adv-rule{font-size:11.5px;color:var(--muted);margin-top:8px;border-top:1px dashed var(--line);padding-top:6px}
   /* 对比表是总览的说明条 */
   .ov-note{font-size:11.5px;color:var(--muted);margin:2px 0 8px;padding:6px 10px;background:var(--bg2);border-left:2px solid var(--gold-dim);border-radius:4px}
+  /* 模拟盘 */
+  .paper-accts{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+  .paper-acct{background:var(--panel);border:1px solid var(--line2);border-radius:8px;padding:7px 12px;cursor:pointer;font-size:12px;min-width:150px}
+  .paper-acct.on{border-color:var(--gold)}
+  .paper-acct .pn{font-weight:700;color:var(--txt)} .paper-acct .pp{font-family:var(--mono);font-size:11px;margin-top:2px}
+  .paper-sum{display:flex;gap:16px;flex-wrap:wrap;background:var(--bg2);border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:10px 0;font-size:12.5px}
+  .paper-sum b{font-size:15px}
+  .order-form{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0}
+  .order-form input,.order-form select{background:var(--panel);border:1px solid var(--line2);color:var(--txt);border-radius:6px;padding:7px;font-size:12.5px;font-family:var(--sans)}
+  .paper-tbl{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
+  .paper-tbl th{color:var(--muted);font-size:10.5px;text-align:right;padding:6px 8px;border-bottom:1px solid var(--line);font-family:var(--mono)}
+  .paper-tbl td{text-align:right;padding:6px 8px;border-bottom:1px solid var(--line)}
+  .paper-tbl td:first-child,.paper-tbl th:first-child{text-align:left}
+  .ord-log{font-size:11.5px;font-family:var(--mono);color:var(--muted);padding:4px 0;border-bottom:1px solid var(--line)}
+  .ord-log.rej{color:var(--down)}
 </style>
 </head>
 <body>
@@ -287,6 +302,7 @@
       <button class="btn" onclick="openNews()">📰 新闻</button>
       <button class="btn" onclick="openNotes()">📝 笔记</button>
       <button class="btn" onclick="openRules()">📐 规则</button>
+      <button class="btn" onclick="openPaper()">💰 模拟盘</button>
       <button class="btn" onclick="openGloss()">📖 名词解释</button>
       <div class="addbox">
         <input id="addcode" placeholder="加自选 代码/名称" maxlength="9" onkeydown="if(event.key==='Enter')addStock()">
@@ -465,6 +481,22 @@
       </div>
     </div>
     <div id="rulesBody"></div>
+  </div>
+</div>
+
+<div class="modal" id="paperModal" onclick="if(event.target===this)closePaper()">
+  <div class="modalcard">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start">
+      <div><h2>💰 模拟委托交易</h2><div class="sub2" id="paperStat">多存档 · 按真实行情与 A股规则(整手/涨跌停/T+1/手续费)撮合 · 仅供练习</div></div>
+      <button class="xclose" onclick="closePaper()">×</button>
+    </div>
+    <div class="paper-accts" id="paperAccts"></div>
+    <div class="rule-form" style="flex-direction:row;flex-wrap:wrap;align-items:center">
+      <input id="pa_name" placeholder="新存档名(如 波段练习)" style="width:150px">
+      <input id="pa_cap" placeholder="本金元(默认10万)" style="width:130px">
+      <button class="btn ai" onclick="createPaperAccount()">＋ 新建存档</button>
+    </div>
+    <div id="paperDetail"></div>
   </div>
 </div>
 

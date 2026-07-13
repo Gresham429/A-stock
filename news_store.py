@@ -221,6 +221,15 @@ def backfill(page_size: int = 60) -> dict[str, Any]:
     return {"added": added}
 
 
+def deepen(code: str) -> int:
+    """L3：按需深抓单只股票的更久新闻 + 研报（本地稀疏时补历史）。返回新增条数。"""
+    init()
+    n = insert_many(_stock_rows(code, page_size=60))
+    n += insert_many(_report_rows(code, page_size=40))
+    logger.info("news 深抓 %s：+%d 条", code, n)
+    return n
+
+
 def is_trading_day(d: date | None = None) -> bool:
     """工作日且非内置节假日（best-effort；节假日表需每年更新）。"""
     d = d or date.today()

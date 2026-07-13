@@ -42,7 +42,7 @@ let recSeq=0, detailSeq=0, mktSeq=0;
 let TAXO=null;   // 板块两级分类（/api/config 下发）
 let WAVE=null, WAVE_PERIOD='day', WAVE_CTX=null;   // 波动多周期数据 / 当前周期 / hover 几何
 let FOLIO_ADV={};   // 持仓「何时卖」建议缓存 code->{html}|{loading:true}，跨自动刷新保留
-let NEWS_FILTER={sector:'',kind:''}, lastNewsRefresh=0;   // 新闻筛选 / 看盘惰性刷新节流
+let NEWS_FILTER={sector:'',kind:'',code:''}, lastNewsRefresh=0;   // 新闻筛选 / 看盘惰性刷新节流
 
 const clr=v=> v>0?'up':v<0?'down':'flat';
 const sgn=v=> v>0?'+':'';
@@ -733,11 +733,19 @@ function buildNewsChips(){
     return `<button class="news-chip${on?' on':''}" onclick="setNewsFilter('${f.sector||''}','${f.kind||''}')">${label}</button>`;
   }).join('');
 }
-function setNewsFilter(sector,kind){ NEWS_FILTER={sector,kind}; buildNewsChips(); loadNews(); }
+function setNewsFilter(sector,kind){ NEWS_FILTER={sector,kind,code:''}; buildNewsChips(); loadNews(); }
+async function newsByCode(){   // L3：按代码看个股新闻 + 后台深抓更久历史
+  const code=(document.getElementById('newsCode').value||'').trim();
+  if(!/^\d{6}$/.test(code)){ alert('请输入 6 位代码'); return; }
+  NEWS_FILTER={sector:'',kind:'',code}; buildNewsChips();
+  fetch('/api/news/deepen',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code})}).catch(()=>{});
+  await loadNews();
+  setTimeout(loadNews, 6000);   // 深抓完再刷一次，补上更久历史
+}
 async function loadNews(){
   const box=document.getElementById('newsBody');
   box.innerHTML='<div class="paneempty"><span class="spin"></span> 读取资讯库…</div>';
-  const q=new URLSearchParams({sector:NEWS_FILTER.sector,kind:NEWS_FILTER.kind,limit:'80'});
+  const q=new URLSearchParams({sector:NEWS_FILTER.sector,kind:NEWS_FILTER.kind,code:NEWS_FILTER.code,limit:'80'});
   let j; try{ j=await (await fetch('/api/news?'+q)).json(); }
   catch(e){ box.innerHTML='<div class="paneempty">读取失败：'+e+'</div>'; return; }
   const s=j.status||{};

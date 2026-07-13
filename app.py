@@ -180,6 +180,16 @@ def news_status():
     return jsonify(news_store.stats())
 
 
+@app.route("/api/news/deepen", methods=["POST"])
+def news_deepen():
+    """L3：按需深抓单只股票更久历史（后台线程）。body: {code}。"""
+    code = ds.normalize((request.get_json(silent=True) or {}).get("code", ""))
+    if not (code.isdigit() and len(code) == 6):
+        return jsonify({"ok": False, "msg": "代码无效"}), 400
+    threading.Thread(target=news_store.deepen, args=(code,), daemon=True).start()
+    return jsonify({"ok": True, "running": True, "code": code})
+
+
 @app.route("/api/detail/<code>")
 def detail(code: str):
     """单只深挖：研报 + 龙虎榜 + 解禁 + 资金流 + 财报 + 新闻。"""
@@ -496,6 +506,12 @@ def _ai_web_context(scope: str, code: str = "", name: str = "") -> str:
     # L4：本地新闻库（带日期，让 AI 按新鲜度加权；个股取该股近期，大盘取市场级+政策）
     if scope == "position" and code:
         local = news_store.query(code=code, days=120, limit=8)
+        if len(local) < 5:  # L3：本地稀疏 → 按需深抓更久历史再取
+            try:
+                news_store.deepen(code)
+            except Exception as e:  # noqa: BLE001 兜底，不阻断 AI
+                logger.warning("news 深抓 %s 失败: %s", code, e)
+            local = news_store.query(code=code, days=365, limit=10)
     else:
         local = (news_store.query(sector="市场", days=30, limit=8)
                  + news_store.query(kind="政策", days=60, limit=6))

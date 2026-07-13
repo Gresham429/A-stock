@@ -378,7 +378,11 @@
     </div>
     <div class="news-ctl">
       <div class="news-chips" id="newsChips"></div>
-      <button class="btn" id="newsRefreshBtn" onclick="refreshNews()">🔄 刷新</button>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input id="newsCode" placeholder="代码看个股+拉历史" maxlength="6" style="width:150px"
+               onkeydown="if(event.key==='Enter')newsByCode()">
+        <button class="btn" id="newsRefreshBtn" onclick="refreshNews()">🔄 刷新</button>
+      </div>
     </div>
     <div id="newsBody"></div>
   </div>

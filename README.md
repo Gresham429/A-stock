@@ -103,10 +103,11 @@ A-stock/
 #    - 仓库路径 REPO（默认 /Volumes/Elements/workspace/A-stock）
 #    - python 路径（默认 /usr/bin/python3；用 which python3 确认）
 #    - 日志路径（默认 /Users/<你>/Library/Logs/astock-news.log）
-cp launchd/com.astock.news.plist ~/Library/LaunchAgents/
+cp launchd/com.astock.news.plist ~/Library/LaunchAgents/   # 别加 sudo！否则 plist 归 root，重启后 launchd 可能拒载
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.astock.news.plist
 ```
 > `bootstrap` 是新版 macOS 的官方命令（旧的 `launchctl load` 已废弃，且常报 `Load failed: 5: Input/output error`，别用）。
+> `~/Library/LaunchAgents` 本就是你自己的目录，**无需 sudo**；若已误用 sudo，跑 `sudo chown "$(id -un):staff" ~/Library/LaunchAgents/com.astock.news.plist` 改回属主。
 
 **验证 / 运维**：
 ```bash

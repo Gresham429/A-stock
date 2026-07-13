@@ -17,11 +17,11 @@
 from __future__ import annotations
 
 import logging
-import time
 from concurrent.futures import ThreadPoolExecutor
 
 from flask import Flask, jsonify, render_template, request
 
+import ai_cache
 import config
 import datasources as ds
 import llm
@@ -88,11 +88,7 @@ def overview():
     return jsonify({"rows": _overview_rows(store.load_watchlist()), "updated": _now()})
 
 
-# ── 大盘研判（指数 + 情绪 + AI 局势分析，带缓存） ─────────────────────────
-_MKT_CACHE: dict = {"ts": 0.0, "data": None}
-_MKT_TTL = 300  # 秒；指数 + 东财情绪 + 慢 AI，缓存 5 分钟避免频繁触发
-
-
+# ── 大盘研判（指数 + 情绪 + AI 局势分析，走 ai_cache 短期缓存） ────────────
 def _market_overview_payload(force: bool = False, with_ai: bool = True) -> dict:
     """组装大盘研判：指数(腾讯) + 情绪(东财) + AI 局势分析。带 5 分钟缓存。
 
@@ -105,10 +101,11 @@ def _market_overview_payload(force: bool = False, with_ai: bool = True) -> dict:
                 "breadth": None, "ai": None, "partial": True,
                 "model": config.DEEPSEEK_MODEL if config.llm_enabled() else None,
                 "updated": _now(), "cached": False}
-    now = time.time()
-    cached = _MKT_CACHE["data"]
-    if not force and cached and (now - _MKT_CACHE["ts"] < _MKT_TTL):
-        return {**cached, "cached": True}
+    if not force:
+        hit = ai_cache.get("market", {})
+        if hit:
+            return {**hit["result"], "cached": True,
+                    "analyzed_at": hit["ts"], "age_min": hit["age_min"]}
     idx = ds.index_quotes()
     breadth = ds.market_breadth()
     ai = None
@@ -117,13 +114,12 @@ def _market_overview_payload(force: bool = False, with_ai: bool = True) -> dict:
             ai = llm.market_overview(idx["indices"], breadth, _ai_web_context("market"))
         except llm.LLMError as e:
             logger.warning("大盘研判 AI 失败: %s", e)
-    data = {"ok": True, "indices": idx.get("indices", []),
+    model = config.DEEPSEEK_MODEL if config.llm_enabled() else None
+    core = {"ok": True, "indices": idx.get("indices", []),
             "amount_liang_yi": idx.get("amount_liang_yi"),
-            "breadth": breadth, "ai": ai,
-            "model": config.DEEPSEEK_MODEL if config.llm_enabled() else None,
-            "updated": _now()}
-    _MKT_CACHE["data"], _MKT_CACHE["ts"] = data, now
-    return {**data, "cached": False}
+            "breadth": breadth, "ai": ai, "model": model, "updated": _now()}
+    ts = ai_cache.put("market", {}, core, model or "")
+    return {**core, "cached": False, "analyzed_at": ts, "age_min": 0}
 
 
 @app.route("/api/market/overview")
@@ -263,10 +259,22 @@ def portfolio_remove():
 # ── DeepSeek 推荐 ─────────────────────────────────────────────────────────
 @app.route("/api/recommend/daily", methods=["POST"])
 def recommend_daily():
-    """每日推荐：把自选股指标 + 持仓喂给 DeepSeek。"""
+    """每日推荐：把自选股指标 + 持仓喂给 DeepSeek（走 ai_cache 智能命中）。"""
     if not config.llm_enabled():
         return jsonify({"ok": False, "msg": "未配置 DeepSeek key"}), 400
-    rows = _overview_rows(store.load_watchlist())
+    force = bool((request.get_json(silent=True) or {}).get("force"))
+    watchlist = store.load_watchlist()
+    holds_raw = portfolio.load()
+    inputs = {"wl": sorted(watchlist),
+              "hold": sorted([[h.get("code", ""), h.get("shares"), h.get("cost_price")]
+                              for h in holds_raw], key=lambda x: x[0])}
+    if not force:
+        hit = ai_cache.get("daily", inputs)
+        if hit:
+            return jsonify({"ok": True, **hit["result"], "model": hit["model"],
+                            "web_search": config.bocha_enabled(), "cached": True,
+                            "analyzed_at": hit["ts"], "age_min": hit["age_min"]})
+    rows = _overview_rows(watchlist)
     quotes = ds.tencent_quote(portfolio.codes()) if portfolio.codes() else {}
     holdings = portfolio.with_pnl(quotes)
     web_ctx = _ai_web_context("market")
@@ -274,8 +282,10 @@ def recommend_daily():
         result = llm.daily_recommendation(rows, holdings, web_ctx)
     except llm.LLMError as e:
         return jsonify({"ok": False, "msg": str(e)}), 502
+    ts = ai_cache.put("daily", inputs, {"result": result}, config.DEEPSEEK_MODEL)
     return jsonify({"ok": True, "result": result, "model": config.DEEPSEEK_MODEL,
-                    "web_search": config.bocha_enabled(), "updated": _now()})
+                    "web_search": config.bocha_enabled(), "cached": False,
+                    "analyzed_at": ts, "age_min": 0})
 
 
 @app.route("/api/recommend/position/<code>", methods=["POST"])
@@ -287,6 +297,16 @@ def recommend_position(code: str):
     holding = next((h for h in portfolio.load() if h.get("code") == code), None)
     if not holding:
         return jsonify({"ok": False, "msg": "该股票不在持仓中"}), 404
+    force = bool((request.get_json(silent=True) or {}).get("force"))
+    inputs = {"code": code, "shares": holding.get("shares"),
+              "cost": holding.get("cost_price"), "buy_date": holding.get("buy_date", "")}
+    if not force:
+        hit = ai_cache.get("position", inputs)
+        if hit:
+            return jsonify({"ok": True, "advice": hit["result"]["advice"],
+                            "financials": [], "news": [], "model": hit["model"],
+                            "web_search": config.bocha_enabled(), "cached": True,
+                            "analyzed_at": hit["ts"], "age_min": hit["age_min"]})
     quotes = ds.tencent_quote([code])
     q = quotes.get(code, {})
     enriched = [h for h in portfolio.with_pnl(quotes) if h.get("code") == code]
@@ -306,9 +326,11 @@ def recommend_position(code: str):
         advice = llm.position_advice(holding, q, metrics, financials, news, vol_hist, web_ctx)
     except llm.LLMError as e:
         return jsonify({"ok": False, "msg": str(e)}), 502
+    ts = ai_cache.put("position", inputs, {"advice": advice}, config.DEEPSEEK_MODEL)
     return jsonify({"ok": True, "advice": advice, "financials": financials,
                     "news": news[:5], "web_search": config.bocha_enabled(),
-                    "model": config.DEEPSEEK_MODEL})
+                    "model": config.DEEPSEEK_MODEL, "cached": False,
+                    "analyzed_at": ts, "age_min": 0})
 
 
 @app.route("/api/recommend/screen", methods=["POST"])
@@ -316,12 +338,20 @@ def recommend_screen():
     """全市场科技股筛选：跨板块 + 按资金规模。body: {capital?, focus_sector?}。"""
     if not config.llm_enabled():
         return jsonify({"ok": False, "msg": "未配置 DeepSeek key"}), 400
-    body = request.json or {}
+    body = request.get_json(silent=True) or {}
+    force = bool(body.get("force"))
     try:
         capital = float(body.get("capital", 10000))
     except (TypeError, ValueError):
         capital = 10000.0
     focus = body.get("focus_sector", "") or ""
+    inputs = {"capital": capital, "focus": focus}
+    if not force:
+        hit = ai_cache.get("screen", inputs)
+        if hit:
+            return jsonify({"ok": True, **hit["result"], "capital": capital, "focus": focus,
+                            "model": hit["model"], "web_search": config.bocha_enabled(),
+                            "cached": True, "analyzed_at": hit["ts"], "age_min": hit["age_min"]})
     rows = _screen_rows(capital, focus)
     if not rows:
         return jsonify({"ok": False, "msg": "候选池行情拉取失败，请重试"}), 502
@@ -331,11 +361,12 @@ def recommend_screen():
         result = llm.market_screen(rows, capital, focus, market_ctx, web_ctx)
     except llm.LLMError as e:
         return jsonify({"ok": False, "msg": str(e)}), 502
-    return jsonify({"ok": True, "result": result, "candidates": len(rows),
-                    "capital": capital, "focus": focus,
-                    "market_regime": (market_ctx or {}).get("regime"),
-                    "web_search": config.bocha_enabled(),
-                    "model": config.DEEPSEEK_MODEL, "updated": _now()})
+    blob = {"result": result, "candidates": len(rows),
+            "market_regime": (market_ctx or {}).get("regime")}
+    ts = ai_cache.put("screen", inputs, blob, config.DEEPSEEK_MODEL)
+    return jsonify({"ok": True, **blob, "capital": capital, "focus": focus,
+                    "web_search": config.bocha_enabled(), "model": config.DEEPSEEK_MODEL,
+                    "cached": False, "analyzed_at": ts, "age_min": 0})
 
 
 def _vol_hist(kl: list[dict]) -> dict:

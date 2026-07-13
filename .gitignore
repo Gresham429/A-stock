@@ -11,6 +11,8 @@
 # ── 本地数据（应用自动生成）──
 watchlist.json
 portfolio.json
+ai_cache.json
+data/
 
 # ── Python 编译产物 / 缓存 ──
 __pycache__/

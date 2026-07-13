@@ -777,7 +777,48 @@ function maybeRefreshNews(){
   }
 }
 
-document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeDrawer();closeGloss();closeRec();closeNews();}});
+/* ── 我的笔记（L5 私域信息 + AI 辅助记录） ── */
+let NOTE_DRAFT=null;
+function openNotes(){ NOTE_DRAFT=null; document.getElementById('noteInput').value=''; document.getElementById('noteDraft').innerHTML=''; loadNotesList(); document.getElementById('notesModal').classList.add('open'); }
+function closeNotes(){ document.getElementById('notesModal').classList.remove('open'); }
+async function aiStructNote(){
+  const content=document.getElementById('noteInput').value.trim(); if(!content){alert('先写点什么');return;}
+  const d=document.getElementById('noteDraft'); d.innerHTML='<div class="paneempty small"><span class="spin"></span> '+MODEL+' 整理中…</div>';
+  let j; try{ j=await (await fetch('/api/notes/structure',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content})})).json(); }
+  catch(e){ d.innerHTML='<div class="paneempty small">失败：'+e+'</div>'; return; }
+  if(!j.ok){ d.innerHTML='<div class="paneempty small">失败：'+(j.msg||'')+'</div>'; return; }
+  NOTE_DRAFT=j.draft||{};
+  d.innerHTML=`<div class="note-draft"><b>AI 整理（确认后点「保存」）：</b>
+    <div>摘要：${NOTE_DRAFT.summary||'—'}</div>
+    <div>类型：${NOTE_DRAFT.kind||'—'} · 标签：${(NOTE_DRAFT.tags||[]).join(' / ')||'—'}</div>
+    <div>关联：${(NOTE_DRAFT.codes||[]).join(', ')||'—'}${(NOTE_DRAFT.sectors||[]).length?' · '+(NOTE_DRAFT.sectors||[]).join('·'):''}</div></div>`;
+}
+async function saveNote(){
+  const content=document.getElementById('noteInput').value.trim(); if(!content){alert('先写点什么');return;}
+  const body=Object.assign({content}, NOTE_DRAFT||{});
+  let j; try{ j=await (await fetch('/api/notes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json(); }
+  catch(e){ alert('保存失败：'+e); return; }
+  if(!j.ok){ alert(j.msg||'保存失败'); return; }
+  document.getElementById('noteInput').value=''; document.getElementById('noteDraft').innerHTML=''; NOTE_DRAFT=null; loadNotesList();
+}
+async function loadNotesList(){
+  const box=document.getElementById('notesList');
+  let j; try{ j=await (await fetch('/api/notes?limit=100')).json(); }catch(e){ box.innerHTML='<div class="paneempty">读取失败</div>'; return; }
+  const items=j.notes||[];
+  box.innerHTML = items.length ? items.map(n=>`
+    <div class="note-item"><div class="nm2">
+      <span class="nd">${(n.created_at||'').replace('T',' ').slice(0,16)}</span>
+      ${n.kind?`<span class="nk">${n.kind}</span>`:''}
+      ${n.tags?n.tags.split(',').filter(Boolean).map(t=>`<span class="nk">${t}</span>`).join(''):''}
+      ${n.codes?`<span class="nk">${n.codes}</span>`:''}
+      <button class="mini danger" style="margin-left:auto" onclick="delNote(${n.id})">删</button>
+    </div>${n.ai_summary?`<div class="muted small">📌 ${n.ai_summary}</div>`:''}
+    <div>${(n.content||'').replace(/</g,'&lt;')}</div></div>`).join('')
+    : '<div class="paneempty">还没有笔记。写点你的判断，AI 分析时会作为你的私域认知参考。</div>';
+}
+async function delNote(id){ if(!confirm('删除这条笔记？'))return; await fetch('/api/notes/'+id,{method:'DELETE'}); loadNotesList(); }
+
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeDrawer();closeGloss();closeRec();closeNews();closeNotes();}});
 initTooltips();
 loadConfig();
 load();

@@ -6,6 +6,7 @@ data/rules.db（gitignore）。每条带 created_at/updated_at。
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import sqlite3
@@ -20,17 +21,34 @@ DB_PATH = os.path.join(_DIR, "rules.db")
 _LOCK = threading.Lock()
 
 CATEGORIES = ["总则纪律", "市场状态识别", "趋势与通道", "区间震荡",
-              "突破与失败", "形态结构", "计数与结构", "K线信号", "止损止盈", "入场时机"]
+              "突破与失败", "形态结构", "计数与结构", "K线信号", "止损止盈", "入场时机",
+              "资金与周期"]
+
+# 场景维度：本金档 + 周期。规则的 scenarios 标签命中当前场景(或为空=通用)才生效注入 AI。
+CAPITAL_SCENARIOS = ["小", "中", "大"]
+HORIZON_SCENARIOS = ["短线", "波段", "长线"]
+DEFAULT_SCENARIO = "小,波段"  # 贴合用户 1 万本金画像
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS rules(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   created_at TEXT, updated_at TEXT,
   category TEXT, title TEXT, content TEXT,
-  enabled INTEGER DEFAULT 1, source TEXT
+  enabled INTEGER DEFAULT 1, source TEXT, scenarios TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_rules_cat ON rules(category);
+CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
 """
+
+# 部分规则的场景标签（其余为空=通用，任何场景都生效）。以标题为键。
+_SCENARIO_TAGS = {
+    "极速（尖峰级单向）": "短线", "Weak H1 慎做": "短线,波段",
+    "H1/H2/L1/L2 计数": "短线,波段", "突破要测试": "短线,波段",
+    "60/40 与盈亏比": "波段,长线", "二次入场优先": "波段,长线",
+    "结构目标 Measured Move": "波段,长线",
+    "小资金聚焦": "小", "大资金分批": "大", "短线快进快出": "短线",
+    "波段持结构": "波段", "长线看基本面": "长线",
+}
 
 # 蒸馏种子：(分类, 标题, 要点)。改写自 PA_Agent，适配 A股波段分析。
 _SEED: list[tuple[str, str, str]] = [
@@ -102,6 +120,14 @@ _SEED: list[tuple[str, str, str]] = [
     ("计数与结构", "Weak H1 慎做", "回撤后第一根突破但实体弱/上影长＝Weak H1，除非 Always In 明确+窄通道+强入场棒，否则等 H2 再说。"),
     ("计数与结构", "H3/L3＝楔形旗", "第三次同向计数（H3/L3）常演变成楔形牛旗/熊旗（三推），别盲目当延续追单。"),
     ("计数与结构", "顺 Always In 入场", "顺 AIL/AIS 方向，即使信号不完美也可评估回撤（H1/H2）入场；逆 Always In 的首个反转只作诊断、不下单。"),
+
+    # ── 资金与周期（场景相关，配合『当前场景』灵活启用）──
+    ("资金与周期", "小资金聚焦", "本金小（如≤2万）：聚焦 1~2 手买得起的中低价股，别过度分散；单手成本必须 ≤ 可用资金。"),
+    ("资金与周期", "大资金分批", "本金较大：分批建仓、不一次打满，降低择时风险与冲击成本。"),
+    ("资金与周期", "短线快进快出", "短线：只做强趋势/尖峰顺势，破位即走、不扛亏、不恋战；重时机、轻基本面。"),
+    ("资金与周期", "波段持结构", "波段：以趋势/通道/结构为主线，持到结构被破坏或到结构目标位；容忍日内噪声。"),
+    ("资金与周期", "长线看基本面", "长线：以业绩增速+估值为主，技术只用于择时；忽略日内波动，重仓须基本面支撑。"),
+    ("资金与周期", "仓位与风险敞口", "单一标的敞口有度：波动越大、确定性越低，投入越少；别把小本金全押在一只高波动股上。"),
 ]
 
 
@@ -115,24 +141,50 @@ def _conn() -> sqlite3.Connection:
 def init() -> None:
     with _LOCK, _conn() as c:
         c.executescript(_SCHEMA)
+        cols = {r[1] for r in c.execute("PRAGMA table_info(rules)").fetchall()}
+        if "scenarios" not in cols:  # 老库迁移：补 scenarios 列
+            c.execute("ALTER TABLE rules ADD COLUMN scenarios TEXT DEFAULT ''")
     seed()
 
 
 def seed() -> int:
-    """加性灌种子：只补库中缺失的 (分类,标题)，不动用户已有/已改/已删的其它规则。返回新增条数。"""
-    existing = {(r["category"], r["title"]) for r in list_rules()}
-    to_add = [(cat, title, content) for cat, title, content in _SEED
-              if (cat, title) not in existing]
-    if not to_add:
-        return 0
+    """加性灌种子：补缺失的 (分类,标题) + 回填场景标签到已存在但无标签的种子规则。返回新增条数。"""
+    existing = {(r["category"], r["title"]): r for r in list_rules()}
     now = datetime.now().isoformat(timespec="seconds")
+    added = 0
     with _LOCK, _conn() as c:
-        c.executemany(
-            "INSERT INTO rules(created_at,updated_at,category,title,content,enabled,source)"
-            " VALUES(?,?,?,?,?,1,'PA_Agent')",
-            [(now, now, cat, title, content) for cat, title, content in to_add])
-    logger.info("规则库种子补入 %d 条", len(to_add))
-    return len(to_add)
+        for cat, title, content in _SEED:
+            scen = _SCENARIO_TAGS.get(title, "")
+            row = existing.get((cat, title))
+            if row is None:
+                c.execute(
+                    "INSERT INTO rules(created_at,updated_at,category,title,content,enabled,source,scenarios)"
+                    " VALUES(?,?,?,?,?,1,'PA_Agent',?)", (now, now, cat, title, content, scen))
+                added += 1
+            elif scen and not (row.get("scenarios") or ""):
+                c.execute("UPDATE rules SET scenarios=? WHERE id=?", (scen, row["id"]))
+    if added:
+        logger.info("规则库种子补入 %d 条", added)
+    return added
+
+
+def get_meta(k: str) -> str:
+    with _conn() as c:
+        r = c.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone()
+        return r[0] if r else ""
+
+
+def set_meta(k: str, v: str) -> None:
+    with _LOCK, _conn() as c:
+        c.execute("INSERT INTO meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, v))
+
+
+def get_scenario() -> str:
+    return get_meta("scenario") or DEFAULT_SCENARIO
+
+
+def set_scenario(v: str) -> None:
+    set_meta("scenario", v)
 
 
 def _row(r: sqlite3.Row) -> dict[str, Any]:
@@ -155,17 +207,18 @@ def list_rules(category: str = "", enabled_only: bool = False) -> list[dict[str,
         return [_row(r) for r in c.execute(sql, args).fetchall()]
 
 
-def add(category: str, title: str, content: str, source: str = "user") -> int:
+def add(category: str, title: str, content: str, source: str = "user",
+        scenarios: str = "") -> int:
     now = datetime.now().isoformat(timespec="seconds")
     with _LOCK, _conn() as c:
         cur = c.execute(
-            "INSERT INTO rules(created_at,updated_at,category,title,content,enabled,source)"
-            " VALUES(?,?,?,?,?,1,?)", (now, now, category, title, content, source))
+            "INSERT INTO rules(created_at,updated_at,category,title,content,enabled,source,scenarios)"
+            " VALUES(?,?,?,?,?,1,?,?)", (now, now, category, title, content, source, scenarios))
         return cur.lastrowid
 
 
 def update(rule_id: int, **fields: Any) -> None:
-    allowed = ("category", "title", "content", "enabled")
+    allowed = ("category", "title", "content", "enabled", "scenarios")
     sets = [f"{k}=?" for k in fields if k in allowed]
     if not sets:
         return
@@ -181,9 +234,22 @@ def delete(rule_id: int) -> None:
         c.execute("DELETE FROM rules WHERE id=?", (rule_id,))
 
 
-def for_ai(limit: int = 100) -> str:
-    """启用中的规则拼成提示词块（按分类分组），供 AI 分析时遵循。空则返回空串。"""
-    rows = list_rules(enabled_only=True)
+def _rule_tags(r: dict[str, Any]) -> set[str]:
+    return {t.strip() for t in (r.get("scenarios") or "").split(",")
+            if t.strip() and t.strip() != "通用"}
+
+
+def is_active(r: dict[str, Any], scenario: set[str]) -> bool:
+    """规则对当前场景是否生效：无场景标签(通用) 或 标签命中当前场景。"""
+    tags = _rule_tags(r)
+    return not tags or bool(tags & scenario)
+
+
+def for_ai(scenario: str | None = None, limit: int = 100) -> str:
+    """当前场景下、启用中的规则拼成提示词块（按分类分组），供 AI 遵循。空则返回空串。"""
+    scen = {t.strip() for t in (scenario if scenario is not None else get_scenario()).split(",")
+            if t.strip()}
+    rows = [r for r in list_rules(enabled_only=True) if is_active(r, scen)]
     if not rows:
         return ""
     by_cat: dict[str, list[str]] = {}
@@ -197,6 +263,14 @@ def for_ai(limit: int = 100) -> str:
         if cat not in CATEGORIES:
             parts.append(f"【{cat}】\n" + "\n".join(f"- {x}" for x in items))
     return "\n".join(parts)
+
+
+def signature() -> str:
+    """当前场景 + 生效规则集合的短哈希，供 AI 缓存指纹（改场景/改规则即失效重算）。"""
+    scen = get_scenario()
+    active = {t.strip() for t in scen.split(",") if t.strip()}
+    ids = sorted(r["id"] for r in list_rules(enabled_only=True) if is_active(r, active))
+    return hashlib.sha1((scen + ":" + ",".join(map(str, ids))).encode()).hexdigest()[:8]
 
 
 def count() -> int:

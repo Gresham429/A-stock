@@ -109,8 +109,9 @@ def _market_overview_payload(force: bool = False, with_ai: bool = True) -> dict:
                 "breadth": None, "ai": None, "partial": True,
                 "model": config.DEEPSEEK_MODEL if config.llm_enabled() else None,
                 "updated": _now(), "cached": False}
+    mkt_inputs = {"rules": rules_store.signature()}
     if not force:
-        hit = ai_cache.get("market", {})
+        hit = ai_cache.get("market", mkt_inputs)
         if hit:
             return {**hit["result"], "cached": True,
                     "analyzed_at": hit["ts"], "age_min": hit["age_min"]}
@@ -126,7 +127,7 @@ def _market_overview_payload(force: bool = False, with_ai: bool = True) -> dict:
     core = {"ok": True, "indices": idx.get("indices", []),
             "amount_liang_yi": idx.get("amount_liang_yi"),
             "breadth": breadth, "ai": ai, "model": model, "updated": _now()}
-    ts = ai_cache.put("market", {}, core, model or "")
+    ts = ai_cache.put("market", mkt_inputs, core, model or "")
     return {**core, "cached": False, "analyzed_at": ts, "age_min": 0}
 
 
@@ -246,7 +247,10 @@ def notes_delete(note_id: int):
 @app.route("/api/rules")
 def rules_list():
     return jsonify({"rules": rules_store.list_rules(category=request.args.get("category", "")),
-                    "categories": rules_store.CATEGORIES, "count": rules_store.count()})
+                    "categories": rules_store.CATEGORIES, "count": rules_store.count(),
+                    "scenario": rules_store.get_scenario(),
+                    "capital_scenarios": rules_store.CAPITAL_SCENARIOS,
+                    "horizon_scenarios": rules_store.HORIZON_SCENARIOS})
 
 
 @app.route("/api/rules", methods=["POST"])
@@ -257,13 +261,14 @@ def rules_add():
     category = (b.get("category") or "").strip() or "总则纪律"
     if not title or not content:
         return jsonify({"ok": False, "msg": "标题和内容必填"}), 400
-    return jsonify({"ok": True, "id": rules_store.add(category, title, content)})
+    return jsonify({"ok": True, "id": rules_store.add(
+        category, title, content, scenarios=(b.get("scenarios") or "").strip())})
 
 
 @app.route("/api/rules/<int:rule_id>", methods=["PUT"])
 def rules_update(rule_id: int):
     b = request.get_json(silent=True) or {}
-    fields = {k: b[k] for k in ("category", "title", "content", "enabled") if k in b}
+    fields = {k: b[k] for k in ("category", "title", "content", "enabled", "scenarios") if k in b}
     rules_store.update(rule_id, **fields)
     return jsonify({"ok": True})
 
@@ -272,6 +277,14 @@ def rules_update(rule_id: int):
 def rules_delete(rule_id: int):
     rules_store.delete(rule_id)
     return jsonify({"ok": True})
+
+
+@app.route("/api/rules/scenario", methods=["POST"])
+def rules_scenario():
+    """设置当前场景（本金档+周期），影响哪些规则注入 AI。body: {scenario:'小,波段'}。"""
+    v = (request.get_json(silent=True) or {}).get("scenario", "")
+    rules_store.set_scenario(v)
+    return jsonify({"ok": True, "scenario": rules_store.get_scenario()})
 
 
 @app.route("/api/detail/<code>")
@@ -406,7 +419,7 @@ def recommend_daily():
     force = bool((request.get_json(silent=True) or {}).get("force"))
     watchlist = store.load_watchlist()
     holds_raw = portfolio.load()
-    inputs = {"wl": sorted(watchlist),
+    inputs = {"wl": sorted(watchlist), "rules": rules_store.signature(),
               "hold": sorted([[h.get("code", ""), h.get("shares"), h.get("cost_price")]
                               for h in holds_raw], key=lambda x: x[0])}
     if not force:
@@ -439,7 +452,7 @@ def recommend_position(code: str):
     if not holding:
         return jsonify({"ok": False, "msg": "该股票不在持仓中"}), 404
     force = bool((request.get_json(silent=True) or {}).get("force"))
-    inputs = {"code": code, "shares": holding.get("shares"),
+    inputs = {"code": code, "shares": holding.get("shares"), "rules": rules_store.signature(),
               "cost": holding.get("cost_price"), "buy_date": holding.get("buy_date", "")}
     if not force:
         hit = ai_cache.get("position", inputs)
@@ -486,7 +499,7 @@ def recommend_screen():
     except (TypeError, ValueError):
         capital = 10000.0
     focus = body.get("focus_sector", "") or ""
-    inputs = {"capital": capital, "focus": focus}
+    inputs = {"capital": capital, "focus": focus, "rules": rules_store.signature()}
     if not force:
         hit = ai_cache.get("screen", inputs)
         if hit:

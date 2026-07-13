@@ -22,7 +22,8 @@ _DISCLAIMER = (
     "② 数据缺失就明说「数据不足」，不要脑补；"
     "③ 只描述波动幅度与概率区间，不对涨跌方向下确定性断言；"
     "④ 结论需可被给定数据支撑，逻辑链清晰、口径一致；"
-    "⑤ 所有输出均为「决策参考信号」，不是投资建议、不保证收益。"
+    "⑤ 所有输出均为「决策参考信号」，不是投资建议、不保证收益；"
+    "⑥ 若提示词含【交易分析框架规则】，必须严格遵循，结论不得与之相悖（尤其禁止逆势/禁止追高潮/交易者方程）。"
     "语气客观冷静，中文回答，严格按要求的 JSON 结构返回。")
 
 
@@ -216,19 +217,25 @@ def daily_recommendation(rows: list[dict[str, Any]],
 {_web_block(web_context)}
 分析要点：估值(PE/PB是否偏贵)、动能(20日涨幅)、位置(区间位置越接近100越过热、越接近0越低位)、
 资金(主力净流入为正是流入)、波动(年化波动越高越刺激也越危险)。本金约1万元、偏好科技股与波动。
+**严格遵循上方【交易分析框架规则】**（若有）。
+
+⚠️ 这是**组合级速览**（只喂了紧凑指标，没有财报/波动史/个股新闻/你的成本）：
+- **对持仓中的股票**：只做粗筛，倾向 hold/watch，**不要仅凭浅层指标下硬 sell/reduce**；若觉得该重新评估，标 action=watch 并在 reason 里写「建议用『何时卖』深看」——持仓的买卖最终以单只深度分析(position)为准。
+- 非持仓的自选股：可给 buy/watch 倾向。
 
 严格返回如下 JSON：
 {{
   "market_view": "一句话概括当前该组合的整体情绪/风险",
   "picks": [
-    {{"code":"", "name":"", "action":"buy|add|hold|reduce|sell|watch",
+    {{"code":"", "name":"", "action":"buy|add|hold|watch|reduce|sell",
+      "held": true/false,
       "confidence":"high|mid|low",
-      "reason":"结合上面数据的具体理由(40字内)",
+      "reason":"结合上面数据的具体理由(40字内)；持仓需评估时写『建议用何时卖深看』",
       "risk":"这只最大的风险(20字内)"}}
   ],
   "holdings_note": "针对持仓的一句话提醒(无持仓则填 无)"
 }}
-picks 覆盖全部自选股，按操作优先级排序(该买/该卖的排前面)。"""
+picks 覆盖全部自选股，按关注优先级排序。**持仓股 action 默认 hold/watch，除非规则明确触发。**"""
     content = _chat([{"role": "system", "content": _DISCLAIMER},
                      {"role": "user", "content": prompt}], max_tokens=8000)
     return _parse_json(content)
@@ -271,6 +278,8 @@ def position_advice(holding: dict[str, Any], quote: dict[str, Any],
 {news_txt}
 {_web_block(web_context)}
 要求：结合基本面(营收/利润增速)、估值、技术位置(区间/波动/支撑压力)、资金、新闻/政策面综合判断。
+**严格遵循上方【交易分析框架规则】**（若有）——先判市场状态、只顺势、结构止损、交易者方程；结论不得与规则相悖。
+这是**该持仓的权威判断**（比组合速览『自选推荐』更深、更可信）。
 严格返回 JSON：
 {{
   "action":"hold|add|reduce|sell",
@@ -278,6 +287,8 @@ def position_advice(holding: dict[str, Any], quote: dict[str, Any],
   "add_trigger":"具体价位/条件可加仓",
   "stop_loss":"止损价位或跌幅",
   "take_profit":"止盈参考价位",
+  "hold_horizon":"建议持有周期(如『持有2~6周看季报兑现』/『破位即走』)，结合你的周期偏好",
+  "rule_basis":"本次决策命中的框架规则(如『交易者方程/顺势/结构止损』，20字内)",
   "fundamental":"基本面一句话(结合财报增速与估值)",
   "policy_news":"新闻/政策面一句话(若新闻不足则说明)",
   "reason":"综合结论(80字内)"

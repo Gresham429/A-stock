@@ -543,10 +543,11 @@ async function runDaily(force){
   if(!j.ok){ box.innerHTML='<div class="paneempty">生成失败：'+(j.msg||'')+'</div>'; return; }
   const r=j.result||{};
   let h=aiMeta(j,'runDaily(true)')+`<div class="mview">📊 ${r.market_view||''}</div>`;
+  h+=`<div class="ov-note">组合级速览（浅层指标粗筛）。<b>持仓的最终买卖以「🤖 何时卖」为准</b>——本面板持仓默认倾向持有/观望。</div>`;
   h+='<div class="reccards">'+(r.picks||[]).map(p=>{
     const a=ACT[p.action]||['?','a-hold'];
     return `<div class="reccard ${a[1]}"><div class="rc-top"><span class="badge ${a[1]}">${a[0]}</span>
-      <span class="rc-name">${p.name||''} <em>${p.code||''}</em></span>
+      <span class="rc-name">${p.name||''} <em>${p.code||''}</em>${p.held?' <span class="rule-scen">持仓</span>':''}</span>
       <span class="rc-conf">${({high:'高',mid:'中',low:'低'})[p.confidence]||''}信心</span></div>
       <div class="rc-reason">${p.reason||''}</div>${p.risk?`<div class="rc-risk">⚠ ${p.risk}</div>`:''}</div>`;
   }).join('')+'</div>';
@@ -623,15 +624,19 @@ async function isHeld(code){ const j=await (await fetch('/api/portfolio')).json(
 function adviceHTML(a,model){
   const map={hold:['持有','a-hold'],add:['加仓','a-buy'],reduce:['减仓','a-sell'],sell:['卖出','a-sell']};
   const m=map[a.action]||['参考','a-hold'];
-  return `<div class="advice"><div class="rc-top"><span class="badge ${m[1]}">${m[0]}</span><span class="rc-name">${model} 建议</span></div>
-    <div class="akv"><div><span>卖出条件</span>${a.sell_trigger||'—'}</div>
-    <div><span>加仓条件</span>${a.add_trigger||'—'}</div>
-    <div><span>止损参考</span>${a.stop_loss||'—'}</div>
-    <div><span>止盈参考</span>${a.take_profit||'—'}</div></div>
-    ${a.fundamental?`<div class="rc-reason"><b>📊 基本面：</b>${a.fundamental}</div>`:''}
-    ${a.policy_news?`<div class="rc-reason"><b>📰 政策/新闻：</b>${a.policy_news}</div>`:''}
-    <div class="rc-reason"><b>结论：</b>${a.reason||''}</div>
-    <div class="disc">AI 参考信号，结合了波动史/财报/新闻，但不构成投资建议。</div></div>`;
+  return `<div class="advice">
+    <div class="rc-top"><span class="badge ${m[1]}" style="font-size:13px;padding:3px 12px">${m[0]}</span>
+      <span class="rc-name">${model} · <b>持仓权威判断</b>（比自选推荐更深）</span></div>
+    ${a.hold_horizon?`<div class="adv-hold">⏳ 建议持有周期：${esc(a.hold_horizon)}</div>`:''}
+    <div class="akv"><div><span>卖出条件</span>${esc(a.sell_trigger)||'—'}</div>
+    <div><span>加仓条件</span>${esc(a.add_trigger)||'—'}</div>
+    <div><span>止损参考</span>${esc(a.stop_loss)||'—'}</div>
+    <div><span>止盈参考</span>${esc(a.take_profit)||'—'}</div></div>
+    ${a.fundamental?`<div class="rc-reason"><b>📊 基本面：</b>${esc(a.fundamental)}</div>`:''}
+    ${a.policy_news?`<div class="rc-reason"><b>📰 政策/新闻：</b>${esc(a.policy_news)}</div>`:''}
+    <div class="rc-reason"><b>结论：</b>${esc(a.reason)}</div>
+    ${a.rule_basis?`<div class="adv-rule">📐 依据规则：${esc(a.rule_basis)}</div>`:''}
+    <div class="disc">AI 参考信号，结合波动史/财报/新闻/规则；**持仓买卖以此为准**（自选推荐仅组合速览）。不构成投资建议。</div></div>`;
 }
 
 /* ── 持仓 ── */
@@ -820,40 +825,52 @@ async function delNote(id){ if(!confirm('删除这条笔记？'))return; await f
 
 /* ── 交易规则库（蒸馏自 PA_Agent，可增删改；启用中的注入 AI） ── */
 let RULE_FILTER='', RULE_EDIT_ID=null, RULES_DATA=[], RULE_CATS=[];
+let RULE_SCEN='', RULE_CAP_OPTS=[], RULE_HOR_OPTS=[];
 function openRules(){ RULE_FILTER=''; RULE_EDIT_ID=null; document.getElementById('ruleForm').style.display='none'; loadRules(); document.getElementById('rulesModal').classList.add('open'); }
 function closeRules(){ document.getElementById('rulesModal').classList.remove('open'); }
+function scenSet(){ return new Set(RULE_SCEN.split(',').map(s=>s.trim()).filter(Boolean)); }
+function ruleActive(r){ const t=(r.scenarios||'').split(',').map(s=>s.trim()).filter(s=>s&&s!=='通用'); if(!t.length) return true; const s=scenSet(); return t.some(x=>s.has(x)); }
 async function loadRules(){
   const box=document.getElementById('rulesBody'); box.innerHTML='<div class="paneempty"><span class="spin"></span> 读取规则…</div>';
   let j; try{ j=await (await fetch('/api/rules')).json(); }
   catch(e){ box.innerHTML='<div class="paneempty">读取失败：'+e+'</div>'; return; }
-  RULES_DATA=j.rules||[]; RULE_CATS=j.categories||[];
+  RULES_DATA=j.rules||[]; RULE_CATS=j.categories||[]; RULE_SCEN=j.scenario||''; RULE_CAP_OPTS=j.capital_scenarios||[]; RULE_HOR_OPTS=j.horizon_scenarios||[];
+  const s=scenSet();
+  const chip=(v,on,fn)=>`<button class="news-chip${on?' on':''}" onclick="${fn}">${v}</button>`;
+  document.getElementById('scenCap').innerHTML=RULE_CAP_OPTS.map(v=>chip(v,s.has(v),`setScenCap('${v}')`)).join('');
+  document.getElementById('scenHor').innerHTML=RULE_HOR_OPTS.map(v=>chip(v,s.has(v),`setScenHor('${v}')`)).join('');
   document.getElementById('rulesChips').innerHTML=['全部',...RULE_CATS].map(c=>{
     const v=(c==='全部'?'':c), on=v===RULE_FILTER;
     return `<button class="news-chip${on?' on':''}" onclick="setRulesFilter('${v}')">${c}</button>`;
   }).join('');
   document.getElementById('rf_cat').innerHTML=RULE_CATS.map(c=>`<option value="${c}">${c}</option>`).join('');
-  const en=RULES_DATA.filter(r=>r.enabled).length;
-  document.getElementById('rulesStat').textContent=`共 ${j.count} 条 · 启用 ${en} 条会注入 AI 分析 · 蒸馏自 PA_Agent 价格行为体系`;
+  const act=RULES_DATA.filter(r=>r.enabled&&ruleActive(r)).length;
+  document.getElementById('rulesStat').textContent=`共 ${j.count} 条 · 当前场景[${RULE_SCEN}]下生效 ${act} 条会注入 AI · 蒸馏自 PA_Agent`;
   const cats=RULE_FILTER?[RULE_FILTER]:RULE_CATS;
   let h='';
   for(const cat of cats){
     const items=RULES_DATA.filter(r=>r.category===cat); if(!items.length) continue;
-    h+=`<div class="rule-cat">${esc(cat)}（${items.length}）</div>`+items.map(r=>`
-      <div class="rule-item ${r.enabled?'':'off'}">
-        <div class="rc"><div class="rt">${esc(r.title)}${r.source?` <span class="rule-src">${esc(r.source)}</span>`:''}</div>
+    h+=`<div class="rule-cat">${esc(cat)}（${items.length}）</div>`+items.map(r=>{
+      const active=r.enabled&&ruleActive(r), dim=!active;
+      return `<div class="rule-item ${dim?'dim':''}">
+        <div class="rc"><div class="rt">${esc(r.title)}${r.scenarios?` <span class="rule-scen">${esc(r.scenarios)}</span>`:''}${r.source?` <span class="rule-src">${esc(r.source)}</span>`:''}</div>
           <div class="rd">${esc(r.content)}</div></div>
         <div class="racts">
           <button class="mini" onclick="toggleRule(${r.id},${r.enabled?0:1})">${r.enabled?'停用':'启用'}</button>
           <button class="mini" onclick="editRule(${r.id})">改</button>
           <button class="mini danger" onclick="delRule(${r.id})">删</button>
-        </div></div>`).join('');
+        </div></div>`;
+    }).join('');
   }
   box.innerHTML = h || '<div class="paneempty">该分类暂无规则，点「＋新增规则」加一条。</div>';
 }
+async function setScenario(v){ await fetch('/api/rules/scenario',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scenario:v})}); loadRules(); }
+function setScenCap(v){ const hor=[...scenSet()].filter(x=>RULE_HOR_OPTS.includes(x)); setScenario([v,...hor].join(',')); }
+function setScenHor(v){ const cap=[...scenSet()].filter(x=>RULE_CAP_OPTS.includes(x)); setScenario([...cap,v].join(',')); }
 function setRulesFilter(cat){ RULE_FILTER=cat; loadRules(); }
 function toggleRuleForm(){
   const f=document.getElementById('ruleForm');
-  if(f.style.display==='none'){ RULE_EDIT_ID=null; document.getElementById('rf_title').value=''; document.getElementById('rf_content').value=''; f.style.display='block'; }
+  if(f.style.display==='none'){ RULE_EDIT_ID=null; document.getElementById('rf_title').value=''; document.getElementById('rf_content').value=''; document.getElementById('rf_scen').value=''; f.style.display='block'; }
   else f.style.display='none';
 }
 function editRule(id){
@@ -862,16 +879,18 @@ function editRule(id){
   document.getElementById('rf_cat').value=r.category;
   document.getElementById('rf_title').value=r.title;
   document.getElementById('rf_content').value=r.content;
+  document.getElementById('rf_scen').value=r.scenarios||'';
   document.getElementById('ruleForm').style.display='block';
 }
 async function saveRule(){
   const category=document.getElementById('rf_cat').value;
   const title=document.getElementById('rf_title').value.trim();
   const content=document.getElementById('rf_content').value.trim();
+  const scenarios=document.getElementById('rf_scen').value.trim();
   if(!title||!content){ alert('标题和内容必填'); return; }
   const url=RULE_EDIT_ID?('/api/rules/'+RULE_EDIT_ID):'/api/rules';
   const method=RULE_EDIT_ID?'PUT':'POST';
-  let j; try{ j=await (await fetch(url,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify({category,title,content})})).json(); }
+  let j; try{ j=await (await fetch(url,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify({category,title,content,scenarios})})).json(); }
   catch(e){ alert('保存失败：'+e); return; }
   if(j.ok!==false){ document.getElementById('ruleForm').style.display='none'; RULE_EDIT_ID=null; loadRules(); } else alert(j.msg||'保存失败');
 }

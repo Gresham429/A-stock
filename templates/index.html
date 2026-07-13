@@ -264,6 +264,15 @@
   .rule-item .racts{display:flex;gap:5px;flex-shrink:0}
   .rule-item .racts .mini{padding:3px 7px;font-size:11px}
   .rule-src{font-size:9.5px;color:var(--dim);border:1px solid var(--line2);border-radius:3px;padding:0 4px;margin-left:6px}
+  .rule-scen{font-size:9.5px;color:var(--gold);border:1px solid var(--gold-dim);border-radius:3px;padding:0 4px;margin-left:5px}
+  .rule-item.dim{opacity:.4}
+  .scen-bar{display:flex;gap:16px;flex-wrap:wrap;align-items:center;background:var(--bg2);border:1px solid var(--line);border-radius:8px;padding:9px 12px;margin:8px 0;font-size:12px}
+  .scen-grp{display:flex;gap:6px;align-items:center} .scen-grp .lbl{color:var(--muted)}
+  /* 何时卖面板增强 */
+  .adv-hold{font-size:12.5px;color:var(--gold);background:rgba(224,169,46,.08);border-radius:6px;padding:6px 10px;margin:8px 0}
+  .adv-rule{font-size:11.5px;color:var(--muted);margin-top:8px;border-top:1px dashed var(--line);padding-top:6px}
+  /* 对比表是总览的说明条 */
+  .ov-note{font-size:11.5px;color:var(--muted);margin:2px 0 8px;padding:6px 10px;background:var(--bg2);border-left:2px solid var(--gold-dim);border-radius:4px}
 </style>
 </head>
 <body>
@@ -328,6 +337,7 @@
 
   <!-- 自选股对比 -->
   <div class="sectitle">自选股对比 <span class="tag2">WATCHLIST</span></div>
+  <div class="ov-note">📊 这是<b>客观指标总览</b>（用于横向对比、点行深挖），<b>不是买卖建议</b>。要意见：点「🤖 自选推荐」看组合速览，或对持仓用「🤖 何时卖」看权威判断。</div>
   <div class="tablecard">
     <table><thead><tr id="head"></tr></thead>
     <tbody id="rows"><tr><td colspan="12" class="empty"><span class="spin"></span> 加载中…</td></tr></tbody></table>
@@ -436,6 +446,11 @@
       <div><h2>📐 交易规则库</h2><div class="sub2" id="rulesStat">蒸馏自 PA_Agent 价格行为体系 · 启用中的规则会注入 AI 分析</div></div>
       <button class="xclose" onclick="closeRules()">×</button>
     </div>
+    <div class="scen-bar" id="scenBar">
+      <div class="scen-grp"><span class="lbl">当前场景 · 本金</span><span id="scenCap"></span></div>
+      <div class="scen-grp"><span class="lbl">周期</span><span id="scenHor"></span></div>
+      <span class="small muted">只有「通用」或命中当前场景的规则才注入 AI</span>
+    </div>
     <div class="news-ctl">
       <div class="news-chips" id="rulesChips"></div>
       <button class="btn ai" onclick="toggleRuleForm()">＋ 新增规则</button>
@@ -445,6 +460,7 @@
         <select id="rf_cat"></select>
         <input id="rf_title" placeholder="规则标题（如：结构止损）">
         <textarea id="rf_content" rows="2" placeholder="可操作要点…"></textarea>
+        <input id="rf_scen" placeholder="场景标签，逗号分隔（如 小,波段；留空=通用，任何场景都生效）">
         <div style="display:flex;gap:8px"><button class="btn ai" onclick="saveRule()">保存</button><button class="btn" onclick="toggleRuleForm()">取消</button></div>
       </div>
     </div>

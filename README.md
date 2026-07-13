@@ -64,24 +64,71 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com
 ```
 A-stock/
 ├── app.py              # Flask 路由（后端）
-├── datasources.py      # 行情/指标/研报/龙虎榜/解禁/K线/财报/新闻
-├── llm.py              # DeepSeek 集成：自选推荐 / 全市场筛选 / 持仓建议
+├── datasources.py      # 行情/指标/研报/龙虎榜/解禁/K线/分时/财报/新闻/指数/情绪
+├── llm.py              # DeepSeek 集成：自选推荐/全市场筛选/持仓建议/大盘研判/笔记结构化
+├── ai_cache.py         # L1 AI 输出短期缓存（智能命中 + 时间戳）
+├── news_store.py       # L2 新闻/政策库（SQLite，滚动1年）+ 交易日门控
+├── notes_store.py      # L5 私域笔记（SQLite，永久保留）
+├── fetch_news.py       # 新闻抓取入口（供 launchd / 命令行调用）
+├── launchd/            # com.astock.news.plist（macOS 定时抓取，见「自动抓取新闻库」）
 ├── websearch.py        # 博查联网搜索（B 方案，可选开关）
 ├── portfolio.py        # 持仓记录 + 总盈亏 + 当日盈亏
-├── universe.py         # 科技股候选池（按板块分组，供全市场筛选）
+├── universe.py         # 全市场候选池（两级：一级板块→二级细分→龙头）
 ├── store.py            # 自选股持久化
 ├── config.py           # 读取 .env（DeepSeek + 博查密钥，不硬编码）
 ├── templates/index.html# 看板结构 + 样式（深色终端风）
-├── static/app.js       # 前端逻辑（对比/深挖/持仓/AI/名词解释）
+├── static/app.js       # 前端逻辑（对比/深挖/波动/持仓/AI/新闻/笔记/名词）
 ├── .env                # DeepSeek + 博查 密钥（gitignore，勿提交）
 ├── .gitignore
+├── data/               # news.db / notes.db（本地库，gitignore）
+├── ai_cache.json       # AI 结果缓存（自动生成，gitignore）
 ├── watchlist.json / portfolio.json   # 本地数据（自动生成）
 └── requirements.txt
 ```
 
+## 自动抓取新闻库（launchd · 内置到 Mac）
+
+新闻/政策库在你**打开看板时**会惰性刷新；想**关着看板也每天自动累积**，就把定时任务装进 macOS launchd。
+
+> 仓库在外置盘 `/Volumes/Elements` 上——任务每次触发都会**先检测盘/脚本在不在**：在就抓，不在就**静默跳过**（不报错、不抓）。开机登录、插上盘、以及每天固定时间点，都各检测一次。
+
+**触发时机**（每次先做盘存在性检测）：
+- 开机 / 登录后跑一次（`RunAtLoad`）
+- 插上外置盘（任何卷挂载）即跑一次（`StartOnMount`）
+- 每天 `08:40 / 11:40 / 14:00 / 15:30 / 20:30`（`StartCalendarInterval`；非交易日仅 20:30 真抓，门控在 `fetch_news.py`）
+
+**安装（一次性）**：
+```bash
+# 1) 若路径/用户名与默认不同，先改 launchd/com.astock.news.plist 里的：
+#    - 仓库路径 REPO（默认 /Volumes/Elements/workspace/A-stock）
+#    - python 路径（默认 /usr/bin/python3；用 which python3 确认）
+#    - 日志路径（默认 /Users/<你>/Library/Logs/astock-news.log）
+cp launchd/com.astock.news.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.astock.news.plist
+```
+
+**验证 / 运维**：
+```bash
+launchctl list | grep astock            # 是否已加载
+python3 fetch_news.py                    # 手动跑一次（盘在时）
+python3 fetch_news.py --backfill         # 手动回填 1–2 季度 + 研报
+tail -f ~/Library/Logs/astock-news.log   # 看抓取日志
+```
+
+**卸载**：
+```bash
+launchctl unload ~/Library/LaunchAgents/com.astock.news.plist
+rm ~/Library/LaunchAgents/com.astock.news.plist
+```
+
+说明：
+- plist 装在**内部盘** `~/Library/LaunchAgents/`，定义常驻；外置盘拔掉也不影响，盘不在时任务只是静默 no-op，**盘一挂上（或下个时间点）就自动开始抓**。
+- Mac 在某时间点睡眠 → 该任务在下次唤醒时补跑一次。
+- 交易日历为内置 2026 节假日（best-effort），跨年需更新 `news_store.py` 里 `_HOLIDAYS_2026`。
+
 ## 安全
 
-- **密钥只存在 `.env`，源码不含任何 key**；`.gitignore` 已排除 `.env`、`watchlist.json`、`portfolio.json`。
+- **密钥只存在 `.env`，源码不含任何 key**；`.gitignore` 已排除 `.env`、`watchlist.json`、`portfolio.json`、`ai_cache.json`、`data/`。
 - 若 key 曾在聊天/截图等处明文暴露，建议到 DeepSeek 后台重置后写回 `.env`。
 
 ## 注意

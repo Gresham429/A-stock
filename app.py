@@ -29,6 +29,7 @@ import llm
 import news_store
 import notes_store
 import portfolio
+import rules_store
 import store
 import universe
 import websearch
@@ -40,6 +41,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 news_store.init()  # 确保 news.db 表存在（廉价，幂等）
 notes_store.init()  # 私域笔记表
+rules_store.init()  # 交易规则库（首次灌入蒸馏种子）
 _news_refreshing = [False]
 
 
@@ -237,6 +239,38 @@ def notes_add():
 @app.route("/api/notes/<int:note_id>", methods=["DELETE"])
 def notes_delete(note_id: int):
     notes_store.delete(note_id)
+    return jsonify({"ok": True})
+
+
+# ── 交易规则库（蒸馏自 PA_Agent，可增删改；启用中的注入 AI） ─────────────
+@app.route("/api/rules")
+def rules_list():
+    return jsonify({"rules": rules_store.list_rules(category=request.args.get("category", "")),
+                    "categories": rules_store.CATEGORIES, "count": rules_store.count()})
+
+
+@app.route("/api/rules", methods=["POST"])
+def rules_add():
+    b = request.get_json(silent=True) or {}
+    title = (b.get("title") or "").strip()
+    content = (b.get("content") or "").strip()
+    category = (b.get("category") or "").strip() or "总则纪律"
+    if not title or not content:
+        return jsonify({"ok": False, "msg": "标题和内容必填"}), 400
+    return jsonify({"ok": True, "id": rules_store.add(category, title, content)})
+
+
+@app.route("/api/rules/<int:rule_id>", methods=["PUT"])
+def rules_update(rule_id: int):
+    b = request.get_json(silent=True) or {}
+    fields = {k: b[k] for k in ("category", "title", "content", "enabled") if k in b}
+    rules_store.update(rule_id, **fields)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/rules/<int:rule_id>", methods=["DELETE"])
+def rules_delete(rule_id: int):
+    rules_store.delete(rule_id)
     return jsonify({"ok": True})
 
 
@@ -551,8 +585,12 @@ def _screen_rows(capital: float, focus: str = "") -> list[dict]:
 
 
 def _ai_web_context(scope: str, code: str = "", name: str = "") -> str:
-    """构建喂给 AI 的「联网知识」上下文：L2 本地资讯库 + A 实时快讯 + B 博查(可选)。"""
+    """构建喂给 AI 的「联网知识」上下文：交易规则 + L2 本地资讯库 + A 实时快讯 + B 博查(可选)。"""
     parts = []
+    # 交易分析框架规则（启用中的规则库，蒸馏自 PA_Agent）——置顶，AI 按此推理
+    rules_txt = rules_store.for_ai()
+    if rules_txt:
+        parts.append("【交易分析框架规则（价格行为体系，分析时严格按此推理）】\n" + rules_txt)
     # L4：本地新闻库（带日期，让 AI 按新鲜度加权；个股取该股近期，大盘取市场级+政策）
     if scope == "position" and code:
         local = news_store.query(code=code, days=120, limit=8)

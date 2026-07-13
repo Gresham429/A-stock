@@ -48,6 +48,7 @@ const clr=v=> v>0?'up':v<0?'down':'flat';
 const sgn=v=> v>0?'+':'';
 const fmt=(v,d=2)=> v==null||v===''?'—':Number(v).toFixed(d);
 const fmtInt=v=> v==null?'—':Math.round(v).toLocaleString();
+const esc=s=> (s==null?'':String(s)).replace(/[<>&]/g,m=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[m]));
 // AI 结果的时间戳/缓存 meta 行 + 强制刷新按钮（onclick 传重新请求的调用串）
 function aiMeta(j,onclick){
   const when=j.analyzed_at?j.analyzed_at.replace('T',' ').slice(0,16):(j.updated||'');
@@ -817,7 +818,67 @@ async function loadNotesList(){
 }
 async function delNote(id){ if(!confirm('删除这条笔记？'))return; await fetch('/api/notes/'+id,{method:'DELETE'}); loadNotesList(); }
 
-document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeDrawer();closeGloss();closeRec();closeNews();closeNotes();}});
+/* ── 交易规则库（蒸馏自 PA_Agent，可增删改；启用中的注入 AI） ── */
+let RULE_FILTER='', RULE_EDIT_ID=null, RULES_DATA=[], RULE_CATS=[];
+function openRules(){ RULE_FILTER=''; RULE_EDIT_ID=null; document.getElementById('ruleForm').style.display='none'; loadRules(); document.getElementById('rulesModal').classList.add('open'); }
+function closeRules(){ document.getElementById('rulesModal').classList.remove('open'); }
+async function loadRules(){
+  const box=document.getElementById('rulesBody'); box.innerHTML='<div class="paneempty"><span class="spin"></span> 读取规则…</div>';
+  let j; try{ j=await (await fetch('/api/rules')).json(); }
+  catch(e){ box.innerHTML='<div class="paneempty">读取失败：'+e+'</div>'; return; }
+  RULES_DATA=j.rules||[]; RULE_CATS=j.categories||[];
+  document.getElementById('rulesChips').innerHTML=['全部',...RULE_CATS].map(c=>{
+    const v=(c==='全部'?'':c), on=v===RULE_FILTER;
+    return `<button class="news-chip${on?' on':''}" onclick="setRulesFilter('${v}')">${c}</button>`;
+  }).join('');
+  document.getElementById('rf_cat').innerHTML=RULE_CATS.map(c=>`<option value="${c}">${c}</option>`).join('');
+  const en=RULES_DATA.filter(r=>r.enabled).length;
+  document.getElementById('rulesStat').textContent=`共 ${j.count} 条 · 启用 ${en} 条会注入 AI 分析 · 蒸馏自 PA_Agent 价格行为体系`;
+  const cats=RULE_FILTER?[RULE_FILTER]:RULE_CATS;
+  let h='';
+  for(const cat of cats){
+    const items=RULES_DATA.filter(r=>r.category===cat); if(!items.length) continue;
+    h+=`<div class="rule-cat">${esc(cat)}（${items.length}）</div>`+items.map(r=>`
+      <div class="rule-item ${r.enabled?'':'off'}">
+        <div class="rc"><div class="rt">${esc(r.title)}${r.source?` <span class="rule-src">${esc(r.source)}</span>`:''}</div>
+          <div class="rd">${esc(r.content)}</div></div>
+        <div class="racts">
+          <button class="mini" onclick="toggleRule(${r.id},${r.enabled?0:1})">${r.enabled?'停用':'启用'}</button>
+          <button class="mini" onclick="editRule(${r.id})">改</button>
+          <button class="mini danger" onclick="delRule(${r.id})">删</button>
+        </div></div>`).join('');
+  }
+  box.innerHTML = h || '<div class="paneempty">该分类暂无规则，点「＋新增规则」加一条。</div>';
+}
+function setRulesFilter(cat){ RULE_FILTER=cat; loadRules(); }
+function toggleRuleForm(){
+  const f=document.getElementById('ruleForm');
+  if(f.style.display==='none'){ RULE_EDIT_ID=null; document.getElementById('rf_title').value=''; document.getElementById('rf_content').value=''; f.style.display='block'; }
+  else f.style.display='none';
+}
+function editRule(id){
+  const r=RULES_DATA.find(x=>x.id===id); if(!r) return;
+  RULE_EDIT_ID=id;
+  document.getElementById('rf_cat').value=r.category;
+  document.getElementById('rf_title').value=r.title;
+  document.getElementById('rf_content').value=r.content;
+  document.getElementById('ruleForm').style.display='block';
+}
+async function saveRule(){
+  const category=document.getElementById('rf_cat').value;
+  const title=document.getElementById('rf_title').value.trim();
+  const content=document.getElementById('rf_content').value.trim();
+  if(!title||!content){ alert('标题和内容必填'); return; }
+  const url=RULE_EDIT_ID?('/api/rules/'+RULE_EDIT_ID):'/api/rules';
+  const method=RULE_EDIT_ID?'PUT':'POST';
+  let j; try{ j=await (await fetch(url,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify({category,title,content})})).json(); }
+  catch(e){ alert('保存失败：'+e); return; }
+  if(j.ok!==false){ document.getElementById('ruleForm').style.display='none'; RULE_EDIT_ID=null; loadRules(); } else alert(j.msg||'保存失败');
+}
+async function toggleRule(id,en){ await fetch('/api/rules/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:en})}); loadRules(); }
+async function delRule(id){ if(!confirm('删除这条规则？'))return; await fetch('/api/rules/'+id,{method:'DELETE'}); loadRules(); }
+
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeDrawer();closeGloss();closeRec();closeNews();closeNotes();closeRules();}});
 initTooltips();
 loadConfig();
 load();

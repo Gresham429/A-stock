@@ -4,7 +4,7 @@
 
 ## 这是什么
 
-一个**本地运行**的 A 股看板：多股对比 + 点击深挖 + 持仓盈亏 + DeepSeek AI 推荐/建议 + 名词解释。
+一个**本地运行**的 A 股看板：多股对比 + 点击深挖（含多周期波动图）+ 顶部大盘研判条 + 全市场两级选股 + 持仓盈亏 + DeepSeek AI 推荐/建议（结果落盘缓存带时间戳）+ 近1年新闻/政策库 + 私域笔记 + 交易规则库（价格行为体系，可增删改、注入 AI）+ 名词解释。
 纯本地 Flask 后端代理各数据源，前端零构建（HTML+CSS+原生 JS）。**为什么不是托管网页**：深挖/加股票/调 AI/联网搜索都要实时外部请求，而托管型 Artifact 的 CSP 禁止一切外部请求，做不到。
 
 ## 快速开始
@@ -22,14 +22,19 @@ python app.py                        # http://127.0.0.1:5000
 |------|------|
 | `app.py` | Flask 路由（后端入口） |
 | `datasources.py` | 数据层：行情/指标/研报/龙虎榜/解禁/K线/财报/新闻/快讯 + `index_quotes`(五大指数+两市成交额)/`market_breadth`(涨跌家数/涨停跌停/行业冷热) + `tencent_minute`(当日分时)/`sina_kline(scale=)`(日K/5分钟) |
-| `llm.py` | DeepSeek 集成：`daily_recommendation` / `market_screen` / `position_advice` / `market_overview`(大盘研判) |
+| `llm.py` | DeepSeek 集成：`daily_recommendation` / `market_screen` / `position_advice` / `market_overview`(大盘研判) / `structure_note`(v4-flash 笔记结构化)；温度默认 0.15 |
+| `ai_cache.py` | L1 AI 输出短期缓存（`ai_cache.json`，智能命中 + 时间戳） |
+| `news_store.py` | L2 新闻/政策库（SQLite `data/news.db`，滚动1年）+ 抓取/去重/清理 + `is_trading_day`(动态节假日) |
+| `fetch_news.py` | 新闻抓取入口（供 launchd `launchd/com.astock.news.plist` 定时 / 命令行调用） |
+| `notes_store.py` | L5 私域笔记（SQLite `data/notes.db`，永久保留） |
+| `rules_store.py` | 交易规则库（SQLite `data/rules.db`，55 条蒸馏自 PA_Agent，注入 AI）；`templates/prompts/` 存归档提示词 |
 | `websearch.py` | 博查联网搜索（B 方案，可选）+ key 健康检测/到期提醒 |
 | `portfolio.py` | 持仓记录 + 总盈亏 + 当日盈亏 |
 | `universe.py` | 全市场候选池（两级：10 一级板块 → 48 二级细分 → 170 龙头；`codes_of(focus)`/`sector_of`→(一级,二级)/`taxonomy()`） |
 | `store.py` | 自选股持久化 |
 | `config.py` | 读 `.env`（DeepSeek + 博查 key，绝不硬编码） |
 | `templates/index.html` | UI 结构 + 全部 CSS（深色终端风） |
-| `static/app.js` | 全部前端逻辑（对比/深挖/K线/持仓/AI/名词/到期提醒） |
+| `static/app.js` | 全部前端逻辑（对比/深挖/波动/大盘条/持仓/AI+缓存/新闻/笔记/规则/名词） |
 
 ## 数据源 & 坑（改代码前必读）
 
@@ -68,7 +73,7 @@ python app.py                        # http://127.0.0.1:5000
 - **异步渲染必须带请求令牌**：多个慢请求（daily/screen/openDetail/大盘研判）写同一 DOM 目标时，用单调计数器 `recSeq`/`detailSeq`/`mktSeq`——发起即 `++`，`await` 回来后 `if(gen!==seq) return` 丢弃过期响应，否则切换时旧响应会覆盖新视图（错位 bug）。新增此类异步入口时照做。
 - **大盘研判**：`GET /api/market/overview`（`?ai=0` 只取指数走腾讯快返；完整版含东财情绪 + AI 研判，走 `ai_cache` 短期缓存 5 分钟）。选股 `market_screen` 前先取（缓存的）大盘结论注入，让个股筛选与大盘攻防一致。前端顶部常驻「大盘研判条」，`market_breadth` 走东财失败即降级 None、不阻断。
 - **新闻/政策资讯库（L2）+ 实时热点（L4）**：`news_store.py`（SQLite `data/news.db`，gitignore）滚动近 1 年；表 `news` 按 `UNIQUE(title_hash)` 去重，可按 板块/个股/kind/天数 查；抓全市场快讯(财联社+东财7×24) + 自选股新闻 + 研报。抓取入口 `fetch_news.py`（供 launchd `launchd/com.astock.news.plist` 每日 08:40/11:40/14:00/15:30/20:30 调；非交易日门控见 `is_trading_day`（法定节假日按年动态抓 holiday-cn `{年}.json` 经 jsDelivr、缓存 db meta、抓不到退化为纯工作日，自动跨年无需手改），仅晚间真抓）。看盘时前端 `maybeRefreshNews()` 交易时段每 15 分钟惰性增量；手动「📰 新闻」modal + 🔄刷新（`POST /api/news/refresh` 后台线程）。首次启动 `__main__` 后台 `backfill()` 回填 1–2 季度。**L4**：`_ai_web_context` 先注入本地库相关新闻（带日期供 AI 按新鲜度加权）再叠加实时快讯 + 博查。`GET /api/news` / `/api/news/status`。**L3 按需远期**：`news_store.deepen(code)` 深抓单只更久新闻+研报；个股 AI 分析时若本地稀疏(<5 条)自动深抓；`POST /api/news/deepen{code}` + 新闻 modal 代码框手动拉。
-- **交易规则库（PA_Agent 蒸馏）**：`rules_store.py`（SQLite `data/rules.db`，gitignore）存 ~55 条规则卡（蒸馏自 [PA_Agent](https://github.com/rosemarycox5334-debug/PA_Agent) 的 Al Brooks 价格行为体系，适配 A股、剔除"不依赖成交量"）。分 7 类（总则纪律/市场状态识别/趋势与通道/区间震荡/K线信号/止损止盈/入场时机），可增删改 + 启用停用。`GET/POST/PUT/DELETE /api/rules`；前端「📐 规则」modal CRUD。**启用中的规则由 `rules_store.for_ai()` 置顶注入 `_ai_web_context`**（所有 AI 分析都按此框架推理）。蒸馏后的系统提示词归档在 `templates/prompts/`（静态参考，AI 实际读规则库）。
+- **交易规则库（PA_Agent 蒸馏）**：`rules_store.py`（SQLite `data/rules.db`，gitignore）存 ~55 条规则卡（蒸馏自 [PA_Agent](https://github.com/rosemarycox5334-debug/PA_Agent) 的 Al Brooks 价格行为体系，适配 A股、剔除"不依赖成交量"）。分 10 类（总则纪律/市场状态识别/趋势与通道/区间震荡/突破与失败/形态结构/计数与结构/K线信号/止损止盈/入场时机），可增删改 + 启用停用；`seed()` **加性补入**（只补库中缺失的(分类,标题)，不动用户已改/已删的）。`GET/POST/PUT/DELETE /api/rules`；前端「📐 规则」modal CRUD。**启用中的规则由 `rules_store.for_ai()` 置顶注入 `_ai_web_context`**（所有 AI 分析都按此框架推理）。蒸馏后的系统提示词归档在 `templates/prompts/`（静态参考，AI 实际读规则库）。
 - **私域信息笔记（L5）**：`notes_store.py`（SQLite `data/notes.db`，gitignore，**永久保留不清理**，每条带 `created_at`）。打字/贴文本记录；`llm.structure_note`（**deepseek-v4-flash 快模型**，`_chat(model=)` 覆盖）把笔记 AI 结构化为 `{summary,codes,sectors,tags,kind}`，存前确认。`GET/POST /api/notes`、`POST /api/notes/structure`、`DELETE /api/notes/<id>`；前端「📝 笔记」modal。`_ai_web_context` 注入相关笔记标注【我的私域笔记·日期】与客观数据区分。**隐私**：AI 整理会把内容发 DeepSeek，纯手动存不外发。
 - **AI 输出短期缓存（L1）**：`ai_cache.py` 把 4 个 AI 调用（daily/screen/position/market）结果落盘 `ai_cache.json`（gitignore）。key = `kind:输入指纹:当日`，**指纹只哈希影响结论的输入（自选/持仓/资金/板块/代码），排除实时价格**；TTL 个股/每日/选股 30min、大盘 5min；命中且未过期→秒回（跳过取数+LLM），输入变/跨交易日/TTL 过期/带 `force`(body 或 `?refresh=1`)→重算。响应带 `cached/analyzed_at/age_min`，前端每个 AI 面板显示 `aiMeta()` 时间戳行 +「🔄 强制刷新」。`position` 缓存与 `FOLIO_ADV` 持久化叠加（`folioAdvice` 切换开合、`loadFolioAdvice` 真正拉取）。这是「知识与缓存架构 L1–L5」的第一层，见 `plan/2026-07-13-knowledge-cache-architecture.md`。
 - **选股候选池两级化**：`focus` 可传一级板块名 / 二级细分名 / 空（全市场）；`_screen_rows` 按 `codes_of(focus)` 取数 + 可负担过滤 + `_balanced_pick` 跨一级轮询均衡采样（每二级≤3 只、全市场 cap 36；下钻二级时放宽到 6）。前端 `scr_focus` 用 `<optgroup>` 由 `taxonomy` 动态渲染。
@@ -104,5 +109,7 @@ Python 语法：`python3 -c "import ast; [ast.parse(open(f).read()) for f in [..
 
 ## 当前状态 / 待办
 
-- 功能已全部实测通过并推送 GitHub。
-- **待用户提供真实持仓**（代码+股数+成本价）→ 才能跑「逐只持仓」的深度建议（`portfolio.json` 目前为空）。
+- 功能已全部实测通过并推送 GitHub（main）。已上线：全市场两级选股 + 大盘研判、单股多周期波动图、知识与缓存架构 L1–L5（AI缓存/新闻库/按需远期/实时热点/私域笔记）、launchd 定时抓取（动态交易日历）、交易规则库（55 条 PA_Agent 蒸馏，注入 AI）。
+- 本地数据文件（gitignore，用户机上）：`watchlist.json` / `portfolio.json` / `ai_cache.json` / `data/news.db` / `data/notes.db` / `data/rules.db`。
+- launchd 定时任务需**用户在自己终端** `launchctl bootstrap` 安装（本环境无 `~/Library` 写权限）；见 README「自动抓取新闻库」。
+- 设计文档在 `plan/`（各特性 spec + 知识缓存架构总纲）。

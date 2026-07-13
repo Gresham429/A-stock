@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from flask import Flask, jsonify, render_template, request
@@ -67,7 +68,8 @@ def api_config():
     return jsonify({"llm_enabled": config.llm_enabled(),
                     "model": config.DEEPSEEK_MODEL if config.llm_enabled() else None,
                     "news_augment": True,
-                    "web_search": config.bocha_enabled()})
+                    "web_search": config.bocha_enabled(),
+                    "taxonomy": universe.taxonomy()})
 
 
 @app.route("/api/websearch/status")
@@ -84,6 +86,55 @@ def websearch_status():
 def overview():
     """自选股全量对比：一次腾讯批量行情 + 并发拉各自波动/资金指标。"""
     return jsonify({"rows": _overview_rows(store.load_watchlist()), "updated": _now()})
+
+
+# ── 大盘研判（指数 + 情绪 + AI 局势分析，带缓存） ─────────────────────────
+_MKT_CACHE: dict = {"ts": 0.0, "data": None}
+_MKT_TTL = 300  # 秒；指数 + 东财情绪 + 慢 AI，缓存 5 分钟避免频繁触发
+
+
+def _market_overview_payload(force: bool = False, with_ai: bool = True) -> dict:
+    """组装大盘研判：指数(腾讯) + 情绪(东财) + AI 局势分析。带 5 分钟缓存。
+
+    with_ai=False：只取指数（快，供前端先渲染行情条），不碰东财情绪与慢 AI、不写缓存。
+    """
+    if not with_ai:
+        idx = ds.index_quotes()
+        return {"ok": True, "indices": idx.get("indices", []),
+                "amount_liang_yi": idx.get("amount_liang_yi"),
+                "breadth": None, "ai": None, "partial": True,
+                "model": config.DEEPSEEK_MODEL if config.llm_enabled() else None,
+                "updated": _now(), "cached": False}
+    now = time.time()
+    cached = _MKT_CACHE["data"]
+    if not force and cached and (now - _MKT_CACHE["ts"] < _MKT_TTL):
+        return {**cached, "cached": True}
+    idx = ds.index_quotes()
+    breadth = ds.market_breadth()
+    ai = None
+    if config.llm_enabled() and idx.get("indices"):
+        try:
+            ai = llm.market_overview(idx["indices"], breadth, _ai_web_context("market"))
+        except llm.LLMError as e:
+            logger.warning("大盘研判 AI 失败: %s", e)
+    data = {"ok": True, "indices": idx.get("indices", []),
+            "amount_liang_yi": idx.get("amount_liang_yi"),
+            "breadth": breadth, "ai": ai,
+            "model": config.DEEPSEEK_MODEL if config.llm_enabled() else None,
+            "updated": _now()}
+    _MKT_CACHE["data"], _MKT_CACHE["ts"] = data, now
+    return {**data, "cached": False}
+
+
+@app.route("/api/market/overview")
+def market_overview_api():
+    """大盘研判：五大指数 + 两市成交额 + 市场情绪 + AI 局势分析。
+
+    ?ai=0 只返回指数(快)；?refresh=1 强制重算 AI 研判。
+    """
+    return jsonify(_market_overview_payload(
+        force=request.args.get("refresh") == "1",
+        with_ai=request.args.get("ai") != "0"))
 
 
 @app.route("/api/detail/<code>")
@@ -246,16 +297,18 @@ def recommend_screen():
     except (TypeError, ValueError):
         capital = 10000.0
     focus = body.get("focus_sector", "") or ""
-    rows = _screen_rows(capital)
+    rows = _screen_rows(capital, focus)
     if not rows:
         return jsonify({"ok": False, "msg": "候选池行情拉取失败，请重试"}), 502
+    market_ctx = _market_overview_payload().get("ai")  # 复用缓存的大盘研判结论
     web_ctx = _ai_web_context("market")
     try:
-        result = llm.market_screen(rows, capital, focus, web_ctx)
+        result = llm.market_screen(rows, capital, focus, market_ctx, web_ctx)
     except llm.LLMError as e:
         return jsonify({"ok": False, "msg": str(e)}), 502
     return jsonify({"ok": True, "result": result, "candidates": len(rows),
                     "capital": capital, "focus": focus,
+                    "market_regime": (market_ctx or {}).get("regime"),
                     "web_search": config.bocha_enabled(),
                     "model": config.DEEPSEEK_MODEL, "updated": _now()})
 
@@ -275,30 +328,58 @@ def _vol_hist(kl: list[dict]) -> dict:
     }
 
 
-def _screen_rows(capital: float) -> list[dict]:
-    """候选池行情 + 指标（负担得起优先，跨板块，控数量以省 token）。"""
-    codes = universe.all_codes()
+_SCREEN_CAP_TOTAL = 36  # 喂给 LLM 的候选总量上限（控 token 与时延）
+
+
+def _balanced_pick(codes: list[str], cap_total: int, cap_per_sub: int) -> list[str]:
+    """跨一级板块均衡采样：按一级轮询取，每个二级细分最多 cap_per_sub 只，总量 ≤ cap_total。"""
+    by_primary: dict[str, list[str]] = {}
+    for c in codes:
+        primary, _ = universe.sector_of(c)
+        by_primary.setdefault(primary, []).append(c)
+    queues = list(by_primary.values())
+    cursor = [0] * len(queues)
+    per_sub: dict[str, int] = {}
+    picked: list[str] = []
+    progressed = True
+    while len(picked) < cap_total and progressed:
+        progressed = False
+        for qi, q in enumerate(queues):
+            while cursor[qi] < len(q):
+                c = q[cursor[qi]]
+                cursor[qi] += 1
+                _, sub = universe.sector_of(c)
+                if per_sub.get(sub, 0) < cap_per_sub:
+                    per_sub[sub] = per_sub.get(sub, 0) + 1
+                    picked.append(c)
+                    progressed = True
+                    break  # 取一只后轮到下一个一级板块
+            if len(picked) >= cap_total:
+                break
+    return picked
+
+
+def _screen_rows(capital: float, focus: str = "") -> list[dict]:
+    """候选池行情 + 指标（按 focus 取数 + 负担得起优先 + 跨板块均衡采样）。"""
+    codes = universe.codes_of(focus)
     quotes = ds.tencent_quote(codes)
     if not quotes:
         return []
-    # 先按 1 手成本可负担过滤，再按板块限量，避免喂给 LLM 过多
+    # 先按 1 手成本可负担过滤（资金太小买不起任何 1 手则退回全池给参考）
     affordable = [c for c in codes if quotes.get(c, {}).get("lot_cost", 9e9) <= capital]
-    pool_codes = affordable or codes  # 若资金太小买不起任何 1 手，则退回全池给参考
-    per_sector: dict[str, int] = {}
-    picked: list[str] = []
-    for c in pool_codes:
-        sec = universe.sector_of(c)
-        if per_sector.get(sec, 0) < 5:          # 每板块最多 5 只
-            per_sector[sec] = per_sector.get(sec, 0) + 1
-            picked.append(c)
-        if len(picked) >= 28:                    # 总量上限，控 token 与时延
-            break
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        metrics_list = list(pool.map(ds.sina_metrics, picked))
+    pool = affordable or codes
+    # 侧重某个二级细分时放宽单细分配额（否则跨一级/全市场按 3 只/细分均衡）
+    subs_all = {s for subs in universe.taxonomy().values() for s in subs}
+    cap_per_sub = 6 if focus in subs_all else 3
+    picked = _balanced_pick(pool, _SCREEN_CAP_TOTAL, cap_per_sub)
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        metrics_list = list(executor.map(ds.sina_metrics, picked))
     rows = []
     for c, m in zip(picked, metrics_list):
         q = quotes.get(c, {})
-        rows.append({"code": c, "name": q.get("name", c), "sector": universe.sector_of(c),
+        primary, sub = universe.sector_of(c)
+        rows.append({"code": c, "name": q.get("name", c),
+                     "primary": primary, "sub": sub,
                      "price": q.get("price"), "pe_ttm": q.get("pe_ttm"), "pb": q.get("pb"),
                      "vol": m.get("vol"), "cum20": m.get("cum20"),
                      "range_pos": m.get("range_pos"), "net20": m.get("net20"),

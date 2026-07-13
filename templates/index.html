@@ -199,6 +199,25 @@
   /* 浮动 tooltip */
   #tip{position:fixed;z-index:80;display:none;max-width:320px;background:#05070b;border:1px solid var(--gold-dim);border-radius:8px;padding:9px 12px;font-size:12px;line-height:1.55;color:var(--txt);box-shadow:0 10px 30px -8px rgba(0,0,0,.8);pointer-events:none}
   @media(max-width:640px){.akv,.kv{grid-template-columns:1fr}.gitem{grid-template-columns:1fr;gap:2px}}
+
+  /* 大盘研判条 */
+  .mkt{margin-top:14px;background:var(--panel);border:1px solid var(--line2);border-radius:12px;overflow:hidden}
+  .mkt-head{display:flex;align-items:center;gap:16px;padding:11px 16px;cursor:pointer}
+  .mkt-idx{display:flex;gap:15px;flex-wrap:wrap;font-family:var(--mono);font-size:12px}
+  .mkt-idx .ix{display:flex;gap:6px;align-items:baseline}
+  .mkt-idx .ix b{color:var(--txt);font-weight:600}
+  .mkt-idx .ix .pt{color:var(--muted)}
+  .mkt-one{margin-left:auto;font-size:12.5px;color:var(--gold);font-weight:600;max-width:46%;text-align:right;line-height:1.5}
+  .mkt-toggle{background:none;border:0;color:var(--muted);font-size:16px;cursor:pointer;line-height:1;padding:0 2px;transition:transform .2s}
+  .mkt.open .mkt-toggle{transform:rotate(180deg)}
+  .mkt-detail{max-height:0;opacity:0;transition:max-height .25s,opacity .25s;padding:0 16px}
+  .mkt.open .mkt-detail{max-height:640px;opacity:1;padding:2px 16px 14px}
+  .mkt-detail .mrow{display:grid;grid-template-columns:92px 1fr;gap:10px;padding:6px 0;border-top:1px solid var(--line);font-size:12.5px;line-height:1.6}
+  .mkt-detail .mrow .mk{color:var(--gold);font-weight:700}
+  .mkt-detail .mrow .mv{color:var(--txt)}
+  .mkt-regime{display:inline-block;font-size:11px;font-weight:700;border-radius:5px;padding:1px 8px;border:1px solid var(--gold-dim);color:var(--gold)}
+  .mkt-disc{font-size:10.5px;color:var(--dim);margin-top:9px;font-family:var(--mono);line-height:1.5}
+  @media(max-width:640px){.mkt-one{max-width:100%;text-align:left;margin-left:0}.mkt-head{flex-wrap:wrap;gap:8px}}
 </style>
 </head>
 <body>
@@ -226,6 +245,16 @@
     <button class="btn" onclick="checkWebSearch(true)">重新检测</button>
   </div>
 
+  <!-- 大盘研判条（常驻） -->
+  <section class="mkt" id="mktBar">
+    <div class="mkt-head" onclick="toggleMkt()">
+      <div class="mkt-idx" id="mktIdx"><span class="muted small">大盘数据加载中…</span></div>
+      <div class="mkt-one" id="mktOne"></div>
+      <button class="mkt-toggle" id="mktToggle" title="展开/收起 大盘研判">▾</button>
+    </div>
+    <div class="mkt-detail" id="mktDetail"></div>
+  </section>
+
   <!-- AI 推荐 / 全市场筛选 -->
   <section class="recPanel" id="recPanel">
     <div class="recHead"><div class="t" id="recTitle">🤖 AI 推荐</div><button class="del" style="font-size:18px" onclick="closeRec()">✕</button></div>
@@ -239,20 +268,11 @@
       </label>
       <label>侧重板块
         <select id="scr_focus">
-          <option value="">不限（全科技）</option>
-          <option value="半导体设备材料">半导体设备材料</option>
-          <option value="半导体设计">半导体设计</option>
-          <option value="晶圆制造封测">晶圆制造封测</option>
-          <option value="AI算力光模块">AI算力光模块</option>
-          <option value="软件信创SaaS">软件信创SaaS</option>
-          <option value="消费电子果链">消费电子果链</option>
-          <option value="通信网络设备">通信网络设备</option>
-          <option value="安防与视觉">安防与视觉</option>
-          <option value="面板显示PCB">面板显示PCB</option>
+          <option value="">不限（全市场）</option>
         </select>
       </label>
       <button class="btn ai" onclick="runScreen()">🔍 开始筛选</button>
-      <span class="small muted">从 44 只科技股跨板块筛选，约 40~80 秒</span>
+      <span class="small muted">结合大盘从全市场候选跨板块筛选，约 40~90 秒</span>
     </div>
     <div class="recBody" id="recBody"></div>
   </section>

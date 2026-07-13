@@ -173,6 +173,31 @@ def kline(code: str):
                     "kline": ds.sina_kline(ds.normalize(code), num=120)})
 
 
+@app.route("/api/wave/<code>")
+def wave(code: str):
+    """波动多周期：当日分时 + 5日(5分钟) + 日K(~260, 供30/60/当季/当年切片) + 昨收基准。
+
+    一次并发返回全部序列，前端切换周期纯前端切片、不再请求。
+    """
+    code = ds.normalize(code)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        f_intra = pool.submit(ds.tencent_minute, code)
+        f_min5 = pool.submit(ds.sina_kline, code, 240, 5)     # num=240 ≈ 近5交易日
+        f_daily = pool.submit(ds.sina_kline, code, 260, 240)  # num=260 覆盖当年/当季
+        f_quote = pool.submit(ds.tencent_quote, [code])
+        intraday, min5, daily, quotes = (f_intra.result(), f_min5.result(),
+                                         f_daily.result(), f_quote.result())
+    q = quotes.get(code, {})
+    return jsonify({
+        "code": code, "name": q.get("name", code),
+        "price": q.get("price"), "prev_close": q.get("last_close"),
+        "intraday": intraday,
+        "min5": [{"t": k["date"], "close": k["close"]} for k in min5],
+        "daily": [{"date": k["date"], "close": k["close"]} for k in daily],
+        "updated": _now(),
+    })
+
+
 @app.route("/api/watchlist")
 def watchlist():
     return jsonify({"codes": store.load_watchlist()})

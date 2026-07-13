@@ -315,11 +315,14 @@ def lockup_expiry(code: str, forward_days: int = 365) -> dict[str, Any]:
 
 
 # ── 日K线 OHLC（新浪，用于蜡烛图 + 箱形图） ────────────────────────────────
-def sina_kline(code: str, num: int = 120) -> list[dict[str, Any]]:
-    """新浪日K线（前复权口径）。返回时间正序 [{date, open, high, low, close, volume}]。"""
+def sina_kline(code: str, num: int = 120, scale: int = 240) -> list[dict[str, Any]]:
+    """新浪K线（前复权口径）。scale=240 日K / 5 五分钟 / 15 十五分钟 …。
+
+    返回时间正序 [{date, open, high, low, close, volume}]；分钟级时 date 含 'HH:MM:SS'。
+    """
     sym = market_prefix(code) + code
     url = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
-           f"CN_MarketData.getKLineData?symbol={sym}&scale=240&ma=no&datalen={num}")
+           f"CN_MarketData.getKLineData?symbol={sym}&scale={scale}&ma=no&datalen={num}")
     try:
         arr = json.loads(_http_get(url, ref="https://finance.sina.com.cn/"))
     except (OSError, ValueError) as e:
@@ -336,6 +339,35 @@ def sina_kline(code: str, num: int = 120) -> list[dict[str, Any]]:
             })
         except (KeyError, ValueError):
             continue
+    return out
+
+
+def tencent_minute(code: str) -> list[dict[str, Any]]:
+    """腾讯当日分时（逐分钟价格，不封 IP）。返回 [{t:'09:30', price}]。
+
+    源 ifzq.gtimg.cn minute/query，data[sym].data.data 每项 'HHMM 价 累计量 累计额'。
+    非交易时段返回上一交易日分时；数据缺失返回空列表。
+    """
+    sym = market_prefix(code) + code
+    url = f"https://web.ifzq.gtimg.cn/appstock/app/minute/query?code={sym}"
+    try:
+        d = json.loads(_http_get(url, ref="https://gu.qq.com/"))
+    except (OSError, ValueError) as e:
+        logger.warning("腾讯分时请求失败 %s: %s", code, e)
+        return []
+    rows = (((d.get("data") or {}).get(sym) or {}).get("data") or {}).get("data") or []
+    out = []
+    for item in rows:
+        parts = item.split(" ")
+        if len(parts) < 2:
+            continue
+        hhmm = parts[0]
+        try:
+            price = float(parts[1])
+        except ValueError:
+            continue
+        out.append({"t": f"{hhmm[:2]}:{hhmm[2:]}" if len(hhmm) == 4 else hhmm,
+                    "price": price})
     return out
 
 

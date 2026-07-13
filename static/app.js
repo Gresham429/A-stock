@@ -40,6 +40,7 @@ let DATA=[], sortKey='net20', sortDir=-1, autoTimer=null, LLM=false, MODEL='', W
 // 请求令牌：每次发起自增；异步响应回来前若已非最新，则丢弃（防面板/抽屉切换时旧响应错位）
 let recSeq=0, detailSeq=0, mktSeq=0;
 let TAXO=null;   // 板块两级分类（/api/config 下发）
+let WAVE=null, WAVE_PERIOD='day', WAVE_CTX=null;   // 波动多周期数据 / 当前周期 / hover 几何
 
 const clr=v=> v>0?'up':v<0?'down':'flat';
 const sgn=v=> v>0?'+':'';
@@ -150,6 +151,10 @@ async function openDetail(code){
   // K线独立并行加载(快)，先渲染
   fetch('/api/kline/'+code).then(r=>r.json()).then(k=>{ if(gen!==detailSeq)return; renderKline(k.kline||[]); })
     .catch(()=>{ if(gen!==detailSeq)return; document.getElementById('pane_kl').innerHTML='<div class="paneempty">K线加载失败</div>'; });
+  // 波动多周期并行加载（当日分时 + 5日/日线），默认周期=当日
+  WAVE=null; WAVE_PERIOD='day'; renderWave();
+  fetch('/api/wave/'+code).then(r=>r.json()).then(w=>{ if(gen!==detailSeq)return; WAVE=w; renderWave(); })
+    .catch(()=>{ if(gen!==detailSeq)return; const p=document.getElementById('pane_wave'); if(p)p.innerHTML='<div class="paneempty">波动数据加载失败</div>'; });
   let j;
   try{ j=await (await fetch('/api/detail/'+code)).json(); }
   catch(e){ if(gen!==detailSeq)return; document.getElementById('pane_ov').innerHTML='<div class="paneempty">加载失败：'+e+'</div>'; return; }
@@ -249,6 +254,116 @@ function flowChart(series){
   return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:${h}px"><line x1="${pad}" y1="${mid}" x2="${w-pad}" y2="${mid}" stroke="var(--line2)"/>${bars}
     <text x="${pad}" y="12" fill="var(--muted)" font-size="10" font-family="monospace">+${mx.toFixed(1)}亿</text>
     <text x="${pad}" y="${h-4}" fill="var(--muted)" font-size="10" font-family="monospace">-${mx.toFixed(1)}亿</text></svg>`;
+}
+
+/* ── 波动多周期（当日分时 / 5日 / 30日 / 60日 / 当季 / 当年） ── */
+const WAVE_PERIODS=[['day','当日分时'],['5d','5日'],['30d','30日'],['60d','60日'],['quarter','当季'],['year','当年']];
+function _yearStart(){ return new Date().getFullYear()+'-01-01'; }
+function _quarterStart(){ const n=new Date(),m=Math.floor(n.getMonth()/3)*3+1; return n.getFullYear()+'-'+String(m).padStart(2,'0')+'-01'; }
+function waveSeries(period){
+  const W=WAVE||{};
+  if(period==='day') return {pts:(W.intraday||[]).map(p=>({label:p.t,value:p.price})), base:W.prev_close, kind:'intra'};
+  if(period==='5d')  return {pts:(W.min5||[]).map(p=>({label:p.t,value:p.close})), base:null, kind:'intra'};
+  let d=W.daily||[];
+  if(period==='30d') d=d.slice(-30);
+  else if(period==='60d') d=d.slice(-60);
+  else if(period==='quarter'){ const qs=_quarterStart(); d=d.filter(x=>x.date>=qs); }
+  else if(period==='year'){ const ys=_yearStart(); d=d.filter(x=>x.date>=ys); }
+  return {pts:d.map(p=>({label:p.date,value:p.close})), base:null, kind:'daily'};
+}
+function _annVol(vals){
+  if(vals.length<3) return null;
+  const r=[]; for(let i=1;i<vals.length;i++){ if(vals[i-1]>0) r.push(Math.log(vals[i]/vals[i-1])); }
+  if(r.length<2) return null;
+  const mean=r.reduce((a,b)=>a+b,0)/r.length;
+  const v=r.reduce((a,b)=>a+(b-mean)**2,0)/(r.length-1);
+  return Math.sqrt(v)*Math.sqrt(252)*100;
+}
+function waveStats(series,period){
+  const vals=series.pts.map(p=>p.value); if(vals.length<2) return '';
+  const base=series.base!=null?series.base:vals[0];
+  const last=vals[vals.length-1],hi=Math.max(...vals),lo=Math.min(...vals);
+  const chg=base?(last-base)/base*100:0, amp=lo?(hi-lo)/lo*100:0;
+  let s='';
+  if(period==='day'&&WAVE.prev_close) s+=`<span>昨收 <b>${(+WAVE.prev_close).toFixed(2)}</b></span>`;
+  s+=`<span>期间涨跌 <b class="${clr(chg)}">${sgn(chg)}${chg.toFixed(2)}%</b></span>`
+    +`<span>最高 <b>${hi.toFixed(2)}</b></span><span>最低 <b>${lo.toFixed(2)}</b></span>`
+    +`<span>振幅 <b>${amp.toFixed(2)}%</b></span>`;
+  if(series.kind==='daily'){ const vol=_annVol(vals); if(vol!=null) s+=`<span>年化波动 <b>${vol.toFixed(1)}%</b></span>`; }
+  return s;
+}
+function waveCap(period){
+  if(period==='day') return '当日分时：逐分钟成交价，横向虚线=昨收基准。鼠标移到线上看该分钟具体价与涨跌。红涨绿跌。';
+  if(period==='5d') return '近 5 交易日 5 分钟线。鼠标移到线上看每根具体价。';
+  return '每日收盘价走势。鼠标移到线上看该日收盘与相对首日涨跌；年化波动由区间内日收益率折算。';
+}
+function renderWave(){
+  const pane=document.getElementById('pane_wave'); if(!pane) return;
+  if(!WAVE){ pane.innerHTML='<div class="paneempty"><span class="spin"></span> 拉取波动数据…</div>'; return; }
+  const chips=WAVE_PERIODS.map(([k,l])=>`<button class="wave-chip${WAVE_PERIOD===k?' on':''}" onclick="setWavePeriod('${k}')">${l}</button>`).join('');
+  pane.innerHTML='<div class="subh">价格波动 · 多周期（鼠标移到线上看每点具体值）</div>'
+    +`<div class="wave-chips">${chips}</div><div id="wave_body"></div>`;
+  renderWavePeriod();
+}
+function setWavePeriod(p){ WAVE_PERIOD=p; renderWave(); }
+function renderWavePeriod(){
+  const body=document.getElementById('wave_body'); if(!body) return;
+  const series=waveSeries(WAVE_PERIOD);
+  if(!series.pts||series.pts.length<2){
+    WAVE_CTX=null;
+    body.innerHTML='<div class="paneempty">该周期暂无数据（当日分时在非交易时段/新股可能为空，试试 5日 / 30日）。</div>';
+    return;
+  }
+  body.innerHTML='<div class="wavewrap">'+waveChart(series)+'</div>'
+    +`<div class="wave-stats">${waveStats(series,WAVE_PERIOD)}</div>`
+    +`<div class="chartcap">${waveCap(WAVE_PERIOD)}</div>`;
+}
+function waveChart(series){
+  const pts=series.pts,n=pts.length,vals=pts.map(p=>p.value);
+  const W=640,H=200,padL=48,padR=10,padT=12,padB=22,plotW=W-padL-padR,plotH=H-padT-padB;
+  let min=Math.min(...vals),max=Math.max(...vals);
+  const pad=(max-min)*0.06||max*0.01||1; min-=pad; max+=pad; const rng=max-min||1;
+  const xOf=i=> padL+(n>1? i*plotW/(n-1):plotW/2);
+  const yOf=v=> padT+(max-v)/rng*plotH;
+  const line=pts.map((p,i)=>`${xOf(i).toFixed(1)},${yOf(p.value).toFixed(1)}`).join(' ');
+  const base=series.base!=null?series.base:vals[0];
+  const up=vals[n-1]>=base, col=up?'var(--up)':'var(--down)', fill=up?'rgba(255,77,94,.08)':'rgba(34,201,139,.08)';
+  const baseY=(base>=min&&base<=max)?yOf(base):null;
+  WAVE_CTX={pts,base,geom:{W,padL,padR,padT,plotW,plotH,n,min,max,rng},xOf,yOf};
+  return `<svg viewBox="0 0 ${W} ${H}" onmousemove="waveHover(event)" onmouseleave="waveHoverEnd()">
+    <polygon points="${padL},${padT+plotH} ${line} ${padL+plotW},${padT+plotH}" fill="${fill}"/>
+    ${baseY!=null?`<line x1="${padL}" y1="${baseY.toFixed(1)}" x2="${padL+plotW}" y2="${baseY.toFixed(1)}" stroke="var(--line2)" stroke-dasharray="4 3"/>`:''}
+    <polyline points="${line}" fill="none" stroke="${col}" stroke-width="1.6"/>
+    <line id="wave_cross" x1="0" y1="${padT}" x2="0" y2="${padT+plotH}" stroke="var(--gold)" stroke-width="1" stroke-dasharray="3 3" style="display:none"/>
+    <circle id="wave_dot" r="3.2" fill="var(--gold)" stroke="#05070b" stroke-width="1" style="display:none"/>
+    <text x="${padL-4}" y="${padT+6}" fill="var(--muted)" font-size="10" font-family="monospace" text-anchor="end">${max.toFixed(2)}</text>
+    <text x="${padL-4}" y="${padT+plotH}" fill="var(--muted)" font-size="10" font-family="monospace" text-anchor="end">${min.toFixed(2)}</text>
+    <text x="${padL}" y="${H-6}" fill="var(--muted)" font-size="10" font-family="monospace">${pts[0].label}</text>
+    <text x="${padL+plotW}" y="${H-6}" fill="var(--muted)" font-size="10" font-family="monospace" text-anchor="end">${pts[n-1].label}</text>
+  </svg>`;
+}
+function waveHover(e){
+  const ctx=WAVE_CTX; if(!ctx) return;
+  const svg=e.currentTarget, rect=svg.getBoundingClientRect(), g=ctx.geom;
+  const localX=(e.clientX-rect.left)*(g.W/rect.width);
+  let i=Math.round((localX-g.padL)/(g.n>1? g.plotW/(g.n-1):1));
+  i=Math.max(0,Math.min(g.n-1,i));
+  const p=ctx.pts[i], x=ctx.xOf(i), y=ctx.yOf(p.value);
+  const cross=document.getElementById('wave_cross'), dot=document.getElementById('wave_dot');
+  if(cross){ cross.setAttribute('x1',x); cross.setAttribute('x2',x); cross.style.display=''; }
+  if(dot){ dot.setAttribute('cx',x); dot.setAttribute('cy',y); dot.style.display=''; }
+  const base=ctx.base!=null?ctx.base:ctx.pts[0].value;
+  const chg=base?(p.value-base)/base*100:0;
+  const tip=document.getElementById('tip');
+  tip.innerHTML=`${p.label}　<b>${p.value.toFixed(2)}</b>　<span style="color:${chg>=0?'#ff4d5e':'#22c98b'}">${sgn(chg)}${chg.toFixed(2)}%</span>`;
+  tip.style.display='block';
+  tip.style.left=Math.min(e.clientX+14, window.innerWidth-tip.offsetWidth-14)+'px';
+  tip.style.top=(e.clientY+16)+'px';
+}
+function waveHoverEnd(){
+  document.getElementById('tip').style.display='none';
+  const c=document.getElementById('wave_cross'), d=document.getElementById('wave_dot');
+  if(c)c.style.display='none'; if(d)d.style.display='none';
 }
 
 /* ── K线蜡烛图 + 箱形图 ── */

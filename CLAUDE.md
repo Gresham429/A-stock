@@ -21,7 +21,7 @@ python app.py                        # http://127.0.0.1:5000
 | 文件 | 职责 |
 |------|------|
 | `app.py` | Flask 路由（后端入口） |
-| `datasources.py` | 数据层：行情/指标/研报/龙虎榜/解禁/K线/财报/新闻/快讯 + `index_quotes`(五大指数+两市成交额)/`market_breadth`(涨跌家数/涨停跌停/行业冷热) |
+| `datasources.py` | 数据层：行情/指标/研报/龙虎榜/解禁/K线/财报/新闻/快讯 + `index_quotes`(五大指数+两市成交额)/`market_breadth`(涨跌家数/涨停跌停/行业冷热) + `tencent_minute`(当日分时)/`sina_kline(scale=)`(日K/5分钟) |
 | `llm.py` | DeepSeek 集成：`daily_recommendation` / `market_screen` / `position_advice` / `market_overview`(大盘研判) |
 | `websearch.py` | 博查联网搜索（B 方案，可选）+ key 健康检测/到期提醒 |
 | `portfolio.py` | 持仓记录 + 总盈亏 + 当日盈亏 |
@@ -68,6 +68,7 @@ python app.py                        # http://127.0.0.1:5000
 - **异步渲染必须带请求令牌**：多个慢请求（daily/screen/openDetail/大盘研判）写同一 DOM 目标时，用单调计数器 `recSeq`/`detailSeq`/`mktSeq`——发起即 `++`，`await` 回来后 `if(gen!==seq) return` 丢弃过期响应，否则切换时旧响应会覆盖新视图（错位 bug）。新增此类异步入口时照做。
 - **大盘研判**：`GET /api/market/overview`（`?ai=0` 只取指数走腾讯快返；完整版含东财情绪 + AI 研判，模块级缓存 5 分钟）。选股 `market_screen` 前先取（缓存的）大盘结论注入，让个股筛选与大盘攻防一致。前端顶部常驻「大盘研判条」，`market_breadth` 走东财失败即降级 None、不阻断。
 - **选股候选池两级化**：`focus` 可传一级板块名 / 二级细分名 / 空（全市场）；`_screen_rows` 按 `codes_of(focus)` 取数 + 可负担过滤 + `_balanced_pick` 跨一级轮询均衡采样（每二级≤3 只、全市场 cap 36；下钻二级时放宽到 6）。前端 `scr_focus` 用 `<optgroup>` 由 `taxonomy` 动态渲染。
+- **单股波动多周期**（深挖抽屉「波动」标签）：`GET /api/wave/<code>` 一次并发返回 `{intraday(腾讯分时), min5(新浪5分钟×5日), daily(新浪日K×260), prev_close}`；前端按 当日/5日/30日/60日/当季/当年 **纯前端切片**（当年/当季按 `年初/季初` 日期过滤 daily）。内联 SVG 折线 + `waveHover` 十字准星，复用 `#tip` 逐点显示 时间/价/涨跌%。分时基准=昨收，日线周期算年化波动。异步随 `detailSeq`。
 
 ## 冒烟测试（改完自测）
 

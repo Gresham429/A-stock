@@ -212,7 +212,10 @@ function renderDetail(j){
       `<div class="item"><div class="ttl small">${nw.title}</div><div class="meta"><span>${(nw.date||'').slice(0,10)}</span><span>${nw.source||''}</span></div></div>`).join('');
   }
   ov+=`<div class="subh">近30日走势</div>${bigSpark(m.series)}`;
-  if(LLM) ov+=`<button class="btn ai" style="margin-top:14px" onclick="askDetailAdvice('${j.code}')">🤖 让 ${MODEL} 分析这只该买还是该卖</button><div id="detailAdvice"></div>`;
+  if(LLM) ov+=`<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
+    <button class="btn ai" onclick="entryAnalysis('${j.code}')">🎯 深度入场分析（何时/怎么买+卖出策略）</button>
+    <button class="btn ai" onclick="askDetailAdvice('${j.code}')">🤖 该买还是该卖</button>
+  </div><div id="detailEntry"></div><div id="detailAdvice"></div>`;
   document.getElementById('pane_ov').innerHTML=ov;
 
   const reps=j.reports||[];
@@ -601,6 +604,35 @@ async function runScreen(force){
 async function addPick(code){
   const j=await (await fetch('/api/watchlist/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code})})).json();
   if(j.ok){ load(); alert(`已加入自选：${j.name||code}`); } else alert(j.msg||'加入失败');
+}
+
+/* 单股深度入场分析（是否/何时/怎么买 + 未来卖出策略；不必持仓） */
+async function entryAnalysis(code,force){
+  const box=document.getElementById('detailEntry');
+  box.innerHTML='<div class="paneempty small"><span class="spin"></span> '+MODEL+' 深度入场分析中…（约 20~60 秒）</div>';
+  let j; try{ j=await (await fetch('/api/recommend/entry/'+code,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({force:!!force})})).json(); }
+  catch(e){ box.innerHTML='<div class="paneempty small">失败：'+e+'</div>'; return; }
+  if(j.ok){ box.innerHTML=aiMeta(j,`entryAnalysis('${code}',true)`)+entryHTML(j.advice,j.model); }
+  else box.innerHTML='<div class="paneempty small">失败：'+(j.msg||'')+'</div>';
+}
+function entryHTML(a,model){
+  const vmap={'值得入场':['值得入场','a-buy'],'观望等待':['观望','a-watch'],'不建议':['不建议','a-sell']};
+  const m=vmap[a.verdict]||['参考','a-hold'];
+  return `<div class="advice">
+    <div class="rc-top"><span class="badge ${m[1]}" style="font-size:13px;padding:3px 12px">${m[0]}</span>
+      <span class="rc-name">${model} · <b>深度入场分析</b> <span class="rc-conf">${({high:'高',mid:'中',low:'低'})[a.confidence]||''}信心</span></span></div>
+    ${a.market_fit?`<div class="rc-reason"><b>大盘契合：</b>${esc(a.market_fit)}</div>`:''}
+    <div class="akv"><div><span>何时入场</span>${esc(a.entry_when)||'—'}</div>
+      <div><span>买入价位</span>${esc(a.entry_zone)||'—'}</div>
+      <div><span>怎么买</span>${esc(a.entry_how)||'—'}</div>
+      <div><span>止损</span>${esc(a.stop_loss)||'—'}</div>
+      <div><span>目标位</span>${esc(a.targets)||'—'}</div>
+      <div><span>持有周期</span>${esc(a.hold_horizon)||'—'}</div></div>
+    ${a.future_sell_plan?`<div class="adv-hold">🎯 未来卖出策略：${esc(a.future_sell_plan)}</div>`:''}
+    ${a.risks?`<div class="rc-risk">⚠ ${esc(a.risks)}</div>`:''}
+    <div class="rc-reason"><b>结论：</b>${esc(a.reason)}</div>
+    ${a.rule_basis?`<div class="adv-rule">📐 依据规则：${esc(a.rule_basis)}</div>`:''}
+    <div class="disc">AI 深度入场参考，遵循价格行为框架规则；不构成投资建议。</div></div>`;
 }
 
 /* 抽屉里让 AI 分析单只（不必持仓） */

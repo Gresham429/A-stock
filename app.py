@@ -487,6 +487,48 @@ def recommend_position(code: str):
                     "analyzed_at": ts, "age_min": 0})
 
 
+@app.route("/api/recommend/entry/<code>", methods=["POST"])
+def recommend_entry(code: str):
+    """单股深度入场分析（是否/何时/怎么买 + 未来卖出策略），不必持仓。"""
+    if not config.llm_enabled():
+        return jsonify({"ok": False, "msg": "未配置 DeepSeek key"}), 400
+    code = ds.normalize(code)
+    body = request.get_json(silent=True) or {}
+    force = bool(body.get("force"))
+    try:
+        capital = float(body.get("capital", 10000))
+    except (TypeError, ValueError):
+        capital = 10000.0
+    inputs = {"code": code, "capital": capital, "rules": rules_store.signature()}
+    if not force:
+        hit = ai_cache.get("entry", inputs)
+        if hit:
+            return jsonify({"ok": True, "advice": hit["result"]["advice"], "model": hit["model"],
+                            "web_search": config.bocha_enabled(), "cached": True,
+                            "analyzed_at": hit["ts"], "age_min": hit["age_min"]})
+    quotes = ds.tencent_quote([code])
+    q = quotes.get(code, {})
+    if not q.get("name"):
+        return jsonify({"ok": False, "msg": f"查不到该股票: {code}"}), 404
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        metrics, financials, news, kl = (pool.submit(ds.sina_metrics, code).result(),
+                                         pool.submit(ds.financial_summary, code).result(),
+                                         pool.submit(ds.stock_news, code).result(),
+                                         pool.submit(ds.sina_kline, code, 60).result())
+    vol_hist = _vol_hist(kl)
+    market_ctx = _market_overview_payload().get("ai")
+    web_ctx = _ai_web_context("position", code, q.get("name", ""))
+    try:
+        advice = llm.entry_advice(code, q.get("name", ""), q, metrics, financials, news,
+                                  vol_hist, capital, market_ctx, web_ctx)
+    except llm.LLMError as e:
+        return jsonify({"ok": False, "msg": str(e)}), 502
+    ts = ai_cache.put("entry", inputs, {"advice": advice}, config.DEEPSEEK_MODEL)
+    return jsonify({"ok": True, "advice": advice, "model": config.DEEPSEEK_MODEL,
+                    "web_search": config.bocha_enabled(), "cached": False,
+                    "analyzed_at": ts, "age_min": 0})
+
+
 @app.route("/api/recommend/screen", methods=["POST"])
 def recommend_screen():
     """全市场科技股筛选：跨板块 + 按资金规模。body: {capital?, focus_sector?}。"""

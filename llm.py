@@ -298,6 +298,50 @@ def position_advice(holding: dict[str, Any], quote: dict[str, Any],
     return _parse_json(content)
 
 
+def entry_advice(code: str, name: str, quote: dict[str, Any], metrics: dict[str, Any],
+                 financials: list[dict[str, Any]] | None = None,
+                 news: list[dict[str, Any]] | None = None,
+                 vol_hist: dict[str, Any] | None = None, capital: float = 0,
+                 market_ctx: dict[str, Any] | None = None,
+                 web_context: str = "") -> dict[str, Any]:
+    """单股深度入场分析：是否入场/何时/怎么买 + 未来卖出策略预判（不必持仓）。"""
+    news_txt = "\n".join(f"- {n.get('date','')[:10]} {n.get('title','')}"
+                         for n in (news or [])[:6]) or "（暂无近期新闻）"
+    vh = vol_hist or {}
+    prompt = f"""请对下面这只股票做一次**深度入场分析**：我目前不一定持有，想判断是否值得买、何时买、怎么买，并**预判未来的卖出策略**。
+{_market_ctx_block(market_ctx)}
+【标的】{name} {code}   可用资金约 {int(capital)} 元（A股 1手=100股，1手成本须 ≤ 资金）
+现价：{quote.get('price')}  PE：{quote.get('pe_ttm')}  PB：{quote.get('pb')}  1手成本：{quote.get('lot_cost')}元
+【波动与位置】年化波动：{metrics.get('vol')}%  20日涨：{metrics.get('cum20')}%  区间位置：{metrics.get('range_pos')}%(越接近100越过热)  主力20日净流入：{metrics.get('net20')}亿
+近60日最高/最低/当前：{vh.get('hi')}/{vh.get('lo')}/{vh.get('cur')}  近20日振幅均值：{vh.get('atr_pct')}%
+【财报(利润表)】
+{_fin_table(financials or [])}
+【近期新闻(公司/题材/政策面)】
+{news_txt}
+{_web_block(web_context)}
+**严格遵循上方【交易分析框架规则】**：先判大盘与该股所处周期(趋势/通道/区间)，只顺势、按交易者方程决定是否值得，结构止损、二次入场优先、不追高潮。
+严格返回 JSON：
+{{
+  "verdict":"值得入场|观望等待|不建议",
+  "confidence":"high|mid|low",
+  "market_fit":"与当前大盘/该股周期状态是否契合(一句话)",
+  "entry_when":"何时入场(具体条件,如『回踩EMA20出现H2』/『突破测试不破前高后』)",
+  "entry_zone":"建议买入价位区间",
+  "entry_how":"怎么买(结合资金:一次/分批/挂限价;大约能买几手)",
+  "stop_loss":"止损价位或条件",
+  "targets":"止盈/目标位(TP1保守 / TP2结构远目标)",
+  "hold_horizon":"预计持有周期",
+  "future_sell_plan":"未来卖出策略预判(什么情况分批止盈/什么情况破位止损/什么信号清仓)",
+  "risks":"主要风险(20字内)",
+  "rule_basis":"命中的框架规则(20字内)",
+  "reason":"综合结论(100字内)"
+}}
+若 verdict 非『值得入场』，entry_* 写触发条件而非具体价。"""
+    content = _chat([{"role": "system", "content": _DISCLAIMER},
+                     {"role": "user", "content": prompt}], max_tokens=6000)
+    return _parse_json(content)
+
+
 def market_screen(rows: list[dict[str, Any]], capital: float,
                   focus_sector: str = "", market_ctx: dict[str, Any] | None = None,
                   web_context: str = "") -> dict[str, Any]:

@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from flask import Flask, jsonify, render_template, request
@@ -25,6 +26,7 @@ import ai_cache
 import config
 import datasources as ds
 import llm
+import news_store
 import portfolio
 import store
 import universe
@@ -35,6 +37,8 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+news_store.init()  # 确保 news.db 表存在（廉价，幂等）
+_news_refreshing = [False]
 
 
 def _build_row(code: str, quote: dict) -> dict:
@@ -131,6 +135,49 @@ def market_overview_api():
     return jsonify(_market_overview_payload(
         force=request.args.get("refresh") == "1",
         with_ai=request.args.get("ai") != "0"))
+
+
+# ── L2 新闻/政策资讯库 ─────────────────────────────────────────────────────
+def _arg_int(name: str, default: int) -> int:
+    try:
+        return int(request.args.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+@app.route("/api/news")
+def news_list():
+    """查询新闻库：?sector=&code=&kind=&days=&limit= 。"""
+    return jsonify({
+        "news": news_store.query(
+            sector=request.args.get("sector", ""), code=request.args.get("code", ""),
+            kind=request.args.get("kind", ""), days=_arg_int("days", 365),
+            limit=_arg_int("limit", 60)),
+        "status": news_store.stats()})
+
+
+@app.route("/api/news/refresh", methods=["POST"])
+def news_refresh():
+    """触发增量抓取（后台线程、不阻塞）。看盘惰性刷新 + 手动刷新共用。"""
+    if _news_refreshing[0]:
+        return jsonify({"ok": True, "running": True})
+
+    def _job() -> None:
+        _news_refreshing[0] = True
+        try:
+            news_store.fetch_incremental()
+        except Exception as e:  # noqa: BLE001 后台任务兜底，不抛给主线程
+            logger.warning("news 增量抓取失败: %s", e)
+        finally:
+            _news_refreshing[0] = False
+
+    threading.Thread(target=_job, daemon=True).start()
+    return jsonify({"ok": True, "running": True})
+
+
+@app.route("/api/news/status")
+def news_status():
+    return jsonify(news_store.stats())
 
 
 @app.route("/api/detail/<code>")
@@ -444,8 +491,27 @@ def _screen_rows(capital: float, focus: str = "") -> list[dict]:
 
 
 def _ai_web_context(scope: str, code: str = "", name: str = "") -> str:
-    """构建喂给 AI 的「联网知识」上下文：A=免费财经/政策快讯，B=博查联网搜索(可选)。"""
+    """构建喂给 AI 的「联网知识」上下文：L2 本地资讯库 + A 实时快讯 + B 博查(可选)。"""
     parts = []
+    # L4：本地新闻库（带日期，让 AI 按新鲜度加权；个股取该股近期，大盘取市场级+政策）
+    if scope == "position" and code:
+        local = news_store.query(code=code, days=120, limit=8)
+    else:
+        local = (news_store.query(sector="市场", days=30, limit=8)
+                 + news_store.query(kind="政策", days=60, limit=6))
+    if local:
+        seen: set[str] = set()
+        lines = []
+        for n in local:
+            t = n.get("title", "")
+            if not t or t in seen:
+                continue
+            seen.add(t)
+            lines.append(f"- {n.get('date','')} [{n.get('kind','')}] {t}")
+        if lines:
+            parts.append("本地资讯库（近期新闻/政策，越近权重越高；仅供判断勿编造）：\n"
+                         + "\n".join(lines[:12]))
+    # A：实时快讯
     news = ds.market_news_digest(12)
     if news:
         parts.append("最新财经/政策快讯：\n"
@@ -467,5 +533,8 @@ def _now() -> str:
 
 
 if __name__ == "__main__":
+    if news_store.stats()["total"] == 0:  # 首次运行：后台一次性回填新闻库(不阻塞启动)
+        threading.Thread(target=news_store.backfill, daemon=True).start()
+        logger.info("首次运行：后台回填新闻库…（1–2 季度，约几分钟）")
     logger.info("A股观察台启动 -> http://127.0.0.1:5000")
     app.run(host="127.0.0.1", port=5000, debug=False)

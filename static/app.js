@@ -42,6 +42,7 @@ let recSeq=0, detailSeq=0, mktSeq=0;
 let TAXO=null;   // 板块两级分类（/api/config 下发）
 let WAVE=null, WAVE_PERIOD='day', WAVE_CTX=null;   // 波动多周期数据 / 当前周期 / hover 几何
 let FOLIO_ADV={};   // 持仓「何时卖」建议缓存 code->{html}|{loading:true}，跨自动刷新保留
+let NEWS_FILTER={sector:'',kind:''}, lastNewsRefresh=0;   // 新闻筛选 / 看盘惰性刷新节流
 
 const clr=v=> v>0?'up':v<0?'down':'flat';
 const sgn=v=> v>0?'+':'';
@@ -137,7 +138,7 @@ const REFRESH_MS=30000;   // 自动刷新间隔 30 秒
 function toggleAuto(){
   const b=document.getElementById('autobtn');
   if(autoTimer){clearInterval(autoTimer);autoTimer=null;b.textContent='自动刷新 关';b.classList.remove('on');}
-  else{autoTimer=setInterval(()=>{load();loadPortfolio();loadMarket();},REFRESH_MS);b.textContent='自动刷新 开·30s';b.classList.add('on');}
+  else{autoTimer=setInterval(()=>{load();loadPortfolio();loadMarket();maybeRefreshNews();},REFRESH_MS);b.textContent='自动刷新 开·30s';b.classList.add('on');}
 }
 
 /* ── 深挖抽屉 ── */
@@ -721,7 +722,54 @@ function openGloss(){
 }
 function closeGloss(){document.getElementById('glossModal').classList.remove('open');}
 
-document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeDrawer();closeGloss();closeRec();}});
+/* ── 热点新闻 / 政策（L2 本地资讯库） ── */
+function openNews(){ buildNewsChips(); loadNews(); document.getElementById('newsModal').classList.add('open'); }
+function closeNews(){ document.getElementById('newsModal').classList.remove('open'); }
+function buildNewsChips(){
+  const chips=[['全部',{}],['政策',{kind:'政策'}],['市场',{sector:'市场'}]];
+  if(TAXO) for(const p of Object.keys(TAXO)) chips.push([p,{sector:p}]);
+  document.getElementById('newsChips').innerHTML=chips.map(([label,f])=>{
+    const on=(f.sector||'')===NEWS_FILTER.sector&&(f.kind||'')===NEWS_FILTER.kind;
+    return `<button class="news-chip${on?' on':''}" onclick="setNewsFilter('${f.sector||''}','${f.kind||''}')">${label}</button>`;
+  }).join('');
+}
+function setNewsFilter(sector,kind){ NEWS_FILTER={sector,kind}; buildNewsChips(); loadNews(); }
+async function loadNews(){
+  const box=document.getElementById('newsBody');
+  box.innerHTML='<div class="paneempty"><span class="spin"></span> 读取资讯库…</div>';
+  const q=new URLSearchParams({sector:NEWS_FILTER.sector,kind:NEWS_FILTER.kind,limit:'80'});
+  let j; try{ j=await (await fetch('/api/news?'+q)).json(); }
+  catch(e){ box.innerHTML='<div class="paneempty">读取失败：'+e+'</div>'; return; }
+  const s=j.status||{};
+  document.getElementById('newsStat').textContent=
+    `本地库 ${s.total||0} 条 · ${s.oldest||'—'}~${s.newest||'—'} · 抓取于 ${(s.last_fetch||'').replace('T',' ').slice(0,16)||'—'}`;
+  const items=j.news||[];
+  box.innerHTML = items.length ? items.map(n=>`
+    <div class="news-item"><div class="nm2">
+      <span class="nd">${n.date||''}</span>
+      <span class="nk"${n.kind==='政策'?' style="color:var(--gold);border-color:var(--gold-dim)"':''}>${n.kind||''}</span>
+      ${n.code?`<span class="nk">${n.code}</span>`:''}
+      ${n.sector1&&n.sector1!=='市场'?`<span class="nk">${n.sector1}${n.sector2?'·'+n.sector2:''}</span>`:''}
+      <span class="muted small">${n.source||''}</span>
+    </div>${n.url?`<a href="${n.url}" target="_blank">${n.title} ↗</a>`:n.title}</div>`).join('')
+    : '<div class="paneempty">该筛选下暂无新闻（库在积累中，点「🔄 刷新」抓一次或换筛选）。</div>';
+}
+async function refreshNews(){
+  const btn=document.getElementById('newsRefreshBtn'); btn.textContent='抓取中…'; btn.disabled=true;
+  try{ await fetch('/api/news/refresh',{method:'POST'}); }catch(e){}
+  setTimeout(async()=>{ await loadNews(); btn.textContent='🔄 刷新'; btn.disabled=false; }, 6000);
+}
+// 看盘时惰性刷新：交易时段 + 每 15 分钟一次（piggyback 30s 自动刷新）
+function maybeRefreshNews(){
+  const now=Date.now(), d=new Date(), h=d.getHours(), wd=d.getDay();
+  const trading = wd>=1&&wd<=5 && ((h>=9&&h<12)||(h>=13&&h<15));
+  if(trading && now-lastNewsRefresh>15*60*1000){
+    lastNewsRefresh=now;
+    fetch('/api/news/refresh',{method:'POST'}).catch(()=>{});
+  }
+}
+
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeDrawer();closeGloss();closeRec();closeNews();}});
 initTooltips();
 loadConfig();
 load();

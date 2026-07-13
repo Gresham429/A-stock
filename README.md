@@ -18,7 +18,7 @@ AI 功能读取根目录 `.env` 里的 DeepSeek 配置（已 `.gitignore`，不�
 DEEPSEEK_API_KEY=sk-xxxx
 DEEPSEEK_MODEL=deepseek-v4-pro       # 也可用 deepseek-v4-flash（更快更省）
 DEEPSEEK_BASE_URL=https://api.deepseek.com
-# BOCHA_API_KEY=sk-xxxx             # 可选：博查联网搜索(B)，填了才启用
+# BOCHAAI_API_KEY=sk-xxxx           # 可选：博查联网搜索(B)，填了才启用（BOCHA_API_KEY 亦可）
 ```
 
 改 key 后重启后端生效。若 `.env` 未配置，AI 按钮自动隐藏，其余功能照常。
@@ -45,7 +45,7 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com
 每次 AI 分析（自选推荐 / 全市场选股 / 何时卖）都会先抓取实时资讯再判断：
 
 - **A · 财经/政策快讯（免费，默认开）**：财联社快讯 + 东财 7×24 全球资讯，零 key。顶部芯片显示 `📰新闻`。
-- **B · 博查联网搜索（可选）**：配置 `BOCHA_API_KEY`（或 `BOCHAAI_API_KEY`，两种变量名都认）后启用通用网页搜索（政策原文、行业动态等），针对个股/板块联网检索喂给 DeepSeek。顶部芯片显示 `🌐联网`。
+- **B · 博查联网搜索（可选）**：在 `.env` 配置 `BOCHAAI_API_KEY`（或 `BOCHA_API_KEY`，两种变量名都认）后启用通用网页搜索（政策原文、行业动态等），针对个股/板块联网检索喂给 DeepSeek。顶部芯片显示 `🌐联网`。
   - 申请：[open.bochaai.com](https://open.bochaai.com/)（国内直连、人民币结算、DeepSeek 官方搜索，约 3.6 元/千次）→ 拿 key 填入 `.env` → 重启。
   - 未配置时自动跳过，只用 A，不影响任何功能。
   - **到期提醒**：启动时会探测 key 健康；若 key 失效/过期/余额不足，看板顶部弹出红色提醒并给出处理方式（芯片显示 `🌐联网⚠`）。也可点提醒里的「重新检测」。
@@ -73,7 +73,7 @@ A-stock/
 ├── config.py           # 读取 .env（DeepSeek + 博查密钥，不硬编码）
 ├── templates/index.html# 看板结构 + 样式（深色终端风）
 ├── static/app.js       # 前端逻辑（对比/深挖/持仓/AI/名词解释）
-├── .env                # DeepSeek 密钥（gitignore，勿提交）
+├── .env                # DeepSeek + 博查 密钥（gitignore，勿提交）
 ├── .gitignore
 ├── watchlist.json / portfolio.json   # 本地数据（自动生成）
 └── requirements.txt
@@ -89,7 +89,7 @@ A-stock/
 - **交易时段**：盘中实时；非交易时段显示最近交易日数据。
 - **AI 速度/成本**：`deepseek-v4-pro` 是推理模型，每日推荐约 20~40 秒；嫌慢可在 `.env` 换 `deepseek-v4-flash`。已给足 `max_tokens`（推理会占用额度）。
 - **东财限流**：深挖偶发空数据是东财对当前 IP 的间歇风控，重试或换网络即可（页面显示「无数据」不崩）。
-- **政策面**：应用内「何时卖」以东财个股新闻作为政策/题材面自动参考；更深入的国家政策研究需结合外部联网搜索（不含在本仓库内）。
+- **政策面**：AI 分析默认读财经/政策快讯（A，免费）；配置博查 key 后再叠加联网搜索（B）检索政策原文/行业动态。详见上文「AI 联网知识」。
 - **K线/箱形图**：来自新浪日K（前复权），蜡烛图含 MA5/MA20+成交量；箱形图展示近 60 日收盘价四分位分布，★ 为当前价。
 - **仅供研究，不构成投资建议**；AI 与情景区间只描述客观信号与波动幅度，不保证收益。
 

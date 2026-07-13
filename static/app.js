@@ -41,6 +41,7 @@ let DATA=[], sortKey='net20', sortDir=-1, autoTimer=null, LLM=false, MODEL='', W
 let recSeq=0, detailSeq=0, mktSeq=0;
 let TAXO=null;   // 板块两级分类（/api/config 下发）
 let WAVE=null, WAVE_PERIOD='day', WAVE_CTX=null;   // 波动多周期数据 / 当前周期 / hover 几何
+let FOLIO_ADV={};   // 持仓「何时卖」建议缓存 code->{html}|{loading:true}，跨自动刷新保留
 
 const clr=v=> v>0?'up':v<0?'down':'flat';
 const sgn=v=> v>0?'+':'';
@@ -650,6 +651,15 @@ async function loadPortfolio(){
         <button class="mini danger" onclick="delHolding('${h.code}','${(h.name||h.code)}')">清仓</button>
       </td>
     </tr><tr class="advrow" id="adv_${h.code}"><td colspan="9"></td></tr>`).join('') : '';
+  // 刷新会重建上面的行 → 把已展开的「何时卖」建议重新注入，避免一闪而过被清掉
+  const codes=new Set(hs.map(h=>h.code));
+  Object.keys(FOLIO_ADV).forEach(code=>{
+    if(!codes.has(code)){ delete FOLIO_ADV[code]; return; }   // 已清仓则丢弃缓存
+    const row=document.getElementById('adv_'+code); if(!row) return;
+    row.classList.add('open');
+    row.firstElementChild.innerHTML = FOLIO_ADV[code].html
+      || '<div class="paneempty small"><span class="spin"></span> '+MODEL+' 分析何时卖/加/止损…</div>';
+  });
 }
 async function addHolding(){
   const code=document.getElementById('h_code').value.trim();
@@ -669,14 +679,23 @@ async function delHolding(code,name){
   loadPortfolio();
 }
 async function folioAdvice(code){
-  const row=document.getElementById('adv_'+code); const cell=row.firstElementChild;
-  if(row.classList.contains('open')){ row.classList.remove('open'); cell.innerHTML=''; return; }
+  const row=document.getElementById('adv_'+code); if(!row) return;
+  const cell=row.firstElementChild;
+  if(row.classList.contains('open')){   // 再次点击=收起
+    row.classList.remove('open'); cell.innerHTML=''; delete FOLIO_ADV[code]; return;
+  }
   row.classList.add('open');
-  cell.innerHTML='<div class="paneempty small"><span class="spin"></span> '+MODEL+' 分析何时卖/加/止损…';
+  FOLIO_ADV[code]={loading:true};   // 标记「用户要看」，刷新时据此重注入(spinner/结果)
+  cell.innerHTML='<div class="paneempty small"><span class="spin"></span> '+MODEL+' 分析何时卖/加/止损…</div>';
+  let html;
   try{
     const j=await (await fetch('/api/recommend/position/'+code,{method:'POST'})).json();
-    cell.innerHTML = j.ok ? adviceHTML(j.advice,j.model) : '<div class="paneempty small">失败：'+(j.msg||'')+'</div>';
-  }catch(e){ cell.innerHTML='<div class="paneempty small">失败：'+e+'</div>'; }
+    html = j.ok ? adviceHTML(j.advice,j.model) : '<div class="paneempty small">失败：'+(j.msg||'')+'</div>';
+  }catch(e){ html='<div class="paneempty small">失败：'+e+'</div>'; }
+  if(!FOLIO_ADV[code]) return;   // 请求返回前用户已收起 → 丢弃
+  FOLIO_ADV[code]={html};        // 缓存结果，跨自动刷新保留
+  const r=document.getElementById('adv_'+code);   // 重新按 id 取，避免刷新后旧节点已脱离文档
+  if(r){ r.classList.add('open'); r.firstElementChild.innerHTML=html; }
 }
 
 /* ── 名词解释总表 ── */

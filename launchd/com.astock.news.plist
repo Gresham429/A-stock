@@ -1,25 +1,32 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  L2 新闻库每日定时抓取（macOS launchd）。
-  安装：
-    1) 按需修改下方 python3 路径（which python3）与仓库路径；
-    2) cp launchd/com.astock.news.plist ~/Library/LaunchAgents/
-    3) launchctl load ~/Library/LaunchAgents/com.astock.news.plist
-    卸载：launchctl unload ~/Library/LaunchAgents/com.astock.news.plist
-  触发点：交易日 08:40/11:40/14:00/15:30/20:30；非交易日门控在 fetch_news.py（仅 20:30 真抓）。
-  Mac 睡眠时错过的任务会在下次唤醒补跑。
+  L2 新闻库定时抓取（macOS launchd，内置到 Mac）。
+  仓库在外置盘 /Volumes/Elements 上 → 每次触发先判断盘/脚本在不在：
+    在 → cd 进仓库跑 fetch_news.py；不在 → exit 0 静默跳过（不报错、不抓）。
+  触发时机（每次都会先做盘存在性检测）：
+    · RunAtLoad   : 登录/加载时跑一次（开机后自动更新）
+    · StartOnMount: 任何卷挂载时跑一次（插上外置盘即开始抓）
+    · StartCalendarInterval: 每日 08:40/11:40/14:00/15:30/20:30
+  交易日/非交易日门控在 fetch_news.py（非交易日仅 20:30 真抓）。
+  日志写内部盘 ~/Library/Logs（外置盘拔掉也能记）。
+  安装：见 README「自动抓取（launchd）」。
 -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
   <string>com.astock.news</string>
+
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/python3</string>
-    <string>/Volumes/Elements/workspace/A-stock/fetch_news.py</string>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>REPO=/Volumes/Elements/workspace/A-stock; [ -f "$REPO/fetch_news.py" ] &amp;&amp; cd "$REPO" &amp;&amp; /usr/bin/python3 fetch_news.py; exit 0</string>
   </array>
-  <key>WorkingDirectory</key>
-  <string>/Volumes/Elements/workspace/A-stock</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartOnMount</key>
+  <true/>
   <key>StartCalendarInterval</key>
   <array>
     <dict><key>Hour</key><integer>8</integer><key>Minute</key><integer>40</integer></dict>
@@ -28,9 +35,10 @@
     <dict><key>Hour</key><integer>15</integer><key>Minute</key><integer>30</integer></dict>
     <dict><key>Hour</key><integer>20</integer><key>Minute</key><integer>30</integer></dict>
   </array>
+
   <key>StandardOutPath</key>
-  <string>/Volumes/Elements/workspace/A-stock/data/fetch_news.log</string>
+  <string>/Users/gresham/Library/Logs/astock-news.log</string>
   <key>StandardErrorPath</key>
-  <string>/Volumes/Elements/workspace/A-stock/data/fetch_news.log</string>
+  <string>/Users/gresham/Library/Logs/astock-news.log</string>
 </dict>
 </plist>

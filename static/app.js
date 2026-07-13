@@ -38,7 +38,8 @@ const COLS=[
 ];
 let DATA=[], sortKey='net20', sortDir=-1, autoTimer=null, LLM=false, MODEL='', WEB=false;
 // 请求令牌：每次发起自增；异步响应回来前若已非最新，则丢弃（防面板/抽屉切换时旧响应错位）
-let recSeq=0, detailSeq=0;
+let recSeq=0, detailSeq=0, mktSeq=0;
+let TAXO=null;   // 板块两级分类（/api/config 下发）
 
 const clr=v=> v>0?'up':v<0?'down':'flat';
 const sgn=v=> v>0?'+':'';
@@ -126,7 +127,7 @@ const REFRESH_MS=30000;   // 自动刷新间隔 30 秒
 function toggleAuto(){
   const b=document.getElementById('autobtn');
   if(autoTimer){clearInterval(autoTimer);autoTimer=null;b.textContent='自动刷新 关';b.classList.remove('on');}
-  else{autoTimer=setInterval(()=>{load();loadPortfolio();},REFRESH_MS);b.textContent='自动刷新 开·30s';b.classList.add('on');}
+  else{autoTimer=setInterval(()=>{load();loadPortfolio();loadMarket();},REFRESH_MS);b.textContent='自动刷新 开·30s';b.classList.add('on');}
 }
 
 /* ── 深挖抽屉 ── */
@@ -304,11 +305,69 @@ function boxplot(vals){
     ${lbl(min,'低',24)}${lbl(q1,'Q1',108)}${lbl(med,'中',24)}${lbl(q3,'Q3',108)}${lbl(max,'高',24)}</svg>`;
 }
 
+/* ── 大盘研判条 ── */
+async function loadMarket(){
+  const gen=++mktSeq;
+  // 1) 先拉指数(快) → 即时渲染行情条
+  try{
+    const q=await (await fetch('/api/market/overview?ai=0')).json();
+    if(gen!==mktSeq) return;
+    renderMarketIdx(q);
+  }catch(e){}
+  // 2) 再拉完整(含情绪 + AI 研判；首次较慢，之后走 5 分钟缓存)
+  try{
+    const j=await (await fetch('/api/market/overview')).json();
+    if(gen!==mktSeq) return;
+    renderMarketIdx(j); renderMarketDetail(j);
+  }catch(e){}
+}
+function renderMarketIdx(j){
+  const idx=j.indices||[];
+  let h=idx.map(i=>`<span class="ix"><b>${i.name}</b> <span class="${clr(i.chg_pct)}">${fmt(i.point)} ${sgn(i.chg_pct)}${fmt(i.chg_pct)}%</span></span>`).join('');
+  if(j.amount_liang_yi!=null) h+=`<span class="ix"><b>两市成交</b> <span class="pt">${fmtInt(j.amount_liang_yi)}亿</span></span>`;
+  document.getElementById('mktIdx').innerHTML = h || '<span class="muted small">指数数据暂缺</span>';
+  if(j.ai&&j.ai.one_liner) document.getElementById('mktOne').textContent='📊 '+j.ai.one_liner;
+}
+function renderMarketDetail(j){
+  const ai=j.ai, b=j.breadth||{}, rows=[];
+  if(ai){
+    if(ai.regime) rows.push(['状态',`<span class="mkt-regime">${ai.regime}</span> ${ai.style||''}`]);
+    if(ai.sentiment) rows.push(['赚钱效应',ai.sentiment]);
+    if(ai.risk) rows.push(['主要风险',ai.risk]);
+    if(ai.guidance) rows.push(['选股指导',ai.guidance]);
+  }
+  const sem=[];
+  if(b.advancers!=null) sem.push(`涨 ${b.advancers} / 跌 ${b.decliners} 家`);
+  if(b.limit_up!=null) sem.push(`涨停 ${b.limit_up} / 跌停 ${b.limit_down}`);
+  if(sem.length) rows.push(['市场广度',sem.join('　·　')]);
+  const ind=x=>`${x.name} <span class="${clr(x.chg_pct)}">${sgn(x.chg_pct)}${fmt(x.chg_pct)}%</span>`;
+  if(b.top_industries&&b.top_industries.length) rows.push(['领涨行业', b.top_industries.map(ind).join('　')]);
+  if(b.bottom_industries&&b.bottom_industries.length) rows.push(['领跌行业', b.bottom_industries.map(ind).join('　')]);
+  let h=rows.map(([k,v])=>`<div class="mrow"><div class="mk">${k}</div><div class="mv">${v}</div></div>`).join('');
+  if(!ai&&!rows.length) h='<div class="mrow"><div class="mv muted">大盘研判暂不可用（未配置 AI 或数据拉取失败）。</div></div>';
+  h+=`<div class="mkt-disc">${j.model||''} 大盘研判为参考信号，只据当日客观数据、不预测方向，不构成投资建议。${j.updated?' 更新 '+j.updated:''}${j.cached?' · 缓存':''}</div>`;
+  document.getElementById('mktDetail').innerHTML=h;
+}
+function toggleMkt(){ document.getElementById('mktBar').classList.toggle('open'); }
+
+/* 板块两级分组下拉 */
+function populateFocus(){
+  if(!TAXO) return;
+  const sel=document.getElementById('scr_focus');
+  let h='<option value="">不限（全市场）</option>';
+  for(const [primary, subs] of Object.entries(TAXO)){
+    h+=`<option value="${primary}">▶ 整个「${primary}」板块</option>`;
+    h+=`<optgroup label="${primary}">`+(subs||[]).map(s=>`<option value="${s}">　${s}</option>`).join('')+'</optgroup>';
+  }
+  sel.innerHTML=h;
+}
+
 /* ── 配置 / AI 可用性 ── */
 async function loadConfig(){
   try{
     const j=await (await fetch('/api/config')).json();
     LLM=j.llm_enabled; MODEL=j.model||''; WEB=j.web_search;
+    TAXO=j.taxonomy||null; populateFocus();
     document.querySelectorAll('.ai-only').forEach(el=>el.style.display=LLM?'':'none');
     const chip=document.getElementById('aichip');
     chip.textContent=LLM?`🤖 ${MODEL} · 📰新闻${WEB?' · 🌐联网':''}`:'🤖 未配置';
@@ -371,10 +430,10 @@ function closeRec(){ ++recSeq; document.getElementById('recPanel').classList.rem
 /* ── 全市场筛选 ── */
 function openScreen(){
   ++recSeq;   // 作废在飞的旧请求，避免其晚返回覆盖本面板
-  document.getElementById('recTitle').textContent='🔍 全市场选股（跨板块 · 侧重科技）';
+  document.getElementById('recTitle').textContent='🔍 全市场选股（结合大盘 · 跨板块 · 可下钻二级）';
   document.getElementById('recControls').style.display='flex';
   document.getElementById('recPanel').classList.add('open');
-  document.getElementById('recBody').innerHTML='<div class="paneempty">选资金规模与侧重板块 → 点「开始筛选」。DeepSeek 会从 44 只科技股里按你的资金和板块跨板块选股。</div>';
+  document.getElementById('recBody').innerHTML='<div class="paneempty">选资金规模与侧重板块（可选整个一级或某个二级细分）→ 点「开始筛选」。DeepSeek 会先看当前大盘，再从全市场候选里跨板块为你选股。</div>';
 }
 async function runScreen(){
   const gen=++recSeq;
@@ -389,12 +448,14 @@ async function runScreen(){
   if(gen!==recSeq) return;   // 已切到别的请求，丢弃这次过期响应
   if(!j.ok){ box.innerHTML='<div class="paneempty">筛选失败：'+(j.msg||'')+'</div>'; return; }
   const r=j.result||{};
-  let h=`<div class="mview">🔍 候选 ${j.candidates} 只 · 资金 ${(+j.capital).toLocaleString()} 元${j.focus?' · 侧重 '+j.focus:''}<br>📊 ${r.overall||''}</div>`;
+  const regime=j.market_regime||r.market_regime;
+  let h=`<div class="mview">🔍 候选 ${j.candidates} 只 · 资金 ${(+j.capital).toLocaleString()} 元${j.focus?' · 侧重 '+j.focus:''}${regime?' · 大盘 '+regime:''}<br>📊 ${r.overall||''}</div>`;
   h+='<div class="reccards">'+(r.picks||[]).map(p=>{
     const a=ACT[p.action]||['关注','a-watch'];
+    const sec=[p.primary,p.sub||p.sector].filter(Boolean).join('·');
     return `<div class="reccard ${a[1]}"><div class="rc-top"><span class="badge ${a[1]}">${a[0]}</span>
       <span class="rc-name">${p.name||''} <em>${p.code||''}</em></span>
-      <span class="rc-sector">${p.sector||''}</span></div>
+      <span class="rc-sector">${sec}</span></div>
       <div class="rc-reason">${p.reason||''}</div>
       <div class="rc-top" style="margin-top:8px">
         <span class="rc-lot">1手 ${p.lot_cost?(+p.lot_cost).toLocaleString():'—'}元</span>
@@ -516,4 +577,5 @@ initTooltips();
 loadConfig();
 load();
 loadPortfolio();
+loadMarket();   // 顶部大盘研判条
 toggleAuto();   // 默认开启自动刷新（30s）

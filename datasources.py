@@ -452,3 +452,122 @@ def market_news_digest(limit: int = 12) -> list[dict[str, Any]]:
         seen.add(key)
         out.append(n)
     return out[:limit]
+
+
+# ── 大盘指数 + 市场情绪（大盘研判用） ─────────────────────────────────────
+_INDEX_DISPLAY = [
+    ("sh000001", "上证指数"), ("sz399001", "深证成指"), ("sz399006", "创业板指"),
+    ("sh000300", "沪深300"), ("sh000688", "科创50"),
+]
+_INDEX_AMOUNT_EXTRA = ("sz399106", "深证综指")  # 仅用于两市成交额合计（深市全量）
+
+
+def index_quotes() -> dict[str, Any]:
+    """五大指数行情 + 两市成交额（腾讯，不封 IP）。
+
+    返回 {"indices": [{code,name,point,chg_pct,amount_yi}...], "amount_liang_yi": float|None}。
+    amount_liang_yi = 上证(沪市全量) + 深证综指(深市全量) 成交额，单位亿元。
+    指数前缀须硬编码（上证/沪深300/科创50 均在 sh，market_prefix 对 000xxx 会误判为 sz）。
+    """
+    prefixed = [p for p, _ in _INDEX_DISPLAY] + [_INDEX_AMOUNT_EXTRA[0]]
+    url = "https://qt.gtimg.cn/q=" + ",".join(prefixed)
+    try:
+        data = _http_get(url, gbk=True, timeout=15)
+    except OSError as e:
+        logger.error("腾讯指数请求失败: %s", e)
+        return {"indices": [], "amount_liang_yi": None}
+
+    parsed: dict[str, dict[str, Any]] = {}
+    for line in data.strip().split(";"):
+        if not line.strip() or "=" not in line or '"' not in line:
+            continue
+        key = line.split("=")[0].split("_")[-1]  # 如 sh000001
+        vals = line.split('"')[1].split("~")
+        if len(vals) < 38:  # 指数字段较个股少，成交额在索引 37
+            continue
+
+        def f(i: int) -> float:
+            try:
+                return float(vals[i])
+            except (ValueError, IndexError):
+                return 0.0
+
+        parsed[key] = {
+            "name": vals[1],
+            "point": round(f(3), 2),
+            "chg_pct": f(32),
+            "amount_yi": round(f(37) / 10000, 1),  # 成交额: 万 -> 亿
+        }
+
+    indices = []
+    for pcode, disp_name in _INDEX_DISPLAY:
+        d = parsed.get(pcode)
+        if not d:
+            continue
+        indices.append({"code": pcode[2:], "name": disp_name,
+                        "point": d["point"], "chg_pct": d["chg_pct"],
+                        "amount_yi": d["amount_yi"]})
+
+    sh = parsed.get("sh000001", {}).get("amount_yi")
+    sz = parsed.get(_INDEX_AMOUNT_EXTRA[0], {}).get("amount_yi")
+    liang = round(sh + sz, 1) if (sh and sz) else None
+    return {"indices": indices, "amount_liang_yi": liang}
+
+
+def _em_json(url: str, ref: str = "https://data.eastmoney.com/") -> dict[str, Any]:
+    """东财 JSON 请求（走 em_get 限流），失败返回 {}。"""
+    try:
+        return json.loads(em_get(url, ref=ref))
+    except (OSError, ValueError) as e:
+        logger.warning("东财 JSON 请求失败: %s", e)
+        return {}
+
+
+_ZTB_UT = "7eea3edcaed734bea9cbfc24409ed989"
+
+
+def _limit_pool_count(endpoint: str, sort: str, date: str) -> int | None:
+    """涨停/跌停池家数（东财 push2ex）。data 为 null（非交易日/盘前）时返回 None。"""
+    params = urllib.parse.urlencode({
+        "ut": _ZTB_UT, "dpt": "wz.ztzt", "Pageindex": 0, "pagesize": 10000,
+        "sort": sort, "date": date,
+    })
+    d = _em_json(f"https://push2ex.eastmoney.com/{endpoint}?{params}",
+                 ref="https://quote.eastmoney.com/")
+    data = d.get("data")
+    if not data:
+        return None
+    return len(data.get("pool") or [])
+
+
+def market_breadth() -> dict[str, Any]:
+    """市场情绪：涨跌家数 + 涨停/跌停家数 + 行业冷热榜。
+
+    涨跌家数由东财行业板块每行业上涨/下跌家数汇总（单次请求，顺带行业冷热）。
+    任一子项失败返回 None / 空，绝不抛异常（大盘研判可在缺情绪数据时降级）。
+    """
+    out: dict[str, Any] = {
+        "advancers": None, "decliners": None,
+        "limit_up": None, "limit_down": None,
+        "top_industries": [], "bottom_industries": [],
+    }
+    # 1) 行业板块：汇总涨跌家数 + 冷热榜（单次东财请求）
+    ind_params = urllib.parse.urlencode({
+        "pn": 1, "pz": 200, "po": 1, "np": 1, "fltt": 2, "invt": 2, "fid": "f3",
+        "fs": "m:90+t:2", "fields": "f3,f14,f104,f105",
+    })
+    d = _em_json(f"https://push2.eastmoney.com/api/qt/clist/get?{ind_params}")
+    diff = (d.get("data") or {}).get("diff") or []
+    if isinstance(diff, dict):
+        diff = list(diff.values())
+    if diff:
+        out["advancers"] = sum(int(x.get("f104") or 0) for x in diff)
+        out["decliners"] = sum(int(x.get("f105") or 0) for x in diff)
+        ranked = [{"name": x.get("f14", ""), "chg_pct": x.get("f3")} for x in diff]
+        out["top_industries"] = ranked[:5]
+        out["bottom_industries"] = ranked[-5:][::-1]
+    # 2) 涨停/跌停家数（东财 push2ex，按今日交易日）
+    today = datetime.now().strftime("%Y%m%d")
+    out["limit_up"] = _limit_pool_count("getTopicZTPool", "fbt:asc", today)
+    out["limit_down"] = _limit_pool_count("getTopicDTPool", "fund:asc", today)
+    return out

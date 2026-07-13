@@ -21,11 +21,11 @@ python app.py                        # http://127.0.0.1:5000
 | 文件 | 职责 |
 |------|------|
 | `app.py` | Flask 路由（后端入口） |
-| `datasources.py` | 数据层：行情/指标/研报/龙虎榜/解禁/K线/财报/新闻/快讯 |
-| `llm.py` | DeepSeek 集成：`daily_recommendation` / `market_screen` / `position_advice` |
+| `datasources.py` | 数据层：行情/指标/研报/龙虎榜/解禁/K线/财报/新闻/快讯 + `index_quotes`(五大指数+两市成交额)/`market_breadth`(涨跌家数/涨停跌停/行业冷热) |
+| `llm.py` | DeepSeek 集成：`daily_recommendation` / `market_screen` / `position_advice` / `market_overview`(大盘研判) |
 | `websearch.py` | 博查联网搜索（B 方案，可选）+ key 健康检测/到期提醒 |
 | `portfolio.py` | 持仓记录 + 总盈亏 + 当日盈亏 |
-| `universe.py` | 科技股候选池（9 板块，供全市场筛选） |
+| `universe.py` | 全市场候选池（两级：10 一级板块 → 48 二级细分 → 170 龙头；`codes_of(focus)`/`sector_of`→(一级,二级)/`taxonomy()`） |
 | `store.py` | 自选股持久化 |
 | `config.py` | 读 `.env`（DeepSeek + 博查 key，绝不硬编码） |
 | `templates/index.html` | UI 结构 + 全部 CSS（深色终端风） |
@@ -47,7 +47,7 @@ python app.py                        # http://127.0.0.1:5000
 
 ## AI 配置（DeepSeek + 博查）
 
-- **DeepSeek**：`deepseek-v4-pro`（该账号**只有** v4-pro / v4-flash 可用）。是**推理模型**——`max_tokens` 同时覆盖「思考+正文」，太小会导致思考耗尽、正文返回空。已设 daily=8000 / position=5000 / screen=9000，**别调小**。OpenAI 兼容 `POST /chat/completions`，支持 `response_format:{type:json_object}`，零 SDK（纯 urllib）。
+- **DeepSeek**：`deepseek-v4-pro`（该账号**只有** v4-pro / v4-flash 可用）。是**推理模型**——`max_tokens` 同时覆盖「思考+正文」，太小会导致思考耗尽、正文返回空。已设 daily=8000 / position=5000 / screen=9000 / market_overview=6000，**别调小**。**温度统一 0.15**（`_chat` 默认值，求严谨理性、少发散）；`_DISCLAIMER` 强制「只据给定数据、不编造、不预测方向」。OpenAI 兼容 `POST /chat/completions`，支持 `response_format:{type:json_object}`，零 SDK（纯 urllib）。
 - **博查（可选，B 方案）**：`POST api.bochaai.com/v1/web-search`，Bearer 鉴权，body `{query,freshness,summary,count}`，成功响应 `webPages.value[].{name,url,siteName,snippet,summary}`，错误体 `{"code":"401","message":"Invalid API KEY"}`。
   - **变量名**：`.env` 里用 `BOCHAAI_API_KEY`（博查惯例，README/`.env` 以此为准）；`config` 也兼容 `BOCHA_API_KEY`（`os.environ.get("BOCHA_API_KEY") or os.environ.get("BOCHAAI_API_KEY")`）。
   - **到期提醒**：`websearch._classify()` 把 401→key 无效/过期、402/403/余额→余额不足、429→限流；`/api/websearch/status?probe=1` 主动探测；前端启动时探测，失效则顶部红条 + 芯片 `🌐联网⚠`。
@@ -65,7 +65,9 @@ python app.py                        # http://127.0.0.1:5000
 - **情景区间** = 年化波动率反推（±1σ≈68%、±2σ≈95%），**只描述波动幅度，不预测方向**。
 - 所有 AI 输出必须标注「参考信号，不构成投资建议」。
 - 前端字体用系统栈（`PingFang SC`/`Microsoft YaHei`…），**不加载 Google Fonts**（国内会失败）；图表纯内联 SVG，零外部依赖。
-- **异步渲染必须带请求令牌**：多个慢请求（daily/screen/openDetail）写同一 DOM 目标时，用单调计数器 `recSeq`/`detailSeq`——发起即 `++`，`await` 回来后 `if(gen!==seq) return` 丢弃过期响应，否则切换时旧响应会覆盖新视图（错位 bug）。新增此类异步入口时照做。
+- **异步渲染必须带请求令牌**：多个慢请求（daily/screen/openDetail/大盘研判）写同一 DOM 目标时，用单调计数器 `recSeq`/`detailSeq`/`mktSeq`——发起即 `++`，`await` 回来后 `if(gen!==seq) return` 丢弃过期响应，否则切换时旧响应会覆盖新视图（错位 bug）。新增此类异步入口时照做。
+- **大盘研判**：`GET /api/market/overview`（`?ai=0` 只取指数走腾讯快返；完整版含东财情绪 + AI 研判，模块级缓存 5 分钟）。选股 `market_screen` 前先取（缓存的）大盘结论注入，让个股筛选与大盘攻防一致。前端顶部常驻「大盘研判条」，`market_breadth` 走东财失败即降级 None、不阻断。
+- **选股候选池两级化**：`focus` 可传一级板块名 / 二级细分名 / 空（全市场）；`_screen_rows` 按 `codes_of(focus)` 取数 + 可负担过滤 + `_balanced_pick` 跨一级轮询均衡采样（每二级≤3 只、全市场 cap 36；下钻二级时放宽到 6）。前端 `scr_focus` 用 `<optgroup>` 由 `taxonomy` 动态渲染。
 
 ## 冒烟测试（改完自测）
 

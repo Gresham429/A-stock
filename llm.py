@@ -16,8 +16,14 @@ import config
 
 logger = logging.getLogger(__name__)
 
-_DISCLAIMER = ("你是严谨的A股投资研究助手。你的输出是「决策参考信号」，不是保证收益的建议；"
-               "必须基于给定的客观数据说话，不得编造未提供的数字。语气客观，中文回答。")
+_DISCLAIMER = (
+    "你是严谨、理性、克制的A股投资研究助手。硬性要求："
+    "① 只依据提示词中给定的客观数据推理，绝不编造、外推或引用未提供的数字与事实；"
+    "② 数据缺失就明说「数据不足」，不要脑补；"
+    "③ 只描述波动幅度与概率区间，不对涨跌方向下确定性断言；"
+    "④ 结论需可被给定数据支撑，逻辑链清晰、口径一致；"
+    "⑤ 所有输出均为「决策参考信号」，不是投资建议、不保证收益。"
+    "语气客观冷静，中文回答，严格按要求的 JSON 结构返回。")
 
 
 class LLMError(RuntimeError):
@@ -25,7 +31,7 @@ class LLMError(RuntimeError):
 
 
 def _chat(messages: list[dict[str, str]], *, json_mode: bool = True,
-          temperature: float = 0.3, max_tokens: int = 8000,
+          temperature: float = 0.15, max_tokens: int = 8000,
           timeout: int = 150) -> str:
     """调用 DeepSeek chat completions，返回助手文本。
 
@@ -92,6 +98,80 @@ def _web_block(web_context: str) -> str:
         return ""
     return ("\n【近期财经/政策快讯 + 联网搜索（据此判断政策面/情绪面，"
             "但仅作参考、勿编造）】\n" + web_context + "\n")
+
+
+def _index_table(indices: list[dict[str, Any]]) -> str:
+    """指数行情压成紧凑文本表。"""
+    if not indices:
+        return "（指数数据暂缺）"
+    lines = ["指数 点位 涨跌% 成交额(亿)"]
+    for i in indices:
+        lines.append(" ".join([i.get("name", ""), _fmt(i.get("point")),
+                               _fmt(i.get("chg_pct")), _fmt(i.get("amount_yi"))]))
+    return "\n".join(lines)
+
+
+def _breadth_line(breadth: dict[str, Any] | None) -> str:
+    """市场情绪（涨跌家数/涨停跌停/行业冷热）压成一段文本。"""
+    if not breadth:
+        return "（市场情绪数据暂缺，请仅据指数与成交额判断）"
+    parts = [
+        f"涨/跌家数：{_fmt(breadth.get('advancers'))}/{_fmt(breadth.get('decliners'))}",
+        f"涨停/跌停：{_fmt(breadth.get('limit_up'))}/{_fmt(breadth.get('limit_down'))}",
+    ]
+    top = breadth.get("top_industries") or []
+    bot = breadth.get("bottom_industries") or []
+    if top:
+        parts.append("领涨行业：" + "、".join(
+            f"{x.get('name','')}({_fmt(x.get('chg_pct'))}%)" for x in top))
+    if bot:
+        parts.append("领跌行业：" + "、".join(
+            f"{x.get('name','')}({_fmt(x.get('chg_pct'))}%)" for x in bot))
+    return "  ".join(parts)
+
+
+def _market_ctx_block(market_ctx: dict[str, Any] | None) -> str:
+    """把大盘研判结论压成上下文块，喂给选股 AI（无则空）。"""
+    if not market_ctx:
+        return ""
+    return ("\n【当前大盘研判（据此决定进攻/防守强度；此为已给定结论，选股须与之一致）】\n"
+            f"市场状态：{market_ctx.get('regime','—')}  "
+            f"风格：{market_ctx.get('style','—')}  "
+            f"赚钱效应：{market_ctx.get('sentiment','—')}\n"
+            f"主要风险：{market_ctx.get('risk','—')}\n"
+            f"选股指导：{market_ctx.get('guidance','—')}\n")
+
+
+def market_overview(indices: list[dict[str, Any]], breadth: dict[str, Any] | None = None,
+                    web_context: str = "") -> dict[str, Any]:
+    """大盘局势研判：据指数 + 市场情绪判定市场状态、风格与攻防指导。"""
+    prompt = f"""请对当前 A股大盘做一次严谨的局势研判。仅依据下列客观数据，不要编造。
+
+【五大指数】
+{_index_table(indices)}
+
+【市场情绪】
+{_breadth_line(breadth)}
+{_web_block(web_context)}
+研判要点（按此逻辑推理，口径一致）：
+1) 指数强弱：几大指数涨跌是否一致、大盘(沪深300)与成长(创业板/科创50)谁强，看风格偏向；
+2) 广度：涨跌家数对比反映普涨还是分化/结构行情；涨停数多、跌停数少=情绪偏暖，反之偏冷；
+3) 量能：两市成交额是放量还是缩量（若无历史仅作绝对水平参考，别臆断趋势）；
+4) 行业冷热：领涨/领跌行业揭示当前主线与回避方向；
+5) 综合给出市场状态与「该进攻还是防守、仓位轻重」的明确指导。
+
+严格返回如下 JSON（字段都要有，缺数据就写「数据不足」）：
+{{
+  "regime": "强势|中性偏多|中性|中性偏空|弱势|避险",
+  "style": "大盘价值|小盘成长|均衡|防御 中择一并简述依据",
+  "sentiment": "赚钱效应一句话(结合涨跌家数/涨停跌停)",
+  "risk": "当前大盘最大风险点(一句话)",
+  "guidance": "对选股的指导:进攻/均衡/防守 + 仓位与选股方向建议(40字内)",
+  "one_liner": "一句话大盘研判(顶部条展示,含关键数字,30字内)"
+}}"""
+    content = _chat([{"role": "system", "content": _DISCLAIMER},
+                     {"role": "user", "content": prompt}], max_tokens=6000)
+    return _parse_json(content)
 
 
 def _watchlist_table(rows: list[dict[str, Any]]) -> str:
@@ -207,48 +287,63 @@ def position_advice(holding: dict[str, Any], quote: dict[str, Any],
 
 
 def market_screen(rows: list[dict[str, Any]], capital: float,
-                  focus_sector: str = "", web_context: str = "") -> dict[str, Any]:
-    """从科技股候选池跨板块筛选（考虑资金规模与板块，侧重科技）。
+                  focus_sector: str = "", market_ctx: dict[str, Any] | None = None,
+                  web_context: str = "") -> dict[str, Any]:
+    """从全市场两级候选池跨板块筛选（结合大盘 + 资金规模 + 侧重板块）。
 
-    rows: 每项含 code/name/sector/price/pe_ttm/pb/vol/cum20/range_pos/net20/lot_cost。
+    rows: 每项含 code/name/primary/sub/price/pe_ttm/pb/vol/cum20/range_pos/net20/lot_cost。
     capital: 可用资金(元)，用于判断 1 手是否买得起。
+    focus_sector: 一级板块名 / 二级细分名 / 空(全市场)。
+    market_ctx: market_overview() 的结论，用于让选股与大盘状态一致。
     """
-    focus = f"用户特别侧重【{focus_sector}】板块，请多给该板块机会。\n" if focus_sector else ""
-    header = ("代码 名称 板块 现价 PE PB 年化波动% 20日涨% 区间位置% 主力20日亿 1手成本元")
+    focus = (f"用户本次特别侧重【{focus_sector}】方向，请优先在该方向内选，并说明其相对强弱。\n"
+             if focus_sector else "本次为全市场筛选，请跨一级板块均衡挑选、避免集中单一方向。\n")
+    header = "代码 名称 一级板块 二级细分 现价 PE PB 年化波动% 20日涨% 区间位置% 主力20日亿 1手成本元"
     lines = [header]
     for r in rows:
         lines.append(" ".join([
-            r.get("code", ""), r.get("name", ""), r.get("sector", ""),
+            r.get("code", ""), r.get("name", ""),
+            r.get("primary", ""), r.get("sub", ""),
             _fmt(r.get("price")), _fmt(r.get("pe_ttm")), _fmt(r.get("pb")),
             _fmt(r.get("vol")), _fmt(r.get("cum20")), _fmt(r.get("range_pos")),
             _fmt(r.get("net20")), _fmt(r.get("lot_cost")),
         ]))
-    prompt = f"""从下面这批 A股科技股候选中，为我做一次跨板块筛选选股。
-
+    prompt = f"""从下面这批 A股全市场候选中，结合当前大盘做一次严谨的跨板块筛选选股。
+{_market_ctx_block(market_ctx)}
 我的可用资金约 {int(capital)} 元（A股按1手=100股买入，1手成本必须≤资金才买得起）。
-{focus}用户是计算机从业者，偏好科技板块与有波动的标的，但要控制风险、注重板块分散。
+{focus}用户是科技从业者、本金偏小、能承受波动，但要求理性控风险、注重板块分散。
 
-【候选池指标】
+【候选池指标（一份紧凑表，每列含义见下）】
 {chr(10).join(lines)}
 {_web_block(web_context)}
-要求：
-1) 优先给 1手成本 ≤ {int(capital)} 元、买得起的标的；
-2) 兼顾不同子板块(别集中在一个板块)，科技方向可多给；
-3) 结合估值(PE别过高)、动能(20日涨)、位置(区间位置越接近100越追高危险)、资金(主力净流入为正更好)、波动(要有波动但非纯投机)；
-4) 给出不同资金情况的建议(如满仓1手 vs 分散多只)。
+指标口径（据此打分，不要臆造表外数据）：
+- PE/PB：估值高低，越高越贵、越需要业绩支撑；负 PE=亏损，谨慎。
+- 年化波动%：波动弹性，高=机会与风险同时放大。
+- 20日涨%：近月动能；过高警惕追高。
+- 区间位置%：当前价在近段高低区间的位置，越接近100越接近高位/过热，越接近0越低位。
+- 主力20日亿：近20日主力资金净流入(亿)，正=净流入。
 
-严格返回 JSON：
+筛选规则（按顺序权衡）：
+1) 硬约束：只选 1手成本 ≤ {int(capital)} 元、买得起的标的；
+2) 与大盘一致：{('大盘偏弱/防守时优先低估值、低位、资金净流入、波动适中；'
+   '大盘偏强/进攻时可适度提高波动与动能权重。') if market_ctx else '（无大盘结论时按均衡口径处理。）'}
+3) 分散：覆盖多个一级板块与二级细分，别扎堆单一方向；
+4) 质量：综合估值(别过高)、动能、位置(避免高位追接)、资金(净流入更优)、波动(要有弹性但非纯投机)；
+5) 给出不同资金分配方式(满仓单只 vs 分散多只)的取舍。
+
+严格返回 JSON（缺数据的字段写「数据不足」，不要编造）：
 {{
-  "overall":"当前科技板块整体情绪/风险一句话",
+  "overall":"结合大盘的整体研判一句话(点明当前该进攻还是防守)",
+  "market_regime":"回显你采用的大盘状态(无则填 未提供)",
   "picks":[
-    {{"code":"","name":"","sector":"","action":"buy|watch",
-      "confidence":"high|mid|low","lot_cost":0,
-      "reason":"为何入选(结合数据,40字内)","risk":"主要风险(20字内)"}}
+    {{"code":"","name":"","primary":"一级板块","sub":"二级细分",
+      "action":"buy|watch","confidence":"high|mid|low","lot_cost":0,
+      "reason":"为何入选(结合上表数据与大盘,40字内)","risk":"主要风险(20字内)"}}
   ],
-  "budget_plan":"1万左右资金的具体配置建议(买哪几只各1手/如何分散)",
-  "sector_view":"各板块简评(半导体/AI算力/软件/消费电子等哪些强哪些弱)"
+  "budget_plan":"{int(capital)}元的具体配置建议(买哪几只各1手/如何分散/留多少现金)",
+  "sector_view":"按二级细分点评哪些方向强/弱、当前更该配哪类(结合大盘风格)"
 }}
-picks 给 6~10 只，按吸引力排序，覆盖至少3个不同板块。"""
+picks 给 6~10 只，按吸引力排序，覆盖至少 3 个不同一级板块。"""
     content = _chat([{"role": "system", "content": _DISCLAIMER},
                      {"role": "user", "content": prompt}], max_tokens=9000)
     return _parse_json(content)

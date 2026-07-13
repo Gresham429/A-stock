@@ -104,27 +104,30 @@ A-stock/
 #    - python 路径（默认 /usr/bin/python3；用 which python3 确认）
 #    - 日志路径（默认 /Users/<你>/Library/Logs/astock-news.log）
 cp launchd/com.astock.news.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.astock.news.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.astock.news.plist
 ```
+> `bootstrap` 是新版 macOS 的官方命令（旧的 `launchctl load` 已废弃，且常报 `Load failed: 5: Input/output error`，别用）。
 
 **验证 / 运维**：
 ```bash
-launchctl list | grep astock            # 是否已加载
-python3 fetch_news.py                    # 手动跑一次（盘在时）
-python3 fetch_news.py --backfill         # 手动回填 1–2 季度 + 研报
-tail -f ~/Library/Logs/astock-news.log   # 看抓取日志
+launchctl print gui/$(id -u)/com.astock.news | head    # 已加载会打印任务详情
+launchctl list | grep astock                            # 出现即已加载（这才是成功判据）
+launchctl kickstart gui/$(id -u)/com.astock.news        # 立刻手动触发一次
+python3 fetch_news.py                                    # 或直接命令行跑一次（盘在时）
+python3 fetch_news.py --backfill                         # 手动回填 1–2 季度 + 研报
+tail -f ~/Library/Logs/astock-news.log                  # 看抓取日志
 ```
 
 **卸载**：
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.astock.news.plist
+launchctl bootout gui/$(id -u)/com.astock.news
 rm ~/Library/LaunchAgents/com.astock.news.plist
 ```
 
 说明：
 - plist 装在**内部盘** `~/Library/LaunchAgents/`，定义常驻；外置盘拔掉也不影响，盘不在时任务只是静默 no-op，**盘一挂上（或下个时间点）就自动开始抓**。
 - Mac 在某时间点睡眠 → 该任务在下次唤醒时补跑一次。
-- 交易日历为内置 2026 节假日（best-effort），跨年需更新 `news_store.py` 里 `_HOLIDAYS_2026`。
+- **交易日历按年自动抓取**（`news_store.py` 拉 `holiday-cn` 的 `{年份}.json` 并缓存到 db，一年只抓一次；抓不到就退化为纯工作日）——**无需手动维护**、自动跨年。
 
 ## 安全
 

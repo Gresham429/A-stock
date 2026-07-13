@@ -9,11 +9,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
 import sqlite3
 import threading
+import urllib.request
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -45,17 +47,12 @@ CREATE INDEX IF NOT EXISTS idx_news_sector1 ON news(sector1);
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
 """
 
-# 2026 A股休市日（best-effort，需每年更新或改接入交易日历接口）
-_HOLIDAYS_2026 = {
-    "2026-01-01",
-    "2026-02-16", "2026-02-17", "2026-02-18", "2026-02-19", "2026-02-20",
-    "2026-02-21", "2026-02-22",
-    "2026-04-04", "2026-04-05", "2026-04-06",
-    "2026-05-01", "2026-05-02", "2026-05-03", "2026-05-04", "2026-05-05",
-    "2026-06-19", "2026-06-20", "2026-06-21",
-    "2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04", "2026-10-05",
-    "2026-10-06", "2026-10-07", "2026-10-08",
-}
+# 法定节假日按年动态抓取（holiday-cn，jsDelivr CDN 国内可达），缓存到 db，一年只抓一次
+_HOLIDAY_URLS = (
+    "https://cdn.jsdelivr.net/gh/NateScarlet/holiday-cn@master/{year}.json",
+    "https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{year}.json",
+)
+_hol_cache: dict[int, set[str]] = {}
 
 
 # ── DB 基础 ────────────────────────────────────────────────────────────────
@@ -230,7 +227,42 @@ def deepen(code: str) -> int:
     return n
 
 
+def _fetch_holidays(year: int) -> set[str]:
+    """抓某年法定节假日（isOffDay=放假）→ 日期集合。失败返回空集。"""
+    for tpl in _HOLIDAY_URLS:
+        try:
+            req = urllib.request.Request(tpl.format(year=year), headers={"User-Agent": ds.UA})
+            data = json.loads(urllib.request.urlopen(req, timeout=8).read().decode("utf-8"))
+            days = {x["date"] for x in data.get("days", []) if x.get("isOffDay") and x.get("date")}
+            if days:
+                return days
+        except (OSError, ValueError) as e:
+            logger.warning("交易日历 %s 抓取失败(%s): %s", year, tpl, e)
+    return set()
+
+
+def _holidays(year: int) -> set[str]:
+    """某年法定节假日集合（内存 + db meta 双缓存，一年只抓一次）。"""
+    if year in _hol_cache:
+        return _hol_cache[year]
+    cached = get_meta(f"holidays_{year}")
+    if cached:
+        try:
+            s = set(json.loads(cached))
+            _hol_cache[year] = s
+            return s
+        except ValueError:
+            pass
+    s = _fetch_holidays(year)
+    if s:
+        set_meta(f"holidays_{year}", json.dumps(sorted(s)))
+    _hol_cache[year] = s
+    return s
+
+
 def is_trading_day(d: date | None = None) -> bool:
-    """工作日且非内置节假日（best-effort；节假日表需每年更新）。"""
+    """工作日且非法定节假日。节假日按年动态抓 holiday-cn 并缓存；抓不到则退化为纯工作日。"""
     d = d or date.today()
-    return d.weekday() < 5 and d.isoformat() not in _HOLIDAYS_2026
+    if d.weekday() >= 5:
+        return False
+    return d.isoformat() not in _holidays(d.year)

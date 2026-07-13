@@ -27,6 +27,7 @@ import config
 import datasources as ds
 import llm
 import news_store
+import notes_store
 import portfolio
 import store
 import universe
@@ -38,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 news_store.init()  # 确保 news.db 表存在（廉价，幂等）
+notes_store.init()  # 私域笔记表
 _news_refreshing = [False]
 
 
@@ -188,6 +190,54 @@ def news_deepen():
         return jsonify({"ok": False, "msg": "代码无效"}), 400
     threading.Thread(target=news_store.deepen, args=(code,), daemon=True).start()
     return jsonify({"ok": True, "running": True, "code": code})
+
+
+# ── L5 私域笔记 ────────────────────────────────────────────────────────────
+def _csv(v: Any) -> str:
+    if isinstance(v, list):
+        return ",".join(str(x).strip() for x in v if str(x).strip())
+    return str(v or "").strip()
+
+
+@app.route("/api/notes")
+def notes_list():
+    return jsonify({"notes": notes_store.list_notes(
+        code=request.args.get("code", ""), sector=request.args.get("sector", ""),
+        q=request.args.get("q", ""), limit=_arg_int("limit", 100)),
+        "count": notes_store.count()})
+
+
+@app.route("/api/notes/structure", methods=["POST"])
+def notes_structure():
+    """AI 结构化草稿（v4-flash）。注意：会把笔记内容发给 DeepSeek 云端。"""
+    if not config.llm_enabled():
+        return jsonify({"ok": False, "msg": "未配置 DeepSeek key"}), 400
+    content = ((request.get_json(silent=True) or {}).get("content") or "").strip()
+    if not content:
+        return jsonify({"ok": False, "msg": "笔记为空"}), 400
+    try:
+        draft = llm.structure_note(content)
+    except llm.LLMError as e:
+        return jsonify({"ok": False, "msg": str(e)}), 502
+    return jsonify({"ok": True, "draft": draft})
+
+
+@app.route("/api/notes", methods=["POST"])
+def notes_add():
+    body = request.get_json(silent=True) or {}
+    content = (body.get("content") or "").strip()
+    if not content:
+        return jsonify({"ok": False, "msg": "笔记为空"}), 400
+    nid = notes_store.add(content, codes=_csv(body.get("codes")),
+                          sectors=_csv(body.get("sectors")), tags=_csv(body.get("tags")),
+                          kind=body.get("kind", ""), ai_summary=body.get("summary", ""))
+    return jsonify({"ok": True, "id": nid})
+
+
+@app.route("/api/notes/<int:note_id>", methods=["DELETE"])
+def notes_delete(note_id: int):
+    notes_store.delete(note_id)
+    return jsonify({"ok": True})
 
 
 @app.route("/api/detail/<code>")
@@ -527,6 +577,17 @@ def _ai_web_context(scope: str, code: str = "", name: str = "") -> str:
         if lines:
             parts.append("本地资讯库（近期新闻/政策，越近权重越高；仅供判断勿编造）：\n"
                          + "\n".join(lines[:12]))
+    # L5：私域笔记（我本人的判断，带时间戳供按新鲜度加权；须与客观数据区分、勿当事实）
+    if scope == "position" and code:
+        p, s = universe.sector_of(code)
+        my_notes = notes_store.for_ai(code=code, sectors=[p, s], limit=5)
+    else:
+        my_notes = notes_store.list_notes(limit=5)
+    if my_notes:
+        nlines = [f"- {n.get('created_at','')[:10]} [{n.get('kind','')}] "
+                  f"{n.get('ai_summary') or (n.get('content','') or '')[:60]}" for n in my_notes]
+        parts.append("【我的私域笔记（我本人的判断，仅供参考、需与客观数据区分，勿当事实）】\n"
+                     + "\n".join(nlines))
     # A：实时快讯
     news = ds.market_news_digest(12)
     if news:

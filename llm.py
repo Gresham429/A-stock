@@ -32,16 +32,17 @@ class LLMError(RuntimeError):
 
 def _chat(messages: list[dict[str, str]], *, json_mode: bool = True,
           temperature: float = 0.15, max_tokens: int = 8000,
-          timeout: int = 150) -> str:
+          timeout: int = 150, model: str = "") -> str:
     """调用 DeepSeek chat completions，返回助手文本。
 
     deepseek-v4-pro 是推理模型：max_tokens 同时覆盖「思考 + 正文」，
     留足余量（默认 8000），否则思考耗尽预算会导致正文被截断为空。
+    model 可覆盖（如笔记结构化用更快的 deepseek-v4-flash）。
     """
     if not config.llm_enabled():
         raise LLMError("未配置 DeepSeek API key（检查 .env）")
     payload: dict[str, Any] = {
-        "model": config.DEEPSEEK_MODEL,
+        "model": model or config.DEEPSEEK_MODEL,
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
@@ -347,3 +348,28 @@ picks 给 6~10 只，按吸引力排序，覆盖至少 3 个不同一级板块�
     content = _chat([{"role": "system", "content": _DISCLAIMER},
                      {"role": "user", "content": prompt}], max_tokens=9000)
     return _parse_json(content)
+
+
+FLASH_MODEL = "deepseek-v4-flash"  # 轻量抽取任务用快模型（笔记结构化），别占用慢的 v4-pro
+
+
+def structure_note(content: str) -> dict[str, Any]:
+    """L5：把一段自由笔记结构化（快模型），供检索与喂给 AI。返回 summary/codes/sectors/tags/kind。"""
+    prompt = f"""把下面这段我的投资笔记结构化，便于以后检索与喂给 AI 参考。只输出 JSON、不编造原文没有的信息。
+
+【笔记原文】
+{content}
+
+要求：
+- summary：一句话摘要（30 字内）
+- codes：涉及的股票代码数组（6 位数字；没有则空数组）
+- sectors：涉及的板块/行业名数组（没有则空数组）
+- tags：2~4 个标签（如 观点/仓位/风险/催化/买点/卖点/复盘 等）
+- kind：观点|事实|操作|研究 中择一
+
+严格返回 JSON：
+{{"summary":"","codes":[],"sectors":[],"tags":[],"kind":""}}"""
+    out = _chat([{"role": "system", "content": "你是把投资笔记结构化的助手，只按要求输出 JSON。"},
+                 {"role": "user", "content": prompt}],
+                model=FLASH_MODEL, temperature=0.1, max_tokens=1200, timeout=60)
+    return _parse_json(out)

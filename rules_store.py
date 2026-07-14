@@ -262,7 +262,7 @@ def for_ai(scenario: str | None = None, limit: int = 100) -> str:
         return ""
     by_cat: dict[str, list[str]] = {}
     for r in rows[:limit]:
-        by_cat.setdefault(r["category"], []).append(f"{r['title']}：{r['content']}")
+        by_cat.setdefault(r["category"], []).append(f"[R{r['id']}] {r['title']}：{r['content']}")
     parts = []
     for cat in CATEGORIES:
         if by_cat.get(cat):
@@ -271,6 +271,18 @@ def for_ai(scenario: str | None = None, limit: int = 100) -> str:
         if cat not in CATEGORIES:
             parts.append(f"【{cat}】\n" + "\n".join(f"- {x}" for x in items))
     return "\n".join(parts)
+
+
+def active_rules(scenario: str | None = None) -> list[dict[str, Any]]:
+    """当前场景下、启用中的规则列表（与 for_ai 注入集一致）。"""
+    scen = {t.strip() for t in (scenario if scenario is not None else get_scenario()).split(",")
+            if t.strip()}
+    return [r for r in list_rules(enabled_only=True) if is_active(r, scen)]
+
+
+def active_rule_map(scenario: str | None = None) -> dict[int, str]:
+    """本次注入规则 {id: title}，供 provenance.verify_basis 校验 AI 引用的规则 ID。"""
+    return {r["id"]: r["title"] for r in active_rules(scenario)}
 
 
 def signature() -> str:

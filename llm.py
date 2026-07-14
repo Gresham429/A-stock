@@ -13,6 +13,7 @@ import urllib.request
 from typing import Any
 
 import config
+import provenance
 
 logger = logging.getLogger(__name__)
 
@@ -280,6 +281,8 @@ def position_advice(holding: dict[str, Any], quote: dict[str, Any],
 要求：结合基本面(营收/利润增速)、估值、技术位置(区间/波动/支撑压力)、资金、新闻/政策面综合判断。
 **严格遵循上方【交易分析框架规则】**（若有）——先判市场状态、只顺势、结构止损、交易者方程；结论不得与规则相悖。
 这是**该持仓的权威判断**（比组合速览『自选推荐』更深、更可信）。
+【可引用信号】basis 里 signals 只能从这些名字选（**不要写数值，值由系统填**）：{provenance.signal_vocab(False)}
+规则已以 [R编号] 注入上方框架规则；basis 里 rules 用 R+编号(如 R12)。每条关键结论(action/sell_trigger/add_trigger/stop_loss/take_profit)都给依据，没把握就不列该条。
 严格返回 JSON：
 {{
   "action":"hold|add|reduce|sell",
@@ -289,12 +292,13 @@ def position_advice(holding: dict[str, Any], quote: dict[str, Any],
   "take_profit":"止盈参考价位",
   "hold_horizon":"建议持有周期(如『持有2~6周看季报兑现』/『破位即走』)，结合你的周期偏好",
   "rule_basis":"本次决策命中的框架规则(如『交易者方程/顺势/结构止损』，20字内)",
+  "basis":[{{"claim":"action","signals":["区间位置"],"rules":["R12"]}},{{"claim":"stop_loss","signals":["60日低"],"rules":["R7"]}}],
   "fundamental":"基本面一句话(结合财报增速与估值)",
   "policy_news":"新闻/政策面一句话(若新闻不足则说明)",
   "reason":"综合结论(80字内)"
 }}"""
     content = _chat([{"role": "system", "content": _DISCLAIMER},
-                     {"role": "user", "content": prompt}], max_tokens=5000)
+                     {"role": "user", "content": prompt}], max_tokens=6000)
     return _parse_json(content)
 
 
@@ -320,6 +324,8 @@ def entry_advice(code: str, name: str, quote: dict[str, Any], metrics: dict[str,
 {news_txt}
 {_web_block(web_context)}
 **严格遵循上方【交易分析框架规则】**：先判大盘与该股所处周期(趋势/通道/区间)，只顺势、按交易者方程决定是否值得，结构止损、二次入场优先、不追高潮。
+【可引用信号】basis 里 signals 只能从这些名字选（**不要写数值，值由系统填**）：{provenance.signal_vocab(True)}
+规则已以 [R编号] 注入上方框架规则；basis 里 rules 用 R+编号(如 R12)。每条关键结论(verdict/entry_when/entry_zone/entry_how/stop_loss/targets/future_sell_plan)都给依据，没把握就不列该条。
 严格返回 JSON：
 {{
   "verdict":"值得入场|观望等待|不建议",
@@ -334,11 +340,12 @@ def entry_advice(code: str, name: str, quote: dict[str, Any], metrics: dict[str,
   "future_sell_plan":"未来卖出策略预判(什么情况分批止盈/什么情况破位止损/什么信号清仓)",
   "risks":"主要风险(20字内)",
   "rule_basis":"命中的框架规则(20字内)",
+  "basis":[{{"claim":"verdict","signals":["区间位置","大盘研判"],"rules":["R12"]}},{{"claim":"stop_loss","signals":["60日低"],"rules":["R7"]}}],
   "reason":"综合结论(100字内)"
 }}
 若 verdict 非『值得入场』，entry_* 写触发条件而非具体价。"""
     content = _chat([{"role": "system", "content": _DISCLAIMER},
-                     {"role": "user", "content": prompt}], max_tokens=6000)
+                     {"role": "user", "content": prompt}], max_tokens=7000)
     return _parse_json(content)
 
 

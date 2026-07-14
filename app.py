@@ -31,6 +31,7 @@ import news_store
 import notes_store
 import paper_store
 import portfolio
+import provenance
 import rules_store
 import store
 import universe
@@ -565,6 +566,7 @@ def recommend_position(code: str):
         hit = ai_cache.get("position", inputs)
         if hit:
             return jsonify({"ok": True, "advice": hit["result"]["advice"],
+                            "provenance": hit["result"].get("provenance"),
                             "financials": [], "news": [], "model": hit["model"],
                             "web_search": config.bocha_enabled(), "cached": True,
                             "analyzed_at": hit["ts"], "age_min": hit["age_min"]})
@@ -583,12 +585,20 @@ def recommend_position(code: str):
                                          f_news.result(), f_kline.result())
     vol_hist = _vol_hist(kl)
     web_ctx = _ai_web_context("position", code, q.get("name", ""))
+    scen = rules_store.get_scenario()
+    rule_map = rules_store.active_rule_map(scen)
     try:
         advice = llm.position_advice(holding, q, metrics, financials, news, vol_hist, web_ctx)
     except llm.LLMError as e:
         return jsonify({"ok": False, "msg": str(e)}), 502
-    ts = ai_cache.put("position", inputs, {"advice": advice}, config.DEEPSEEK_MODEL)
-    return jsonify({"ok": True, "advice": advice, "financials": financials,
+    ctx = {"quote": q, "metrics": metrics, "vol_hist": vol_hist, "financials": financials}
+    advice["basis"] = provenance.verify_basis(advice.get("basis"), ctx, rule_map)
+    prov = provenance.build_provenance(q, metrics, vol_hist, financials, news,
+                                       {"count": len(rule_map), "scenario": scen},
+                                       None, config.bocha_enabled(), _now())
+    ts = ai_cache.put("position", inputs, {"advice": advice, "provenance": prov},
+                      config.DEEPSEEK_MODEL)
+    return jsonify({"ok": True, "advice": advice, "provenance": prov, "financials": financials,
                     "news": news[:5], "web_search": config.bocha_enabled(),
                     "model": config.DEEPSEEK_MODEL, "cached": False,
                     "analyzed_at": ts, "age_min": 0})
@@ -610,7 +620,8 @@ def recommend_entry(code: str):
     if not force:
         hit = ai_cache.get("entry", inputs)
         if hit:
-            return jsonify({"ok": True, "advice": hit["result"]["advice"], "model": hit["model"],
+            return jsonify({"ok": True, "advice": hit["result"]["advice"],
+                            "provenance": hit["result"].get("provenance"), "model": hit["model"],
                             "web_search": config.bocha_enabled(), "cached": True,
                             "analyzed_at": hit["ts"], "age_min": hit["age_min"]})
     quotes = ds.tencent_quote([code])
@@ -625,13 +636,23 @@ def recommend_entry(code: str):
     vol_hist = _vol_hist(kl)
     market_ctx = _market_overview_payload().get("ai")
     web_ctx = _ai_web_context("position", code, q.get("name", ""))
+    scen = rules_store.get_scenario()
+    rule_map = rules_store.active_rule_map(scen)
     try:
         advice = llm.entry_advice(code, q.get("name", ""), q, metrics, financials, news,
                                   vol_hist, capital, market_ctx, web_ctx)
     except llm.LLMError as e:
         return jsonify({"ok": False, "msg": str(e)}), 502
-    ts = ai_cache.put("entry", inputs, {"advice": advice}, config.DEEPSEEK_MODEL)
-    return jsonify({"ok": True, "advice": advice, "model": config.DEEPSEEK_MODEL,
+    ctx = {"quote": q, "metrics": metrics, "vol_hist": vol_hist,
+           "financials": financials, "market_ctx": market_ctx}
+    advice["basis"] = provenance.verify_basis(advice.get("basis"), ctx, rule_map)
+    prov = provenance.build_provenance(q, metrics, vol_hist, financials, news,
+                                       {"count": len(rule_map), "scenario": scen},
+                                       market_ctx, config.bocha_enabled(), _now())
+    ts = ai_cache.put("entry", inputs, {"advice": advice, "provenance": prov},
+                      config.DEEPSEEK_MODEL)
+    return jsonify({"ok": True, "advice": advice, "provenance": prov,
+                    "model": config.DEEPSEEK_MODEL,
                     "web_search": config.bocha_enabled(), "cached": False,
                     "analyzed_at": ts, "age_min": 0})
 

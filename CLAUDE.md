@@ -4,7 +4,7 @@
 
 ## 这是什么
 
-一个**本地运行**的 A 股看板：多股对比 + 点击深挖（含多周期波动图）+ 顶部大盘研判条 + 全市场两级选股 + 持仓盈亏 + DeepSeek AI 推荐/建议（结果落盘缓存带时间戳）+ 近1年新闻/政策库 + 私域笔记 + 交易规则库（价格行为体系，可增删改、注入 AI）+ 名词解释。
+一个**本地运行**的 A 股看板：多股对比 + 点击深挖（含多周期行情图：分时+K线蜡烛）+ 顶部大盘研判条 + 全市场两级选股 + 持仓盈亏 + DeepSeek AI 推荐/建议（结果落盘缓存带时间戳）+ 近1年新闻/政策库 + 私域笔记 + 交易规则库（价格行为体系，可增删改、注入 AI）+ 名词解释。
 纯本地 Flask 后端代理各数据源，前端零构建（HTML+CSS+原生 JS）。**为什么不是托管网页**：深挖/加股票/调 AI/联网搜索都要实时外部请求，而托管型 Artifact 的 CSP 禁止一切外部请求，做不到。
 
 ## 快速开始
@@ -80,7 +80,7 @@ python app.py                        # http://127.0.0.1:5000
 - **私域信息笔记（L5）**：`notes_store.py`（SQLite `data/notes.db`，gitignore，**永久保留不清理**，每条带 `created_at`）。打字/贴文本记录；`llm.structure_note`（**deepseek-v4-flash 快模型**，`_chat(model=)` 覆盖）把笔记 AI 结构化为 `{summary,codes,sectors,tags,kind}`，存前确认。`GET/POST /api/notes`、`POST /api/notes/structure`、`DELETE /api/notes/<id>`；前端「📝 笔记」modal。`_ai_web_context` 注入相关笔记标注【我的私域笔记·日期】与客观数据区分。**隐私**：AI 整理会把内容发 DeepSeek，纯手动存不外发。
 - **AI 输出短期缓存（L1）**：`ai_cache.py` 把 4 个 AI 调用（daily/screen/position/market）结果落盘 `ai_cache.json`（gitignore）。key = `kind:输入指纹:当日`，**指纹只哈希影响结论的输入（自选/持仓/资金/板块/代码），排除实时价格**；TTL 个股/每日/选股 30min、大盘 5min；命中且未过期→秒回（跳过取数+LLM），输入变/跨交易日/TTL 过期/带 `force`(body 或 `?refresh=1`)→重算。响应带 `cached/analyzed_at/age_min`，前端每个 AI 面板显示 `aiMeta()` 时间戳行 +「🔄 强制刷新」。`position` 缓存与 `FOLIO_ADV` 持久化叠加（`folioAdvice` 切换开合、`loadFolioAdvice` 真正拉取）。这是「知识与缓存架构 L1–L5」的第一层，见 `plan/2026-07-13-knowledge-cache-architecture.md`。
 - **选股候选池两级化**：`focus` 可传一级板块名 / 二级细分名 / 空（全市场）；`_screen_rows` 按 `codes_of(focus)` 取数 + 可负担过滤 + `_balanced_pick` 跨一级轮询均衡采样（每二级≤3 只、全市场 cap 36；下钻二级时放宽到 6）。前端 `scr_focus` 用 `<optgroup>` 由 `taxonomy` 动态渲染。
-- **单股波动多周期**（深挖抽屉「波动」标签）：`GET /api/wave/<code>` 一次并发返回 `{intraday(腾讯分时), min5(新浪5分钟×5日), daily(新浪日K×260), prev_close}`；前端按 当日/5日/30日/60日/90天/近1年 **纯前端切片**（90天/近1年按 `今天−90/−365 天` 滚动日期窗口过滤 daily，daily 取 260 根≈覆盖1年）。内联 SVG 折线 + `waveHover` 十字准星，复用 `#tip` 逐点显示 时间/价/涨跌%。分时基准=昨收，日线周期算年化波动。异步随 `detailSeq`。
+- **单股行情多周期**（深挖抽屉「行情」标签，原「波动」折线 + 「K线/箱形」两标签已合并）：`GET /api/wave/<code>` 一次并发返回 `{intraday(腾讯分时), min5(新浪5分钟×5日), daily(新浪日K×260, 含 OHLC+成交量), prev_close}`；前端周期 `分时/5日/近1月/近3月/近半年/近1年`——**分时/5日走内联SVG折线**（`waveHover` 十字准星），**日K四档走蜡烛图**（`candlestick`：MA5橙/MA20蓝 + 成交量柱，`klHover` 悬停显示当日 OHLC+涨跌%，下方箱形图）。日K四档统一按**自然日窗口**（`今天−30/−90/−180/−365 天` 过滤 daily，≈20/60/117/242 根各不同——**修掉旧版 60日≈90天 单位混用导致的重叠**）；MA5/MA20 在**完整日K序列预计算再截窗**，防窗口内均线缺头。**分时自动刷新**：抽屉开 + 当前分时标签 + 北京时间交易时段（`_cnTradingNow`，用 `Asia/Shanghai` 判定、不看本地时区）时，`tickMinute` 每 30s 拉轻量 `GET /api/minute/<code>`（返回 `{intraday,prev_close}`）重渲染，带 `detailSeq` 令牌防串；关抽屉/切走标签/非交易时段停刷。分时基准=昨收，日线周期算年化波动。异步随 `detailSeq`。
 
 ## 冒烟测试（改完自测）
 

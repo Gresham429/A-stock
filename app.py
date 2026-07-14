@@ -430,6 +430,9 @@ def wave(code: str):
     return jsonify({
         "code": code, "name": q.get("name", code),
         "price": q.get("price"), "prev_close": q.get("last_close"),
+        # 流通股本(股) = 流通市值(亿元)×1e8 ÷ 现价，供前端把成交量(股)换算成换手率%
+        "float_shares": (q.get("float_mcap_yi") * 1e8 / q.get("price"))
+                        if q.get("float_mcap_yi") and q.get("price") else None,
         "intraday": intraday,
         "min5": [{"t": k["date"], "close": k["close"]} for k in min5],
         "daily": [{"date": k["date"], "open": k["open"], "high": k["high"],

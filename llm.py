@@ -178,12 +178,12 @@ def market_overview(indices: list[dict[str, Any]], breadth: dict[str, Any] | Non
 
 def _watchlist_table(rows: list[dict[str, Any]]) -> str:
     """把自选股指标压成紧凑文本表喂给模型。"""
-    lines = ["代码 名称 现价 涨跌% PE PB 年化波动% 20日涨% 区间位置% 主力5日亿 主力20日亿"]
+    lines = ["代码 名称 现价 涨跌% PE PB 换手% 年化波动% 20日涨% 区间位置% 主力5日亿 主力20日亿"]
     for r in rows:
         lines.append(" ".join([
             r.get("code", ""), r.get("name", ""),
             _fmt(r.get("price")), _fmt(r.get("chg_pct")),
-            _fmt(r.get("pe_ttm")), _fmt(r.get("pb")),
+            _fmt(r.get("pe_ttm")), _fmt(r.get("pb")), _fmt(r.get("turnover")),
             _fmt(r.get("vol")), _fmt(r.get("cum20")),
             _fmt(r.get("range_pos")), _fmt(r.get("net5")), _fmt(r.get("net20")),
         ]))
@@ -265,7 +265,7 @@ def position_advice(holding: dict[str, Any], quote: dict[str, Any],
 
 【标的】{quote.get('name','')} {holding.get('code','')}
 持股数：{holding.get('shares')}  成本价：{holding.get('cost_price')}  买入日：{holding.get('buy_date','')}
-现价：{quote.get('price')}  当前盈亏：{holding.get('pnl_pct')}%  PE：{quote.get('pe_ttm')}  PB：{quote.get('pb')}
+现价：{quote.get('price')}  当前盈亏：{holding.get('pnl_pct')}%  PE：{quote.get('pe_ttm')}  PB：{quote.get('pb')}  换手率：{quote.get('turnover')}%(交易活跃度)
 
 【波动与位置】年化波动：{metrics.get('vol')}%  20日涨幅：{metrics.get('cum20')}%
 区间位置：{metrics.get('range_pos')}%(越接近100越过热)  主力20日净流入：{metrics.get('net20')}亿
@@ -311,7 +311,7 @@ def entry_advice(code: str, name: str, quote: dict[str, Any], metrics: dict[str,
     prompt = f"""请对下面这只股票做一次**深度入场分析**：我目前不一定持有，想判断是否值得买、何时买、怎么买，并**预判未来的卖出策略**。
 {_market_ctx_block(market_ctx)}
 【标的】{name} {code}   可用资金约 {int(capital)} 元（A股 1手=100股，1手成本须 ≤ 资金）
-现价：{quote.get('price')}  PE：{quote.get('pe_ttm')}  PB：{quote.get('pb')}  1手成本：{quote.get('lot_cost')}元
+现价：{quote.get('price')}  PE：{quote.get('pe_ttm')}  PB：{quote.get('pb')}  换手率：{quote.get('turnover')}%(交易活跃度)  1手成本：{quote.get('lot_cost')}元
 【波动与位置】年化波动：{metrics.get('vol')}%  20日涨：{metrics.get('cum20')}%  区间位置：{metrics.get('range_pos')}%(越接近100越过热)  主力20日净流入：{metrics.get('net20')}亿
 近60日最高/最低/当前：{vh.get('hi')}/{vh.get('lo')}/{vh.get('cur')}  近20日振幅均值：{vh.get('atr_pct')}%
 【财报(利润表)】

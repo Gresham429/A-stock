@@ -28,6 +28,7 @@ const COLS=[
   {k:'chg_pct',t:'涨跌%',s:'chg_pct',tip:GLOSSARY['涨跌%']},
   {k:'pe_ttm',t:'PE',s:'pe_ttm',tip:GLOSSARY['PE 市盈率']},
   {k:'pb',t:'PB',s:'pb',tip:GLOSSARY['PB 市净率']},
+  {k:'turnover',t:'换手%',s:'turnover',tip:GLOSSARY['换手率']},
   {k:'vol',t:'年化波动',s:'vol',tip:GLOSSARY['年化波动']},
   {k:'cum20',t:'20日涨%',s:'cum20',tip:GLOSSARY['20日涨幅']},
   {k:'range_pos',t:'区间位置',s:'range_pos',tip:GLOSSARY['区间位置']},
@@ -103,7 +104,7 @@ function render(){
     if(sortKey==='name'){return sortDir*((a.name||'').localeCompare(b.name||'','zh'));}
     x=x==null?-1e18:x; y=y==null?-1e18:y; return sortDir*(x-y);
   });
-  if(!rows.length){document.getElementById('rows').innerHTML='<tr><td colspan="12" class="empty">自选股为空，右上角输入代码加入</td></tr>';return;}
+  if(!rows.length){document.getElementById('rows').innerHTML='<tr><td colspan="13" class="empty">自选股为空，右上角输入代码加入</td></tr>';return;}
   document.getElementById('rows').innerHTML=rows.map(r=>`
     <tr onclick="openDetail('${r.code}')">
       <td class="nm"><div class="n">${r.name||'?'}</div><div class="c">${r.code}</div></td>
@@ -111,6 +112,7 @@ function render(){
       <td class="${clr(r.chg_pct)}"><span class="pill" style="background:${r.chg_pct>0?'rgba(255,77,94,.13)':r.chg_pct<0?'rgba(34,201,139,.13)':'transparent'}">${sgn(r.chg_pct)}${fmt(r.chg_pct)}%</span></td>
       <td class="${r.pe_ttm<0?'down':''}">${r.pe_ttm?fmt(r.pe_ttm,1):'亏损'}</td>
       <td>${fmt(r.pb,2)}</td>
+      <td>${r.turnover!=null?fmt(r.turnover,1)+'%':'—'}</td>
       <td>${r.vol!=null?fmt(r.vol,0)+'%':'—'}</td>
       <td class="${clr(r.cum20)}">${r.cum20!=null?sgn(r.cum20)+fmt(r.cum20,1)+'%':'—'}</td>
       <td>${rangeBar(r.range_pos)}</td>
@@ -182,6 +184,7 @@ function renderDetail(j){
   let ov=`<div class="kv">
     ${cell('PE(TTM)', q.pe_ttm?fmt(q.pe_ttm,1):'亏损', q.pe_ttm<0?'down':'', GLOSSARY['PE 市盈率'])}
     ${cell('市净率PB', fmt(q.pb,2),'',GLOSSARY['PB 市净率'])}
+    ${cell('换手率', q.turnover!=null?fmt(q.turnover,1)+'%':'—','',GLOSSARY['换手率'])}
     ${cell('总市值', q.mcap_yi?fmt(q.mcap_yi,0)+' 亿':'—','',GLOSSARY['市值'])}
     ${cell('1手成本', fmtInt(q.lot_cost)+' 元','',GLOSSARY['1手成本'])}
     ${cell('年化波动', m.vol!=null?m.vol+'%':'—','',GLOSSARY['年化波动'])}
@@ -315,7 +318,7 @@ function waveCap(period){
     return '当日分时：逐分钟成交价，横向虚线=昨收基准。红涨绿跌，鼠标移上去看该分钟价与涨跌%。交易时段每30s自动刷新'+ts+'。';
   }
   if(period==='5d') return '近 5 交易日 5 分钟线。鼠标移到线上看每根具体价。';
-  return '日K蜡烛：实体=开盘↔收盘（红阳/绿阴），影线=最高/最低价；橙线 MA5、蓝线 MA20，下方为成交量。鼠标移上去看当日 OHLC；年化波动由区间内日收益率折算。';
+  return '日K蜡烛：实体=开盘↔收盘（红阳/绿阴），影线=最高/最低价；橙线 MA5、蓝线 MA20，下方为成交量柱。鼠标移上去看当日 OHLC / 成交量(手) / 换手率(近似，成交量÷流通股本)；年化波动由区间内日收益率折算。';
 }
 function renderWave(){
   const pane=document.getElementById('pane_wave'); if(!pane) return;
@@ -455,7 +458,11 @@ function klHover(e){
   if(cross){ cross.setAttribute('x1',x.toFixed(1)); cross.setAttribute('x2',x.toFixed(1)); cross.style.display=''; }
   const prev=i>0?ctx.bars[i-1].close:k.open, chg=prev?(k.close-prev)/prev*100:0;
   const tip=document.getElementById('tip');
-  tip.innerHTML=`${k.date}　开<b>${k.open.toFixed(2)}</b> 高<b>${k.high.toFixed(2)}</b> 低<b>${k.low.toFixed(2)}</b> 收<b>${k.close.toFixed(2)}</b>　<span style="color:${chg>=0?'#ff4d5e':'#22c98b'}">${sgn(chg)}${chg.toFixed(2)}%</span>`;
+  const fs=WAVE&&WAVE.float_shares, hsv=fs?(k.volume/fs*100):null, lots=k.volume/100;
+  const volTxt=lots>=10000?(lots/10000).toFixed(1)+'万手':Math.round(lots)+'手';
+  tip.innerHTML=`${k.date}　开<b>${k.open.toFixed(2)}</b> 高<b>${k.high.toFixed(2)}</b> 低<b>${k.low.toFixed(2)}</b> 收<b>${k.close.toFixed(2)}</b>`
+    +`　<span style="color:${chg>=0?'#ff4d5e':'#22c98b'}">${sgn(chg)}${chg.toFixed(2)}%</span>`
+    +`　量<b>${volTxt}</b>`+(hsv!=null?` 换<b>${hsv.toFixed(1)}%</b>`:'');
   tip.style.display='block';
   tip.style.left=Math.min(e.clientX+14, window.innerWidth-tip.offsetWidth-14)+'px';
   tip.style.top=(e.clientY+16)+'px';

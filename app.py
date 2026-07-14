@@ -540,14 +540,41 @@ def recommend_daily():
     quotes = ds.tencent_quote(portfolio.codes()) if portfolio.codes() else {}
     holdings = portfolio.with_pnl(quotes)
     web_ctx = _ai_web_context("market")
+    news_map = {c: [n.get("title", "") for n in news_store.query(code=c, days=30, limit=3)]
+                for c in watchlist}   # 每股本地库近期标题 → 一句话叙事(0 额外 LLM)
     try:
-        result = llm.daily_recommendation(rows, holdings, web_ctx)
+        result = llm.daily_recommendation(rows, holdings, web_ctx, news_map)
     except llm.LLMError as e:
         return jsonify({"ok": False, "msg": str(e)}), 502
     ts = ai_cache.put("daily", inputs, {"result": result}, config.DEEPSEEK_MODEL)
     return jsonify({"ok": True, "result": result, "model": config.DEEPSEEK_MODEL,
                     "web_search": config.bocha_enabled(), "cached": False,
                     "analyzed_at": ts, "age_min": 0})
+
+
+def _profile_block(prof: dict | None) -> str:
+    """公司叙事拼成注入 AI 主分析的文本块。"""
+    if not prof:
+        return ""
+    tags = "、".join(prof.get("tags") or [])
+    return (f"\n【公司叙事·据公开数据】做过：{prof.get('did', '')}；在做：{prof.get('doing', '')}；"
+            f"要做：{prof.get('will', '')}" + (f"；题材：{tags}" if tags else "") + "\n")
+
+
+def _company_profile(code: str, name: str, news: list[dict],
+                     financials: list[dict]) -> dict | None:
+    """公司叙事(做过/在做/要做+题材)：ai_cache kind=profile 当日复用；失败降级 None。"""
+    hit = ai_cache.get("profile", {"code": code})
+    if hit:
+        return hit["result"].get("profile")
+    anns = ds.announcements(code)          # em_get 已串行限流
+    concepts = ds.concept_tags(code)
+    try:
+        prof = llm.company_profile(name, code, news, financials, anns, concepts)
+    except llm.LLMError:
+        return None
+    ai_cache.put("profile", {"code": code}, {"profile": prof}, llm.FLASH_MODEL)
+    return prof
 
 
 @app.route("/api/recommend/position/<code>", methods=["POST"])
@@ -567,6 +594,7 @@ def recommend_position(code: str):
         if hit:
             return jsonify({"ok": True, "advice": hit["result"]["advice"],
                             "provenance": hit["result"].get("provenance"),
+                            "profile": hit["result"].get("profile"),
                             "financials": [], "news": [], "model": hit["model"],
                             "web_search": config.bocha_enabled(), "cached": True,
                             "analyzed_at": hit["ts"], "age_min": hit["age_min"]})
@@ -584,7 +612,8 @@ def recommend_position(code: str):
         metrics, financials, news, kl = (f_metrics.result(), f_fin.result(),
                                          f_news.result(), f_kline.result())
     vol_hist = _vol_hist(kl)
-    web_ctx = _ai_web_context("position", code, q.get("name", ""))
+    prof = _company_profile(code, q.get("name", ""), news, financials)
+    web_ctx = _profile_block(prof) + _ai_web_context("position", code, q.get("name", ""))
     scen = rules_store.get_scenario()
     rule_map = rules_store.active_rule_map(scen)
     try:
@@ -596,9 +625,10 @@ def recommend_position(code: str):
     prov = provenance.build_provenance(q, metrics, vol_hist, financials, news,
                                        {"count": len(rule_map), "scenario": scen},
                                        None, config.bocha_enabled(), _now())
-    ts = ai_cache.put("position", inputs, {"advice": advice, "provenance": prov},
+    ts = ai_cache.put("position", inputs, {"advice": advice, "provenance": prov, "profile": prof},
                       config.DEEPSEEK_MODEL)
-    return jsonify({"ok": True, "advice": advice, "provenance": prov, "financials": financials,
+    return jsonify({"ok": True, "advice": advice, "provenance": prov, "profile": prof,
+                    "financials": financials,
                     "news": news[:5], "web_search": config.bocha_enabled(),
                     "model": config.DEEPSEEK_MODEL, "cached": False,
                     "analyzed_at": ts, "age_min": 0})
@@ -621,7 +651,8 @@ def recommend_entry(code: str):
         hit = ai_cache.get("entry", inputs)
         if hit:
             return jsonify({"ok": True, "advice": hit["result"]["advice"],
-                            "provenance": hit["result"].get("provenance"), "model": hit["model"],
+                            "provenance": hit["result"].get("provenance"),
+                            "profile": hit["result"].get("profile"), "model": hit["model"],
                             "web_search": config.bocha_enabled(), "cached": True,
                             "analyzed_at": hit["ts"], "age_min": hit["age_min"]})
     quotes = ds.tencent_quote([code])
@@ -635,7 +666,8 @@ def recommend_entry(code: str):
                                          pool.submit(ds.sina_kline, code, 60).result())
     vol_hist = _vol_hist(kl)
     market_ctx = _market_overview_payload().get("ai")
-    web_ctx = _ai_web_context("position", code, q.get("name", ""))
+    prof = _company_profile(code, q.get("name", ""), news, financials)
+    web_ctx = _profile_block(prof) + _ai_web_context("position", code, q.get("name", ""))
     scen = rules_store.get_scenario()
     rule_map = rules_store.active_rule_map(scen)
     try:
@@ -649,9 +681,9 @@ def recommend_entry(code: str):
     prov = provenance.build_provenance(q, metrics, vol_hist, financials, news,
                                        {"count": len(rule_map), "scenario": scen},
                                        market_ctx, config.bocha_enabled(), _now())
-    ts = ai_cache.put("entry", inputs, {"advice": advice, "provenance": prov},
+    ts = ai_cache.put("entry", inputs, {"advice": advice, "provenance": prov, "profile": prof},
                       config.DEEPSEEK_MODEL)
-    return jsonify({"ok": True, "advice": advice, "provenance": prov,
+    return jsonify({"ok": True, "advice": advice, "provenance": prov, "profile": prof,
                     "model": config.DEEPSEEK_MODEL,
                     "web_search": config.bocha_enabled(), "cached": False,
                     "analyzed_at": ts, "age_min": 0})

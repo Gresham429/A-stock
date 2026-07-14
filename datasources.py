@@ -432,6 +432,34 @@ def stock_news(code: str, page_size: int = 8) -> list[dict[str, Any]]:
     } for a in arts]
 
 
+def announcements(code: str, n: int = 8) -> list[dict[str, Any]]:
+    """东财个股公告（近 n 条，标题+日期，沪深自动）。供公司叙事『在做/要做』。降级 []。"""
+    url = ("https://np-anotice-stock.eastmoney.com/api/security/ann"
+           f"?sr=-1&page_size={n}&page_index=1&ann_type=A&client_source=web"
+           f"&stock_list={code}&f_node=0&s_node=0")
+    try:
+        rows = (json.loads(em_get(url)).get("data") or {}).get("list") or []
+    except (OSError, ValueError) as e:
+        logger.warning("东财公告请求失败 %s: %s", code, e)
+        return []
+    return [{"date": (a.get("notice_date", "") or "")[:10], "title": a.get("title", "")}
+            for a in rows if a.get("title")]
+
+
+def concept_tags(code: str, limit: int = 12) -> list[str]:
+    """东财个股所属板块/概念（行业+概念+地域混合，板块名自解释）。供叙事『所属方向/题材』。降级 []。"""
+    market = 1 if code.startswith(("6", "9")) else 0
+    url = ("https://push2.eastmoney.com/api/qt/slist/get"
+           f"?fltt=2&invt=2&secid={market}.{code}&spt=3&pi=0&pz=200&po=1&fields=f12,f14,f3")
+    try:
+        diff = (json.loads(em_get(url, ref="https://quote.eastmoney.com/")).get("data") or {}).get("diff") or {}
+        items = list(diff.values()) if isinstance(diff, dict) else diff
+    except (OSError, ValueError) as e:
+        logger.warning("东财概念板块请求失败 %s: %s", code, e)
+        return []
+    return [it.get("f14", "") for it in items if it.get("f14")][:limit]
+
+
 # ── 全市场财经/政策快讯（财联社 + 东财 7×24，用于 AI「自我更新知识」A 方案）──
 def cls_telegraph(page_size: int = 30) -> list[dict[str, Any]]:
     """财联社电报（全市场实时快讯，v1 API + 本地签名，零 key）。"""

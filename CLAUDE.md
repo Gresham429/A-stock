@@ -112,7 +112,7 @@ Python 语法：`python3 -c "import ast; [ast.parse(open(f).read()) for f in [..
 
 ## 当前状态 / 待办
 
-- 功能已全部实测通过并推送 GitHub（main）。已上线：全市场两级选股 + 大盘研判、单股多周期波动图、知识与缓存架构 L1–L5（AI缓存/新闻库/按需远期/实时热点/私域笔记）、launchd 定时抓取（动态交易日历）、交易规则库（55 条 PA_Agent 蒸馏，注入 AI）。
+- 功能已全部实测通过并推送 GitHub（main）。已上线：全市场两级选股 + 大盘研判、单股多周期行情图（分时折线 + 日K蜡烛 MA5/MA20，分时交易时段自动刷新）、知识与缓存架构 L1–L5（AI缓存/新闻库/按需远期/实时热点/私域笔记）、launchd 定时抓取（动态交易日历）、交易规则库（55 条 PA_Agent 蒸馏，注入 AI）。
 - 本地数据文件（gitignore，用户机上）：`watchlist.json` / `portfolio.json` / `ai_cache.json` / `data/news.db` / `data/notes.db` / `data/rules.db`。
 - launchd 定时任务需**用户在自己终端** `launchctl bootstrap` 安装（本环境无 `~/Library` 写权限）；见 README「自动抓取新闻库」。
 - 设计文档在 `plan/`（各特性 spec + 知识缓存架构总纲）。

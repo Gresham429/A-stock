@@ -603,7 +603,7 @@ async function runDaily(force){
     return `<div class="reccard ${a[1]}"><div class="rc-top"><span class="badge ${a[1]}">${a[0]}</span>
       <span class="rc-name">${p.name||''} <em>${p.code||''}</em>${p.held?' <span class="rule-scen">持仓</span>':''}</span>
       <span class="rc-conf">${({high:'高',mid:'中',low:'低'})[p.confidence]||''}信心</span></div>
-      <div class="rc-reason">${p.reason||''}</div>${p.risk?`<div class="rc-risk">⚠ ${p.risk}</div>`:''}</div>`;
+      <div class="rc-reason">${p.reason||''}</div>${p.narrative?`<div class="rc-narr">🏢 ${esc(p.narrative)}</div>`:''}${p.risk?`<div class="rc-risk">⚠ ${p.risk}</div>`:''}</div>`;
   }).join('')+'</div>';
   if(r.holdings_note&&r.holdings_note!=='无') h+=`<div class="hnote">💼 持仓提醒：${r.holdings_note}</div>`;
   h+=`<div class="disc">以上为 ${j.model} 基于当前客观数据生成的参考信号，不构成投资建议，据此操作风险自负。</div>`;
@@ -663,12 +663,20 @@ async function entryAnalysis(code,force){
   box.innerHTML='<div class="paneempty small"><span class="spin"></span> '+MODEL+' 深度入场分析中…（约 20~60 秒）</div>';
   let j; try{ j=await (await fetch('/api/recommend/entry/'+code,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({force:!!force})})).json(); }
   catch(e){ box.innerHTML='<div class="paneempty small">失败：'+e+'</div>'; return; }
-  if(j.ok){ box.innerHTML=aiMeta(j,`entryAnalysis('${code}',true)`)+entryHTML(j.advice,j.model,j.provenance); }
+  if(j.ok){ box.innerHTML=aiMeta(j,`entryAnalysis('${code}',true)`)+entryHTML(j.advice,j.model,j.provenance,j.profile); }
   else box.innerHTML='<div class="paneempty small">失败：'+(j.msg||'')+'</div>';
 }
 /* ── AI 建议：A 数据溯源条（确定性）+ B 结论依据（✓可核对/⚠对不上/·未给依据） ── */
 const ENTRY_LABELS={verdict:'是否入场',entry_when:'何时入场',entry_zone:'买入价位',entry_how:'怎么买',stop_loss:'止损',targets:'目标位',future_sell_plan:'未来卖出'};
 const POS_LABELS={action:'操作',sell_trigger:'卖出条件',add_trigger:'加仓条件',stop_loss:'止损',take_profit:'止盈'};
+function profileCard(prof){
+  if(!prof) return '';
+  const tags=(prof.tags||[]).map(t=>`<span class="ptag">${esc(t)}</span>`).join('');
+  const row=(lab,v)=> v?`<div class="cpr"><span class="cpl">${lab}</span><span>${esc(v)}</span></div>`:'';
+  const body=row('做过',prof.did)+row('在做',prof.doing)+row('要做',prof.will);
+  if(!body&&!tags) return '';
+  return `<div class="cprofile"><div class="cph">🏢 公司叙事 <span class="cpsub">据公开数据 · 概括参考</span></div>${body}${tags?`<div class="cptags">${tags}</div>`:''}</div>`;
+}
 function refBadge(r){
   const st=r.status||'bad', cls=st==='ok'?'rf-ok':st==='na'?'rf-na':'rf-bad', mk=st==='ok'?'✓':st==='na'?'·':'⚠';
   const txt=r.kind==='rule'?(r.name+(r.title?('·'+r.title):'')):(r.name+(r.value!=null?('='+r.value):''));
@@ -693,12 +701,13 @@ function provStrip(prov){
     return inner?`<div class="pdrow"><b>${esc(s.label)}</b> ${inner}</div>`:''; };
   return `<details class="prov"><summary><span class="plead">本次依据</span>${prov.sources.map(chip).join('')}</summary>${prov.sources.map(det).join('')}</details>`;
 }
-function entryHTML(a,model,prov){
+function entryHTML(a,model,prov,profile){
   const vmap={'值得入场':['值得入场','a-buy'],'观望等待':['观望','a-watch'],'不建议':['不建议','a-sell']};
   const m=vmap[a.verdict]||['参考','a-hold'];
   return `<div class="advice">
     <div class="rc-top"><span class="badge ${m[1]}" style="font-size:13px;padding:3px 12px">${m[0]}</span>
       <span class="rc-name">${model} · <b>深度入场分析</b> <span class="rc-conf">${({high:'高',mid:'中',low:'低'})[a.confidence]||''}信心</span></span></div>
+    ${profileCard(profile)}
     ${provStrip(prov)}
     ${a.market_fit?`<div class="rc-reason"><b>大盘契合：</b>${esc(a.market_fit)}</div>`:''}
     <div class="akv"><div><span>何时入场</span>${esc(a.entry_when)||'—'}</div>
@@ -725,7 +734,7 @@ async function askDetailAdvice(code,force){
   }
   try{
     const j=await (await fetch('/api/recommend/position/'+code,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({force:!!force})})).json();
-    if(j.ok){ box.innerHTML=aiMeta(j,`askDetailAdvice('${code}',true)`)+adviceHTML(j.advice, j.model, j.provenance); }
+    if(j.ok){ box.innerHTML=aiMeta(j,`askDetailAdvice('${code}',true)`)+adviceHTML(j.advice, j.model, j.provenance, j.profile); }
     else if(j.msg && j.msg.includes('不在持仓')){
       box.innerHTML='<div class="advice"><div class="note">这只不在持仓中，无法给结合成本的建议。可在下方“持仓”记录后再试；或直接参考上方“每日推荐”。</div></div>';
     } else box.innerHTML='<div class="paneempty small">失败：'+(j.msg||'')+'</div>';
@@ -733,12 +742,13 @@ async function askDetailAdvice(code,force){
 }
 async function isHeld(code){ const j=await (await fetch('/api/portfolio')).json(); return (j.holdings||[]).some(h=>h.code===code); }
 
-function adviceHTML(a,model,prov){
+function adviceHTML(a,model,prov,profile){
   const map={hold:['持有','a-hold'],add:['加仓','a-buy'],reduce:['减仓','a-sell'],sell:['卖出','a-sell']};
   const m=map[a.action]||['参考','a-hold'];
   return `<div class="advice">
     <div class="rc-top"><span class="badge ${m[1]}" style="font-size:13px;padding:3px 12px">${m[0]}</span>
       <span class="rc-name">${model} · <b>持仓权威判断</b>（比自选推荐更深）</span></div>
+    ${profileCard(profile)}
     ${provStrip(prov)}
     ${a.hold_horizon?`<div class="adv-hold">⏳ 建议持有周期：${esc(a.hold_horizon)}</div>`:''}
     <div class="akv"><div><span>卖出条件</span>${esc(a.sell_trigger)||'—'}</div>
@@ -825,7 +835,7 @@ async function loadFolioAdvice(code, force){   // 真正拉取（强制刷新走
   let html;
   try{
     const j=await (await fetch('/api/recommend/position/'+code,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({force:!!force})})).json();
-    html = j.ok ? (aiMeta(j,`loadFolioAdvice('${code}',true)`)+adviceHTML(j.advice,j.model,j.provenance)) : '<div class="paneempty small">失败：'+(j.msg||'')+'</div>';
+    html = j.ok ? (aiMeta(j,`loadFolioAdvice('${code}',true)`)+adviceHTML(j.advice,j.model,j.provenance,j.profile)) : '<div class="paneempty small">失败：'+(j.msg||'')+'</div>';
   }catch(e){ html='<div class="paneempty small">失败：'+e+'</div>'; }
   if(!FOLIO_ADV[code]) return;   // 请求返回前用户已收起 → 丢弃
   FOLIO_ADV[code]={html};        // 缓存结果，跨自动刷新保留

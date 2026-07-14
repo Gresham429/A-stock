@@ -206,8 +206,14 @@ def _holdings_table(holdings: list[dict[str, Any]]) -> str:
 
 def daily_recommendation(rows: list[dict[str, Any]],
                          holdings: list[dict[str, Any]],
-                         web_context: str = "") -> dict[str, Any]:
+                         web_context: str = "",
+                         news_map: dict[str, list[str]] | None = None) -> dict[str, Any]:
     """每日推荐：对自选股给 buy/sell/hold/watch，并结合持仓给操作提示。"""
+    nb = ""
+    if news_map:
+        rows_n = [f"{c}: " + " / ".join(t[:3]) for c, t in news_map.items() if t]
+        if rows_n:
+            nb = "\n【个股近期动态(本地新闻库,给一句话公司叙事用)】\n" + "\n".join(rows_n) + "\n"
     prompt = f"""基于以下 A股自选股实时指标和我的持仓，给出今日操作参考。
 
 【自选股指标】
@@ -215,7 +221,7 @@ def daily_recommendation(rows: list[dict[str, Any]],
 
 【我的持仓】
 {_holdings_table(holdings)}
-{_web_block(web_context)}
+{nb}{_web_block(web_context)}
 分析要点：估值(PE/PB是否偏贵)、动能(20日涨幅)、位置(区间位置越接近100越过热、越接近0越低位)、
 资金(主力净流入为正是流入)、波动(年化波动越高越刺激也越危险)。本金约1万元、偏好科技股与波动。
 **严格遵循上方【交易分析框架规则】**（若有）。
@@ -232,7 +238,8 @@ def daily_recommendation(rows: list[dict[str, Any]],
       "held": true/false,
       "confidence":"high|mid|low",
       "reason":"结合上面数据的具体理由(40字内)；持仓需评估时写『建议用何时卖深看』",
-      "risk":"这只最大的风险(20字内)"}}
+      "risk":"这只最大的风险(20字内)",
+      "narrative":"这公司近期在做什么/什么题材(一句话,20字内;本地动态无信息则留空串)"}}
   ],
   "holdings_note": "针对持仓的一句话提醒(无持仓则填 无)"
 }}
@@ -251,6 +258,38 @@ def _fin_table(financials: list[dict[str, Any]]) -> str:
                                _fmt(f.get("revenue_yoy")), _fmt(f.get("profit_yi")),
                                _fmt(f.get("profit_yoy"))]))
     return "\n".join(lines)
+
+
+def company_profile(name: str, code: str,
+                    news: list[dict[str, Any]] | None = None,
+                    financials: list[dict[str, Any]] | None = None,
+                    announcements: list[dict[str, Any]] | None = None,
+                    concepts: list[str] | None = None) -> dict[str, Any]:
+    """公司叙事三段（做过/在做/要做）+ 题材标签，用 flash 快模型合成。只据给定数据、不编造。"""
+    news_txt = "\n".join(f"- {n.get('date','')[:10]} {n.get('title','')}"
+                         for n in (news or [])[:8]) or "（无）"
+    ann_txt = "\n".join(f"- {a.get('date','')} {a.get('title','')}"
+                        for a in (announcements or [])[:8]) or "（无）"
+    concepts_txt = "、".join(concepts or []) or "（无）"
+    prompt = f"""根据下列客观数据，为 A股【{name} {code}】写一段极简"公司叙事"。只据给定信息、不编造、不预测股价。
+【所属板块/概念】{concepts_txt}
+【财报(利润表,多期)】
+{_fin_table(financials or [])}
+【近期新闻】
+{news_txt}
+【近期公告】
+{ann_txt}
+严格返回 JSON：
+{{
+  "did":"做过什么：主营业务 + 历史/沉淀(一句,30字内)",
+  "doing":"在做什么：近期动作/公告/新闻反映的当前重心(一句,30字内)",
+  "will":"要做什么：规划/在建/题材催化(一句,30字内；无明确公开信息写『暂无明确公开规划』)",
+  "tags":["方向/题材标签,3~6个,来自所属板块或新闻"]
+}}"""
+    content = _chat([{"role": "system", "content": _DISCLAIMER},
+                     {"role": "user", "content": prompt}],
+                    model=FLASH_MODEL, max_tokens=2500)
+    return _parse_json(content)
 
 
 def position_advice(holding: dict[str, Any], quote: dict[str, Any],

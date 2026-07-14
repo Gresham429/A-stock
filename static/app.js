@@ -40,7 +40,7 @@ let DATA=[], sortKey='net20', sortDir=-1, autoTimer=null, LLM=false, MODEL='', W
 // 请求令牌：每次发起自增；异步响应回来前若已非最新，则丢弃（防面板/抽屉切换时旧响应错位）
 let recSeq=0, detailSeq=0, mktSeq=0;
 let TAXO=null;   // 板块两级分类（/api/config 下发）
-let WAVE=null, WAVE_PERIOD='day', WAVE_CTX=null;   // 波动多周期数据 / 当前周期 / hover 几何
+let WAVE=null, WAVE_PERIOD='day', WAVE_CTX=null, KL_CTX=null, waveTimer=null;   // 行情多周期数据 / 当前周期 / 折线hover几何 / 蜡烛hover几何 / 分时自动刷新定时器
 let FOLIO_ADV={};   // 持仓「何时卖」建议缓存 code->{html}|{loading:true}，跨自动刷新保留
 let NEWS_FILTER={sector:'',kind:'',code:''}, lastNewsRefresh=0;   // 新闻筛选 / 看盘惰性刷新节流
 
@@ -148,7 +148,7 @@ function tab(p){
   document.querySelectorAll('.pane').forEach(el=>el.classList.remove('on'));
   document.getElementById('pane_'+p).classList.add('on');
 }
-function closeDrawer(){document.getElementById('drawer').classList.remove('open');document.getElementById('scrim').classList.remove('open');}
+function closeDrawer(){clearInterval(waveTimer);waveTimer=null;document.getElementById('drawer').classList.remove('open');document.getElementById('scrim').classList.remove('open');}
 function loading(id){document.getElementById(id).innerHTML='<div class="paneempty"><span class="spin"></span> 拉取中…</div>';}
 async function openDetail(code){
   const gen=++detailSeq;   // 快速切换股票时，作废上一只的在飞请求
@@ -158,14 +158,12 @@ async function openDetail(code){
   document.getElementById('d_name').textContent='加载中…';
   document.getElementById('d_code').textContent=code;
   document.getElementById('d_price').textContent='—'; document.getElementById('d_chg').textContent='';
-  ['ov','kl','rp','lhb','lk','ff'].forEach(p=>loading('pane_'+p));
-  // K线独立并行加载(快)，先渲染
-  fetch('/api/kline/'+code).then(r=>r.json()).then(k=>{ if(gen!==detailSeq)return; renderKline(k.kline||[]); })
-    .catch(()=>{ if(gen!==detailSeq)return; document.getElementById('pane_kl').innerHTML='<div class="paneempty">K线加载失败</div>'; });
-  // 波动多周期并行加载（当日分时 + 5日/日线），默认周期=当日
+  ['ov','rp','lhb','lk','ff'].forEach(p=>loading('pane_'+p));
+  // 行情多周期并行加载（分时/5日折线 + 日K蜡烛），默认周期=分时
   WAVE=null; WAVE_PERIOD='day'; renderWave();
   fetch('/api/wave/'+code).then(r=>r.json()).then(w=>{ if(gen!==detailSeq)return; WAVE=w; renderWave(); })
-    .catch(()=>{ if(gen!==detailSeq)return; const p=document.getElementById('pane_wave'); if(p)p.innerHTML='<div class="paneempty">波动数据加载失败</div>'; });
+    .catch(()=>{ if(gen!==detailSeq)return; const p=document.getElementById('pane_wave'); if(p)p.innerHTML='<div class="paneempty">行情数据加载失败</div>'; });
+  clearInterval(waveTimer); waveTimer=setInterval(()=>tickMinute(code), 30000);   // 分时交易时段每30s自动刷新
   let j;
   try{ j=await (await fetch('/api/detail/'+code)).json(); }
   catch(e){ if(gen!==detailSeq)return; document.getElementById('pane_ov').innerHTML='<div class="paneempty">加载失败：'+e+'</div>'; return; }
@@ -270,19 +268,22 @@ function flowChart(series){
     <text x="${pad}" y="${h-4}" fill="var(--muted)" font-size="10" font-family="monospace">-${mx.toFixed(1)}亿</text></svg>`;
 }
 
-/* ── 波动多周期（当日分时 / 5日 / 30日 / 60日 / 90天 / 近1年） ── */
-const WAVE_PERIODS=[['day','当日分时'],['5d','5日'],['30d','30日'],['60d','60日'],['90d','90天'],['1y','近1年']];
+/* ── 行情多周期（分时 / 5日 折线 · 近1月/近3月/近半年/近1年 日K蜡烛） ── */
+const WAVE_PERIODS=[['day','分时'],['5d','5日'],['1m','近1月'],['3m','近3月'],['6m','近半年'],['1y','近1年']];
+const WAVE_WINDOW={'1m':30,'3m':90,'6m':180,'1y':365};   // 日K各档=自然日窗口（各不相同，修掉旧版 60日/90天 重叠）
 function _daysAgo(n){ const d=new Date(); d.setDate(d.getDate()-n); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
+// 在完整日K序列上预计算 MA5/MA20 再截窗，保证窗口内均线也画满（否则窗口前 N 根缺头）
+function _dailyWithMA(){
+  const d=(WAVE&&WAVE.daily)||[];
+  const ma=(i,m)=>{ if(i<m-1) return null; let s=0; for(let k=i-m+1;k<=i;k++) s+=d[k].close; return s/m; };
+  return d.map((b,i)=>({...b, ma5:ma(i,5), ma20:ma(i,20)}));
+}
 function waveSeries(period){
   const W=WAVE||{};
   if(period==='day') return {pts:(W.intraday||[]).map(p=>({label:p.t,value:p.price})), base:W.prev_close, kind:'intra'};
   if(period==='5d')  return {pts:(W.min5||[]).map(p=>({label:p.t,value:p.close})), base:null, kind:'intra'};
-  let d=W.daily||[];
-  if(period==='30d') d=d.slice(-30);
-  else if(period==='60d') d=d.slice(-60);
-  else if(period==='90d'){ const c=_daysAgo(90); d=d.filter(x=>x.date>=c); }
-  else if(period==='1y'){ const c=_daysAgo(365); d=d.filter(x=>x.date>=c); }
-  return {pts:d.map(p=>({label:p.date,value:p.close})), base:null, kind:'daily'};
+  const c=_daysAgo(WAVE_WINDOW[period]||365);
+  return {bars:_dailyWithMA().filter(x=>x.date>=c), base:null, kind:'daily'};
 }
 function _annVol(vals){
   if(vals.length<3) return null;
@@ -293,28 +294,34 @@ function _annVol(vals){
   return Math.sqrt(v)*Math.sqrt(252)*100;
 }
 function waveStats(series,period){
-  const vals=series.pts.map(p=>p.value); if(vals.length<2) return '';
+  const daily=series.kind==='daily';
+  const vals=daily?series.bars.map(b=>b.close):series.pts.map(p=>p.value); if(vals.length<2) return '';
   const base=series.base!=null?series.base:vals[0];
-  const last=vals[vals.length-1],hi=Math.max(...vals),lo=Math.min(...vals);
+  const last=vals[vals.length-1];
+  const hi=daily?Math.max(...series.bars.map(b=>b.high)):Math.max(...vals);
+  const lo=daily?Math.min(...series.bars.map(b=>b.low)):Math.min(...vals);
   const chg=base?(last-base)/base*100:0, amp=lo?(hi-lo)/lo*100:0;
   let s='';
   if(period==='day'&&WAVE.prev_close) s+=`<span>昨收 <b>${(+WAVE.prev_close).toFixed(2)}</b></span>`;
   s+=`<span>期间涨跌 <b class="${clr(chg)}">${sgn(chg)}${chg.toFixed(2)}%</b></span>`
     +`<span>最高 <b>${hi.toFixed(2)}</b></span><span>最低 <b>${lo.toFixed(2)}</b></span>`
     +`<span>振幅 <b>${amp.toFixed(2)}%</b></span>`;
-  if(series.kind==='daily'){ const vol=_annVol(vals); if(vol!=null) s+=`<span>年化波动 <b>${vol.toFixed(1)}%</b></span>`; }
+  if(daily){ const vol=_annVol(vals); if(vol!=null) s+=`<span>年化波动 <b>${vol.toFixed(1)}%</b></span>`; }
   return s;
 }
 function waveCap(period){
-  if(period==='day') return '当日分时：逐分钟成交价，横向虚线=昨收基准。鼠标移到线上看该分钟具体价与涨跌。红涨绿跌。';
+  if(period==='day'){
+    const ts=WAVE&&WAVE._minTs?` · 刷新于 ${WAVE._minTs}`:'';
+    return '当日分时：逐分钟成交价，横向虚线=昨收基准。红涨绿跌，鼠标移上去看该分钟价与涨跌%。交易时段每30s自动刷新'+ts+'。';
+  }
   if(period==='5d') return '近 5 交易日 5 分钟线。鼠标移到线上看每根具体价。';
-  return '每日收盘价走势。鼠标移到线上看该日收盘与相对首日涨跌；年化波动由区间内日收益率折算。';
+  return '日K蜡烛：实体=开盘↔收盘（红阳/绿阴），影线=最高/最低价；橙线 MA5、蓝线 MA20，下方为成交量。鼠标移上去看当日 OHLC；年化波动由区间内日收益率折算。';
 }
 function renderWave(){
   const pane=document.getElementById('pane_wave'); if(!pane) return;
-  if(!WAVE){ pane.innerHTML='<div class="paneempty"><span class="spin"></span> 拉取波动数据…</div>'; return; }
+  if(!WAVE){ pane.innerHTML='<div class="paneempty"><span class="spin"></span> 拉取行情数据…</div>'; return; }
   const chips=WAVE_PERIODS.map(([k,l])=>`<button class="wave-chip${WAVE_PERIOD===k?' on':''}" onclick="setWavePeriod('${k}')">${l}</button>`).join('');
-  pane.innerHTML='<div class="subh">价格波动 · 多周期（鼠标移到线上看每点具体值）</div>'
+  pane.innerHTML='<div class="subh">行情 · 分时/日K 多周期（鼠标移上去看每点具体值）</div>'
     +`<div class="wave-chips">${chips}</div><div id="wave_body"></div>`;
   renderWavePeriod();
 }
@@ -322,14 +329,24 @@ function setWavePeriod(p){ WAVE_PERIOD=p; renderWave(); }
 function renderWavePeriod(){
   const body=document.getElementById('wave_body'); if(!body) return;
   const series=waveSeries(WAVE_PERIOD);
-  if(!series.pts||series.pts.length<2){
-    WAVE_CTX=null;
-    body.innerHTML='<div class="paneempty">该周期暂无数据（当日分时在非交易时段/新股可能为空，试试 5日 / 30日）。</div>';
+  const arr=series.kind==='daily'?series.bars:series.pts;
+  if(!arr||arr.length<2){
+    WAVE_CTX=null; KL_CTX=null;
+    body.innerHTML='<div class="paneempty">该周期暂无数据（分时在非交易时段/新股可能为空，试试 5日 / 近1月）。</div>';
     return;
   }
-  body.innerHTML='<div class="wavewrap">'+waveChart(series)+'</div>'
+  let chart, extra='';
+  if(series.kind==='daily'){
+    chart=candlestick(series.bars);
+    extra='<div class="subh">箱形图 · 收盘价分布</div><div class="wavewrap">'+boxplot(series.bars.map(b=>b.close))+'</div>'
+      +'<div class="chartcap">箱体=价格中间50%区间（下沿 Q1 / 中线=中位数 / 上沿 Q3），须线到最高/最低；<b>★=当前价</b>。</div>';
+  } else {
+    chart=waveChart(series);
+  }
+  body.innerHTML='<div class="wavewrap">'+chart+'</div>'
     +`<div class="wave-stats">${waveStats(series,WAVE_PERIOD)}</div>`
-    +`<div class="chartcap">${waveCap(WAVE_PERIOD)}</div>`;
+    +`<div class="chartcap">${waveCap(WAVE_PERIOD)}</div>`
+    +extra;
 }
 function waveChart(series){
   const pts=series.pts,n=pts.length,vals=pts.map(p=>p.value);
@@ -375,29 +392,39 @@ function waveHover(e){
 }
 function waveHoverEnd(){
   document.getElementById('tip').style.display='none';
-  const c=document.getElementById('wave_cross'), d=document.getElementById('wave_dot');
-  if(c)c.style.display='none'; if(d)d.style.display='none';
+  ['wave_cross','wave_dot','kl_cross'].forEach(id=>{ const el=document.getElementById(id); if(el) el.style.display='none'; });
+}
+/* ── 北京时间交易时段判定（不看本地时区，兼容跨时区机器）+ 分时自动刷新 ── */
+function _cnTradingNow(){
+  const parts={};
+  new Intl.DateTimeFormat('en-US',{timeZone:'Asia/Shanghai',weekday:'short',hour:'2-digit',minute:'2-digit',hour12:false})
+    .formatToParts(new Date()).forEach(p=>{ parts[p.type]=p.value; });
+  if(parts.weekday==='Sat'||parts.weekday==='Sun') return false;
+  let hh=parseInt(parts.hour,10); if(hh===24) hh=0;
+  const mins=hh*60+parseInt(parts.minute,10);
+  return (mins>=565&&mins<=695)||(mins>=775&&mins<=905);   // 09:25–11:35 / 12:55–15:05
+}
+function tickMinute(code){
+  if(WAVE_PERIOD!=='day' || !WAVE) return;                                  // 只在分时标签刷
+  if(!document.getElementById('drawer').classList.contains('open')) return; // 抽屉关了不刷
+  if(!_cnTradingNow()) return;                                              // 非交易时段不刷
+  const gen=detailSeq;                                                      // 请求令牌，防切股票错位
+  fetch('/api/minute/'+code).then(r=>r.json()).then(m=>{
+    if(gen!==detailSeq || WAVE_PERIOD!=='day' || !WAVE) return;
+    if(m.intraday&&m.intraday.length) WAVE.intraday=m.intraday;
+    if(m.prev_close!=null) WAVE.prev_close=m.prev_close;
+    WAVE._minTs=new Date().toLocaleTimeString('zh-CN',{hour12:false});
+    renderWavePeriod();
+  }).catch(()=>{});
 }
 
-/* ── K线蜡烛图 + 箱形图 ── */
-function renderKline(kl){
-  const pane=document.getElementById('pane_kl');
-  if(!kl||!kl.length){ pane.innerHTML='<div class="paneempty">暂无K线数据</div>'; return; }
-  const win=kl.slice(-60);
-  pane.innerHTML=`<div class="subh">日K线 · 近${win.length}日（红涨绿跌 · MA5/MA20 · 成交量）</div>`
-    +'<div class="chartwrap">'+candlestick(win)+'</div>'
-    +'<div class="chartcap">蜡烛体=当日开盘↔收盘，上下影线=最高/最低价；<span class="up">红实体=收阳(涨)</span>、<span class="down">绿实体=收阴(跌)</span>。橙线 MA5、蓝线 MA20，下方为成交量。</div>'
-    +'<div class="subh">箱形图 · 近'+win.length+'日收盘价分布</div>'
-    +'<div class="chartwrap">'+boxplot(win.map(k=>k.close))+'</div>'
-    +'<div class="chartcap">箱体=价格中间50%区间（下沿 Q1 / 中线=中位数 / 上沿 Q3），须线到最高/最低；<b>★=当前价</b>。价格长期停在箱体内、一旦突破箱体常有方向性行情。</div>';
-}
+/* ── 日K蜡烛图（复用于「行情」日K周期）+ 箱形图 ── */
 function candlestick(kl){
   const w=640,h=260,padL=46,padR=8,padT=10,volH=50,cH=h-volH-padT-18;
   const hi=Math.max(...kl.map(k=>k.high)),lo=Math.min(...kl.map(k=>k.low)),rng=hi-lo||1;
   const n=kl.length,cw=(w-padL-padR)/n,bw=Math.max(1.5,cw*0.62);
   const yP=p=>padT+(hi-p)/rng*cH;
-  const ma=(i,m)=>{ if(i<m-1)return null; let s=0; for(let k=i-m+1;k<=i;k++)s+=kl[k].close; return s/m; };
-  const maLine=(m,col)=>{let pts=[];for(let i=0;i<n;i++){const v=ma(i,m);if(v!=null)pts.push(`${(padL+i*cw+cw/2).toFixed(1)},${yP(v).toFixed(1)}`);}return pts.length>1?`<polyline points="${pts.join(' ')}" fill="none" stroke="${col}" stroke-width="1.1" opacity=".9"/>`:'';};
+  const maLine=(key,col)=>{let pts=[];for(let i=0;i<n;i++){const v=kl[i][key];if(v!=null)pts.push(`${(padL+i*cw+cw/2).toFixed(1)},${yP(v).toFixed(1)}`);}return pts.length>1?`<polyline points="${pts.join(' ')}" fill="none" stroke="${col}" stroke-width="1.1" opacity=".9"/>`:'';};
   let candles='';
   for(let i=0;i<n;i++){const k=kl[i],x=padL+i*cw+cw/2,up=k.close>=k.open,col=up?'var(--up)':'var(--down)';
     const yO=yP(k.open),yC=yP(k.close),top=Math.min(yO,yC),bh=Math.max(1,Math.abs(yC-yO));
@@ -411,10 +438,27 @@ function candlestick(kl){
   for(let g=0;g<=4;g++){const p=hi-rng*g/4,y=padT+cH*g/4;
     grid+=`<line x1="${padL}" y1="${y.toFixed(1)}" x2="${w-padR}" y2="${y.toFixed(1)}" stroke="var(--line)" stroke-width=".5"/>`
       +`<text x="4" y="${(y+3).toFixed(1)}" fill="var(--muted)" font-size="9" font-family="monospace">${p.toFixed(2)}</text>`;}
-  return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;min-width:520px;height:${h}px">
-    ${grid}${maLine(5,'var(--gold)')}${maLine(20,'#4aa3ff')}${candles}${vols}
+  KL_CTX={bars:kl, W:w, padL, cw, n, vY, padT};
+  return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;min-width:520px;height:${h}px" onmousemove="klHover(event)" onmouseleave="waveHoverEnd()">
+    ${grid}${maLine('ma5','var(--gold)')}${maLine('ma20','#4aa3ff')}${candles}${vols}
+    <line id="kl_cross" x1="0" y1="${padT}" x2="0" y2="${vY.toFixed(1)}" stroke="var(--gold)" stroke-width="1" stroke-dasharray="3 3" style="display:none"/>
     <text x="${padL}" y="${h-4}" fill="var(--muted)" font-size="9" font-family="monospace">${kl[0].date.slice(5)}</text>
     <text x="${w-padR-28}" y="${h-4}" fill="var(--muted)" font-size="9" font-family="monospace">${kl[n-1].date.slice(5)}</text></svg>`;
+}
+function klHover(e){
+  const ctx=KL_CTX; if(!ctx) return;
+  const svg=e.currentTarget, rect=svg.getBoundingClientRect();
+  const localX=(e.clientX-rect.left)*(ctx.W/rect.width);
+  let i=Math.floor((localX-ctx.padL)/ctx.cw); i=Math.max(0,Math.min(ctx.n-1,i));
+  const k=ctx.bars[i], x=ctx.padL+i*ctx.cw+ctx.cw/2;
+  const cross=document.getElementById('kl_cross');
+  if(cross){ cross.setAttribute('x1',x.toFixed(1)); cross.setAttribute('x2',x.toFixed(1)); cross.style.display=''; }
+  const prev=i>0?ctx.bars[i-1].close:k.open, chg=prev?(k.close-prev)/prev*100:0;
+  const tip=document.getElementById('tip');
+  tip.innerHTML=`${k.date}　开<b>${k.open.toFixed(2)}</b> 高<b>${k.high.toFixed(2)}</b> 低<b>${k.low.toFixed(2)}</b> 收<b>${k.close.toFixed(2)}</b>　<span style="color:${chg>=0?'#ff4d5e':'#22c98b'}">${sgn(chg)}${chg.toFixed(2)}%</span>`;
+  tip.style.display='block';
+  tip.style.left=Math.min(e.clientX+14, window.innerWidth-tip.offsetWidth-14)+'px';
+  tip.style.top=(e.clientY+16)+'px';
 }
 function boxplot(vals){
   const s=[...vals].sort((a,b)=>a-b),n=s.length;

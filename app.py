@@ -432,9 +432,24 @@ def wave(code: str):
         "price": q.get("price"), "prev_close": q.get("last_close"),
         "intraday": intraday,
         "min5": [{"t": k["date"], "close": k["close"]} for k in min5],
-        "daily": [{"date": k["date"], "close": k["close"]} for k in daily],
+        "daily": [{"date": k["date"], "open": k["open"], "high": k["high"],
+                   "low": k["low"], "close": k["close"], "volume": k["volume"]}
+                  for k in daily],
         "updated": _now(),
     })
+
+
+@app.route("/api/minute/<code>")
+def minute(code: str):
+    """当日分时（轻量端点，供前端分时视图交易时段自动刷新，避免重拉整个 /api/wave）。"""
+    code = ds.normalize(code)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_intra = pool.submit(ds.tencent_minute, code)
+        f_quote = pool.submit(ds.tencent_quote, [code])
+        intraday, quotes = f_intra.result(), f_quote.result()
+    q = quotes.get(code, {})
+    return jsonify({"code": code, "intraday": intraday,
+                    "prev_close": q.get("last_close"), "updated": _now()})
 
 
 @app.route("/api/watchlist")

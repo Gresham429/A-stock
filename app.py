@@ -38,6 +38,7 @@ import profile_store
 import provenance
 import rules_store
 import store
+import template_store
 import universe
 import universe_store
 import websearch
@@ -615,6 +616,21 @@ def _tier_block() -> str:
     return profile_store.block_for_ai(prof.get("cash") or 0, total, hn)
 
 
+def _record_basis_stats(basis: list[dict] | None) -> None:
+    """把引用校验结果（✓/⚠）计入当前 system prompt 版本的统计。
+
+    这是**唯一可信的提示词优化信号**：每次调用一个样本、后端权威校验(AI 编不了)、
+    即时反馈、不受市场影响。收益率则相反——样本太少且被大盘 beta 污染，故不统计。
+    """
+    if not basis:
+        return
+    ok = sum(1 for b in basis for r in (b.get("refs") or []) if r.get("status") == "ok")
+    bad = sum(1 for b in basis for r in (b.get("refs") or []) if r.get("status") == "bad")
+    if ok or bad:
+        template_store.record("system_disclaimer", llm._system_prompt()[1],
+                              basis_ok=ok, basis_bad=bad)
+
+
 def _fee_block() -> str:
     """【交易成本】注入块：给 AI 具体费率与保本涨幅，而非「注意手续费」这种空话。
 
@@ -808,6 +824,7 @@ def recommend_position(code: str):
         return jsonify({"ok": False, "msg": str(e)}), 502
     ctx = {"quote": q, "metrics": metrics, "vol_hist": vol_hist, "financials": financials}
     advice["basis"] = provenance.verify_basis(advice.get("basis"), ctx, rule_map)
+    _record_basis_stats(advice["basis"])
     prov = provenance.build_provenance(q, metrics, vol_hist, financials, news,
                                        {"count": len(rule_map), "scenario": scen},
                                        None, config.bocha_enabled(), _now())
@@ -865,6 +882,7 @@ def recommend_entry(code: str):
     ctx = {"quote": q, "metrics": metrics, "vol_hist": vol_hist,
            "financials": financials, "market_ctx": market_ctx}
     advice["basis"] = provenance.verify_basis(advice.get("basis"), ctx, rule_map)
+    _record_basis_stats(advice["basis"])
     prov = provenance.build_provenance(q, metrics, vol_hist, financials, news,
                                        {"count": len(rule_map), "scenario": scen},
                                        market_ctx, config.bocha_enabled(), _now())
@@ -1199,6 +1217,34 @@ def api_sector_detail(name: str):
                     "members": members})
 
 
+@app.route("/api/templates")
+def api_templates():
+    """提示词模板：版本列表 + 近 N 日客观指标（引用有效率/schema 失败率）+ 容量。"""
+    return jsonify({"versions": template_store.list_versions(request.args.get("name", "")),
+                    "stats": template_store.stats(request.args.get("name", ""),
+                                                  _arg_int("days", 30)),
+                    "status": template_store.status()})
+
+
+@app.route("/api/templates/activate", methods=["POST"])
+def api_templates_activate():
+    """切换 active 版本（回滚 = 切回旧版本号）。body: {name, version}"""
+    b = request.get_json(silent=True) or {}
+    ok = template_store.activate(b.get("name", ""), int(b.get("version") or 0))
+    return jsonify({"ok": ok})
+
+
+@app.route("/api/templates", methods=["POST"])
+def api_templates_add():
+    """新增版本。body: {name, body, note, activate}"""
+    b = request.get_json(silent=True) or {}
+    if not (b.get("name") and b.get("body")):
+        return jsonify({"ok": False, "msg": "name/body 必填"}), 400
+    ver = template_store.add_version(b["name"], b["body"], b.get("note", ""),
+                                     bool(b.get("activate")))
+    return jsonify({"ok": True, "version": ver})
+
+
 def _universe_boot() -> None:
     """启动时后台预热：名单刷新 + 板块回填续跑 + 当日统计。不阻塞启动。"""
     try:
@@ -1210,6 +1256,8 @@ def _universe_boot() -> None:
             logger.info("板块归属回填续跑…（断点续传，期间 sector_of 降级手工池）")
             universe_store.backfill_sectors()
         universe_store.snapshot_daily()
+        template_store.init()
+        template_store.purge()   # 按日累积的表一律配清理
     except (OSError, ValueError, sqlite3.Error) as e:
         logger.warning("全市场池预热失败（不影响其余功能）: %s", e)
 

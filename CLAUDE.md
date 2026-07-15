@@ -40,7 +40,8 @@ python app.py                        # http://127.0.0.1:5000
 | `profile_store.py` | 本地多档投资画像（SQLite `data/profiles.db`）：每档=现金本金+风险偏好，一个 active；**5 档 TIERS**（微/小/中/大/超大，按总资产=现金+持仓 落档）+ 每档玩法 template + `block_for_ai` 注入块 |
 | `universe_store.py` | **全市场股票池**（SQLite `data/universe.db`）：全A名单 5527(新浪 hs_a) + 板块归属(东财 slist 逐股回填) + 板块日变化统计。对外 `codes_of(focus)`/`sector_of`→(申万一级,细分)/`sectors_map(codes)`批量/`taxonomy()`/`status()`/`snapshot_daily()`/`sector_ranking()`/`sector_history()`。**签名与 `universe.py` 一致，未回填时自动降级手工池** |
 | `universe.py` | **降级为「精选龙头」标记**（10 一级 → 48 二级 → 170 只）。`universe_store` 未就绪/未回填时的 fallback + `is_leader` 标记。不再是主候选池 |
-| `tests/test_universe_store.py` | 板块解析回归测试（7 例，零依赖，`python3 tests/test_universe_store.py` 直接跑；项目无 pytest） |
+| `tests/test_universe_store.py` | 板块解析回归测试（9 例，零依赖，`python3 tests/test_universe_store.py` 直接跑；项目无 pytest） |
+| `tests/test_screen_branches.py` | 选股三分支存在性 + `_balanced_pick` 契约（5 例，离线）。**因 `_balanced_pick` 曾被盲切片整个删掉而生**——见踩坑备忘 |
 | `store.py` | 自选股持久化 |
 | `config.py` | 读 `.env`（DeepSeek + 博查 key，绝不硬编码） |
 | `templates/index.html` | UI 结构 + 全部 CSS（深色终端风） |
@@ -144,7 +145,9 @@ curl -s "localhost:5000/api/sectors?kind=sw1&limit=5"   # 板块日排行
 ```
 
 Python 语法：`python3 -c "import ast; [ast.parse(open(f).read()) for f in [...]]"`；JS：`node --check static/app.js`。
-回归测试：`python3 tests/test_universe_store.py`（板块解析 7 例，零依赖、离线，改 `parse_tags` 必跑）。
+回归测试（零依赖离线，改相关代码必跑）：
+`python3 tests/test_universe_store.py`（板块解析 9 例）
+`python3 tests/test_screen_branches.py`（选股三分支 + `_balanced_pick` 契约 5 例）
 
 ## 安全（提交前必做）
 
@@ -190,4 +193,5 @@ Python 语法：`python3 -c "import ast; [ast.parse(open(f).read()) for f in [..
   - **北交所号段 = 8xxxxx / 4xxxxx / 92xxxx**（920 为 2024 年起新号段）。`ds.market_prefix()` 里 **`92` 必须先于 `9` 判断**——9 开头的另一支是沪B（900xxx，仍属上海）。曾有 bug：920xxx 判成 `sh`、4xxxxx 判成 `sz`，导致北交所股票**行情/指标全取不到**（加进自选股会一片空白）。已修（2026-07-15），实测 `bj920000`/`bj430047` 有数据、`sh920000` 返回空。`universe_store.is_bj()` 与之等价，测试固化了「两者永远一致」的不变量。
   - **扩池会引爆手工池永不触发的崩溃**（已修，勿回退）：`tencent_quote` 单 URL 拼全部代码 → 全池 44KB 报 **HTTP 414**（实测 800 只可过、2000 只失败）→ 已 `QUOTE_CHUNK=400` 分批并发；`_annualized_vol` 遇 0 收盘价 → **math domain error 穿透 `executor.map` 打崩整个选股**；`sina_metrics` 的 `closes[-21]==0` ZeroDivisionError + try 块外的 `float(x['trade'])` ValueError。兜底见 `app._safe_metrics`。
   - **slist 标签去重顺序坑**：东财同板块会以 `银行Ⅱ` 与 `银行` 两种形态返回。若按**原始标签**分类却按**去后缀名**去重，`银行Ⅱ` 判成 concept 抢占去重位 → **`sw1` 标记永久静默丢失**（`codes_of('银行')` 照常能用、只有 `sector_ranking(kind='sw1')` 漏板块，极隐蔽）。已固化为回归用例。
+  - **⚠️ `_screen_rows` 有三条互斥分支，测一条 ≠ 另两条活着**：① `focus` 且池≤`_PA_RANK_MAX`(200) → 形态排序（**不调 `_balanced_pick`**）；② `focus` 但池>200 → 均衡采样；③ `focus=''` 全市场 → 流通市值预筛 + 均衡采样（**agent 默认走这条**）。曾因一次盲切片（`s[:idx(_pa_score)] + new + s[idx(_screen_rows):]`，`_balanced_pick` 正好夹在两者之间）把它整个删掉，而当时只测了分支①，NameError 潜伏到 agent 跑全市场才炸。**改 `_screen_rows` 一带的代码，三条分支都要跑**（`tests/test_screen_branches.py` 已固化）。
   - **回填必须跨进程互斥**：`ds.em_get` 限流器是**进程内**全局（`_em_last_call`），app 与命令行同时回填 → 东财请求速率翻倍 → clist 就是这么被封的，slist 再被封功能全废。故用 db 心跳锁（`meta.backfill_hb = pid,ts`，超 120s 可抢占）+ `threading.Lock` 双重互斥。

@@ -1047,6 +1047,44 @@ def _factor_pct(f: str, v: float) -> float:
     return min(max((v - lo) / (hi - lo), 0.0), 1.0) if hi > lo else 0.5
 
 
+def _balanced_pick(codes: list[str], cap_total: int, cap_per_sub: int,
+                   smap: dict[str, tuple[str, str]] | None = None) -> list[str]:
+    """跨一级板块均衡采样：按一级轮询取，每个细分最多 cap_per_sub 只，总量 ≤ cap_total。
+
+    smap 为批量板块映射（全市场池 ~5000 只逐只查 DB 会退化，必须批量传入）；
+    不传则回退到手工池的内存查询，保持旧行为。
+
+    **只在全市场路径用**（focus 为空、或板块池 >_PA_RANK_MAX）；关注板块时走
+    形态排序分支，不经过这里。两条分支必须分别测——本函数曾因只测了形态分支
+    而被误删都没发现（NameError 直到 agent 跑全市场才炸）。
+    """
+    look = (lambda c: smap[c]) if smap else universe.sector_of
+    by_primary: dict[str, list[str]] = {}
+    for c in codes:
+        primary, _ = look(c)
+        by_primary.setdefault(primary, []).append(c)
+    queues = list(by_primary.values())
+    cursor = [0] * len(queues)
+    per_sub: dict[str, int] = {}
+    picked: list[str] = []
+    progressed = True
+    while len(picked) < cap_total and progressed:
+        progressed = False
+        for qi, q in enumerate(queues):
+            while cursor[qi] < len(q):
+                c = q[cursor[qi]]
+                cursor[qi] += 1
+                _, sub = look(c)
+                if per_sub.get(sub, 0) < cap_per_sub:
+                    per_sub[sub] = per_sub.get(sub, 0) + 1
+                    picked.append(c)
+                    progressed = True
+                    break  # 取一只后轮到下一个一级板块
+            if len(picked) >= cap_total:
+                break
+    return picked
+
+
 def _screen_rows(capital: float, focus: str = "") -> list[dict]:
     """候选池行情 + 指标（按 focus 取数 + 负担得起优先 + 跨板块均衡采样）。
 

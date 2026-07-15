@@ -25,6 +25,8 @@ from datetime import datetime
 
 from flask import Flask, jsonify, render_template, request
 
+import agent_loop
+import agent_store
 import ai_cache
 import config
 import datasources as ds
@@ -131,7 +133,7 @@ def _market_overview_payload(force: bool = False, with_ai: bool = True) -> dict:
     ai = None
     if config.llm_enabled() and idx.get("indices"):
         try:
-            ai = llm.market_overview(idx["indices"], breadth, _tier_block() + _fee_block() + _macro_block() + _ai_web_context("market"))
+            ai = llm.market_overview(idx["indices"], breadth, _tier_block() + _fee_block() + _lesson_block() + _macro_block() + _ai_web_context("market"))
         except llm.LLMError as e:
             logger.warning("大盘研判 AI 失败: %s", e)
     model = config.DEEPSEEK_MODEL if config.llm_enabled() else None
@@ -580,7 +582,7 @@ def recommend_daily():
     rows = _overview_rows(watchlist)
     quotes = ds.tencent_quote(portfolio.codes()) if portfolio.codes() else {}
     holdings = portfolio.with_pnl(quotes)
-    web_ctx = _tier_block() + _fee_block() + _macro_block() + _ai_web_context("market")
+    web_ctx = _tier_block() + _fee_block() + _lesson_block() + _macro_block() + _ai_web_context("market")
     news_map = {c: [n.get("title", "") for n in news_store.query(code=c, days=30, limit=3)]
                 for c in watchlist}   # 每股本地库近期标题 → 一句话叙事(0 额外 LLM)
     try:
@@ -629,6 +631,20 @@ def _record_basis_stats(basis: list[dict] | None) -> None:
     if ok or bad:
         template_store.record("system_disclaimer", llm._system_prompt()[1],
                               basis_ok=ok, basis_bad=bad)
+
+
+def _lesson_block() -> str:
+    """【历史教训】注入块：把模拟盘上 agent 犯过的**真实错误**喂给 5 个已有 AI（四期闭环）。
+
+    喂的是**事实统计**（「追高 4 次」），不是让 AI 改写提示词——与「用 5 个样本优化提示词」
+    有本质区别：这里数事实，那里拟合参数。故不受 784 笔样本量死局限制。
+    """
+    try:
+        txt = agent_store.for_ai()
+        return txt + "\n\n" if txt else ""
+    except (sqlite3.Error, OSError) as e:
+        logger.warning("教训块生成失败: %s", e)
+        return ""
 
 
 def _fee_block() -> str:
@@ -815,7 +831,7 @@ def recommend_position(code: str):
                                          f_news.result(), f_kline.result())
     vol_hist = _vol_hist(kl)
     prof = _company_profile(code, q.get("name", ""), news, financials)
-    web_ctx = _tier_block() + _fee_block() + _macro_block() + _profile_block(prof) + _ai_web_context("position", code, q.get("name", ""))
+    web_ctx = _tier_block() + _fee_block() + _lesson_block() + _macro_block() + _profile_block(prof) + _ai_web_context("position", code, q.get("name", ""))
     scen = rules_store.get_scenario()
     rule_map = rules_store.active_rule_map(scen)
     try:
@@ -871,7 +887,7 @@ def recommend_entry(code: str):
     vol_hist = _vol_hist(kl)
     market_ctx = _market_overview_payload().get("ai")
     prof = _company_profile(code, q.get("name", ""), news, financials)
-    web_ctx = _tier_block() + _fee_block() + _macro_block() + _profile_block(prof) + _ai_web_context("position", code, q.get("name", ""))
+    web_ctx = _tier_block() + _fee_block() + _lesson_block() + _macro_block() + _profile_block(prof) + _ai_web_context("position", code, q.get("name", ""))
     scen = rules_store.get_scenario()
     rule_map = rules_store.active_rule_map(scen)
     try:
@@ -918,7 +934,7 @@ def recommend_screen():
     if not rows:
         return jsonify({"ok": False, "msg": "候选池行情拉取失败，请重试"}), 502
     market_ctx = _market_overview_payload().get("ai")  # 复用缓存的大盘研判结论
-    web_ctx = _tier_block() + _fee_block() + _macro_block() + _ai_web_context("market")
+    web_ctx = _tier_block() + _fee_block() + _lesson_block() + _macro_block() + _ai_web_context("market")
     try:
         result = llm.market_screen(rows, capital, focus, market_ctx, web_ctx)
     except llm.LLMError as e:
@@ -1245,6 +1261,73 @@ def api_templates_add():
     return jsonify({"ok": True, "version": ver})
 
 
+# ── Agent 模拟交易（agent_store + agent_loop） ─────────────────────────────
+@app.route("/api/agents")
+def api_agents():
+    """agent 列表 + 教训汇总 + 容量。"""
+    return jsonify({"agents": agent_store.list_agents(),
+                    "lessons": agent_store.lesson_rollup(12),
+                    "status": agent_store.status()})
+
+
+@app.route("/api/agents", methods=["POST"])
+def api_agents_create():
+    """建 agent：自动建配套模拟盘账户。body: {name, capital, profile_id, decider}"""
+    b = request.get_json(silent=True) or {}
+    name = (b.get("name") or "agent").strip()
+    try:
+        capital = float(b.get("capital") or 10000)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "msg": "capital 无效"}), 400
+    prof = b.get("profile_id") or (profile_store.get_active() or {}).get("id")
+    if not prof:
+        return jsonify({"ok": False, "msg": "无可用投资画像"}), 400
+    aid = paper_store.create_account(f"[agent]{name}", capital)
+    gid = agent_store.create_agent(name, aid, int(prof),
+                                   b.get("decider", "single"), b.get("note", ""))
+    return jsonify({"ok": True, "agent_id": gid, "account_id": aid})
+
+
+@app.route("/api/agents/<int:gid>", methods=["DELETE"])
+def api_agents_delete(gid: int):
+    ag = agent_store.get_agent(gid)
+    if ag:
+        paper_store.delete_account(ag["account_id"])
+        agent_store.delete_agent(gid)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/agents/<int:gid>/run", methods=["POST"])
+def api_agents_run(gid: int):
+    """跑一个 agent 的日循环。?dry=1 只决策不下单。"""
+    b = request.get_json(silent=True) or {}
+    blocks = _tier_block() + _fee_block() + _lesson_block() + rules_store.for_ai()
+    return jsonify(agent_loop.run_day(gid, focus=b.get("focus", ""),
+                                      dry_run=bool(b.get("dry")), blocks=blocks))
+
+
+@app.route("/api/agents/run_all", methods=["POST"])
+def api_agents_run_all():
+    """跑所有启用的 agent（多档位/同档多账户并行实验）。后台线程，不阻塞。"""
+    b = request.get_json(silent=True) or {}
+    blocks = _tier_block() + _fee_block() + _lesson_block() + rules_store.for_ai()
+    dry = bool(b.get("dry"))
+    threading.Thread(target=agent_loop.run_all, args=(dry, blocks), daemon=True).start()
+    return jsonify({"ok": True, "running": True,
+                    "agents": len(agent_store.list_agents(active_only=True))})
+
+
+@app.route("/api/agents/<int:gid>/runs")
+def api_agents_runs(gid: int):
+    """某 agent 的日循环日志 + 净值曲线 + 教训。"""
+    return jsonify({"runs": agent_store.runs_of(gid, request.args.get("date", ""),
+                                                _arg_int("limit", 40)),
+                    "equity": agent_store.equity_of(gid, _arg_int("days", 90)),
+                    "lessons": agent_store.lessons(gid, 20),
+                    "account": paper_store.get_account(
+                        (agent_store.get_agent(gid) or {}).get("account_id", 0))})
+
+
 def _universe_boot() -> None:
     """启动时后台预热：名单刷新 + 板块回填续跑 + 当日统计。不阻塞启动。"""
     try:
@@ -1258,6 +1341,8 @@ def _universe_boot() -> None:
         universe_store.snapshot_daily()
         template_store.init()
         template_store.purge()   # 按日累积的表一律配清理
+        agent_store.init()
+        agent_store.purge()
     except (OSError, ValueError, sqlite3.Error) as e:
         logger.warning("全市场池预热失败（不影响其余功能）: %s", e)
 

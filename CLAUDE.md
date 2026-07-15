@@ -30,6 +30,8 @@ python app.py                        # http://127.0.0.1:5000
 | `notes_store.py` | L5 私域笔记（SQLite `data/notes.db`，永久保留） |
 | `rules_store.py` | 交易规则库（SQLite `data/rules.db`，84 条：67 蒸馏自 PA_Agent + 17 A股制度特性，13 类，带场景标签，注入 AI）；`for_ai` 注入带 `[R{id}]` 供引用，`active_rule_map` 供校验；`templates/prompts/` 存归档提示词 |
 | `provenance.py` | AI 建议溯源与依据校验（仅 entry/position）：闭集信号字典 `SIGNAL_DEFS`（单一事实源）+ `build_provenance`（A 确定性溯源）+ `verify_basis`（B 校验 AI 引用的信号名/规则ID→✓可核对/⚠对不上/·名对值缺） |
+| `agent_store.py` | **Agent 持久层**（SQLite `data/agents.db`）：`agents`(绑 paper 账户+画像+decider) / `runs`(日循环日志，**LLM原文90天·结论365天分列分策略**) / `lessons`(**教训闭集** `LESSON_KINDS` 9 类，同 kind 累加 hits 故天然稀疏、永久保留) / `equity`(净值730天) + `for_ai()` 教训注入块 + `purge()` 分层清理 + `status()`(db_mb) |
+| `agent_loop.py` | **Agent 日循环**：研判→选股(复用 `_screen_rows`)→**决策(可插拔** `DECIDERS={single,debate}`，`Intent` 为稳定契约**)** →风控(**确定性硬门**，LLM说了不算)→下单(`paper_store` 真实撮合+**该账户画像的费率**)→复盘(**确定性失败检测器** `detect_failures`，8 类客观信号→教训)。`run_day(agent_id)` / `run_all()` |
 | `paper_store.py` | 模拟委托交易（SQLite `data/paper.db`，多存档，按真实行情+A股规则[整手/涨跌停/T+1/手续费]撮合） |
 | `websearch.py` | 博查联网搜索（B 方案，可选）+ key 健康检测/到期提醒 |
 | `fees.py` | **交易成本模型（单一事实源）**：`FeeSchedule`(佣金率/最低佣金[可议价、**可免**] + 印花税千0.5[仅卖出，法定] + 过户费万0.1[双向，法定]) + `compute`/`round_trip`/`breakeven_pct`/`min_amount_for_rate`(佣金下限分界点) + `for_ai()`(给 AI **具体数字**而非「注意手续费」空话)。**费率不硬编码**——存投资画像（画像=一档资金=一个券商账户），`paper_store`/AI 共用 |
@@ -86,6 +88,13 @@ python app.py                        # http://127.0.0.1:5000
 - **单股深度入场分析**：`llm.entry_advice` + `POST /api/recommend/entry/<code>`（不必持仓，深挖抽屉「🎯 深度入场分析」）：是否/何时/怎么买 + 未来卖出策略预判，严格遵循规则、结合资金；`ai_cache` kind=entry。与「🤖 该买还是该卖」(position) 并列。
 - **AI 溯源与依据校验（provenance，仅 entry/position）**：两层，主次分明。**A 数据溯源**（后端确定性、100%稳定）：响应带 `provenance`＝本次喂了哪些源+新鲜度+条数（行情/波动资金/60日波动史/财报/新闻/规则[场景]/大盘/联网），前端面板顶部溯源条常驻、点开展值级明细。**B 结论依据**（AI 自述+后端校验）：提示词给【可引用信号】闭集（`provenance.signal_vocab`），AI 每条关键结论在 `basis` 里只引用**信号名 + 规则ID（不写值）**；`verify_basis` 后端**权威填值**（值不可能被 AI 编）并校验（名在闭集/规则ID在注入集→`ok`✓；否则`bad`⚠；名对源缺→`na`·），前端每条结论「依据」默认收起、✓绿可核对/⚠红对不上。范围仅这两个单股分析，daily/screen/market 暂不做。设计见 `plan/2026-07-14-ai-provenance-attribution-design.md`。
 - **公司叙事（做过/在做/要做，company_profile）**：两层。**单股深版**：entry/position 顶部「公司叙事」卡（做过/在做/要做 + 题材标签）+ 注入主分析——`llm.company_profile`(**v4-flash**) 据 近期新闻 + 财报多期 + 东财公告(`ds.announcements`) + 概念板块(`ds.concept_tags`) 合成 `{did,doing,will,tags}`；`ai_cache` kind=`profile` **当日缓存 12h**（叙事变化慢，同日不重复调），`app._profile_block` 拼进 entry/position 的 `web_ctx`。**每日推荐简版**：`daily_recommendation` 给每只自选股附本地新闻库近期标题（`news_store.query`）→ 输出每 pick 一句话 `narrative`，**0 额外 LLM**（同一次 daily 调用）。数据源纯 HTTP（避开 mootdx，海外可用）；叙事定性、不进 provenance 的 basis 校验，只作输入与展示。设计见 `plan/2026-07-14-company-narrative-design.md`。
+- **Agent 模拟交易 + 失败归因（agent_store/agent_loop，2026-07-16）**：`POST /api/agents` 建 agent（自动配套 paper 账户）、`POST /api/agents/<id>/run`(`{dry:true}` 只决策不下单)、`POST /api/agents/run_all`(后台线程，多档位/同档多账户并行实验)、`GET /api/agents`、`GET /api/agents/<id>/runs`。
+  - **教训只记失败、由确定性检测器产出、kind 是闭集**（9 类：追高/赚不抵费/逆势/超仓/满仓/波动失控/僵持/违规/止损迟滞）。`range_pos=92→追高` 是**核对事实**，LLM 说「我觉得有点追高」不是——客观才可统计、才可反哺。LLM 只用在决策步。
+  - **风控是确定性硬门**（现金/仓位上限/现金下限/T+1可卖/波动上限），LLM 说了不算。
+  - **决策可插拔**：`single`(默认，1×v4-pro≈36s) / `debate`(多空**并行**→裁判，≈120s 非 3×串行，已备好**默认不启用**——先跑 single 拿基线，用数据证明需要再切，两者归因落同一张表可 A/B)。
+  - **教训反哺**：`app._lesson_block()` 与 `_tier_block`/`_fee_block`/`_macro_block` 并列**注入 5 个已有 AI**。喂的是**事实统计**（「追高 4 次」），非让 AI 改写提示词——故不受 784 笔样本量死局限制。
+  - **实测**：日循环 36s 跑通；AI 在候选普遍 `range_pos=100` 时**主动拒绝追高**（说明注入块生效）；8 类失败检测器合成场景全命中；风控三道门全否决。
+  - **踩坑**：`paper_store` 无 `_market_open()`（那是 `order()` 的参数），实现在 `app._market_open()`；`paper_store.fees()/order()` 已加 `sched` 参数——agent 多账户并行时**各账户绑自己画像的费率**，不能都读全局 active。
 - **提示词模板版本化 + AI 进化红线（template_store，2026-07-16）**：`llm._system_prompt()` 走模板库，可多版本/激活/**回滚**；每次 AI 调用把 `provenance.verify_basis` 的 ✓/⚠ 计入 `template_stats` → 能按版本 A/B。`GET/POST /api/templates`、`POST /api/templates/activate`。
   - **⚠️ 红线：绝不让优化器朝收益率进化提示词。** 用户 20–30 笔/年，统计验证「55% 胜率 vs 瞎猜」需 **784 笔 ≈ 31 年**（60% 也要 196 笔 ≈ 8 年）。5–8 个样本优化提示词只会拟合噪音，且标签被大盘 beta 污染（大盘涨时 AI 随便买都赚 → 优化器学到「AI 很棒」）。
   - **可优化的**：引用有效性（`verify_basis` ✓/⚠）、schema 合规率、教训命中率——**每次调用即一个样本**、后端权威校验、即时反馈、不受市场影响。
@@ -153,11 +162,11 @@ Python 语法：`python3 -c "import ast; [ast.parse(open(f).read()) for f in [..
   - 知识与缓存架构 L1–L5、launchd 定时抓取（动态交易日历）、模拟盘
 - **⚠️ 待用户浏览器验证**（后端均已 LIVE 实测通过，DOM 交互未验）：~~🧭 板块 modal~~ **已验通过 2026-07-15**；💼 画像 modal（切换/新建/改本金）；单股分析顶部「公司叙事卡 + 溯源条 + 结论依据 ✓/⚠」；每日推荐每只一句话叙事；AI 结论是否体现「全球宏观 + 本金玩法档」。
 - **⏳ 板块归属回填**：首次需 ~100 分钟（4989 只 × em_get 限流 1.25s）。**断点续传**，app 启动时 `_universe_boot()` 自动续跑；也可 `curl -X POST localhost:5000/api/universe/refresh`。回填期间板块口径是混的（已回填→申万、未回填→降级手工池、都没有→其他/其他），跑完自动一致，**不需要改代码**。进度看 `GET /api/universe/status` 的 `sectors_tagged/eligible`。
-- 本地数据文件（gitignore，用户机上）：`watchlist.json` / `portfolio.json`（新格式 `{by_profile:{pid:[...]}}` **按画像隔离**，旧格式自动迁移）/ `ai_cache.json` / `data/news.db` / `data/notes.db` / `data/rules.db` / `data/paper.db` / `data/profiles.db` / `data/universe.db`（全A名单+板块归属+板块日统计）/ ★`data/templates.db`（提示词版本+统计）。
+- 本地数据文件（gitignore，用户机上）：`watchlist.json` / `portfolio.json`（新格式 `{by_profile:{pid:[...]}}` **按画像隔离**，旧格式自动迁移）/ `ai_cache.json` / `data/news.db` / `data/notes.db` / `data/rules.db` / `data/paper.db` / `data/profiles.db` / `data/universe.db`（全A名单+板块归属+板块日统计）/ `data/templates.db`（提示词版本+统计）/ ★`data/agents.db`（agent配置+日循环日志+教训库+净值）。
 - **backlog 已清空**，只剩**可选**后续（见 `plan/BACKLOG.md`，均未承诺）：美元指数/VIX 换源补齐（新浪外盘无此二者）、溯源推广到 daily/screen、5 档 template 文案做成 UI 可编辑。
 - launchd 定时任务需**用户在自己终端** `launchctl bootstrap` 安装（本环境无 `~/Library` 写权限）；见 README「自动抓取新闻库」。
 - 设计文档在 `plan/`（各特性 spec + 知识缓存架构总纲 + `BACKLOG.md`）。
-- **进行中：multi-agent 模拟交易 + 失败归因驱动的提示词进化**（`plan/2026-07-16-agent-evolution-design.md`）。一期(模板版本化)✅；二期 agent 日循环骨架 / 三期 失败归因教训库 / 四期 教训反哺 5 个已有 agent / 五期(可选) DebateDecider —— **均未开始**。
+- **进行中：multi-agent 模拟交易 + 失败归因驱动的提示词进化**（`plan/2026-07-16-agent-evolution-design.md`）。一期(模板版本化)✅ / 二期(agent日循环+多账户)✅ / 三期(失败归因教训库)✅ / 四期(教训反哺5个AI)✅ / 五期 DebateDecider **代码已备好但默认不启用**（`decider='debate'` 可切）。**待用户浏览器验证**：agent 相关暂无前端 UI，只有 API。
 - **踩坑备忘**：① 端口 **5000 被 macOS AirPlay 占**，本地起服务前关「隔空播放接收器」，或测试用 5001；② 涉及用户数据文件（`portfolio.json` 等）的测试**必须用临时副本**，别写真实数据；③ AI 类接口是推理模型，单次 30~90s，`curl` 用 `--max-time 200`；终端有代理时 `curl` 加 `--noproxy '*'`（python 脚本要 `os.environ.pop` 掉 `*_proxy`）。
 - **⚠️ 全市场池踩过的坑（改这块前必读）**：
   - **北交所号段 = 8xxxxx / 4xxxxx / 92xxxx**（920 为 2024 年起新号段）。`ds.market_prefix()` 里 **`92` 必须先于 `9` 判断**——9 开头的另一支是沪B（900xxx，仍属上海）。曾有 bug：920xxx 判成 `sh`、4xxxxx 判成 `sz`，导致北交所股票**行情/指标全取不到**（加进自选股会一片空白）。已修（2026-07-15），实测 `bj920000`/`bj430047` 有数据、`sh920000` 返回空。`universe_store.is_bj()` 与之等价，测试固化了「两者永远一致」的不变量。

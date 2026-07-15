@@ -101,17 +101,21 @@ def orders_of(aid: int, limit: int = 50) -> list[dict[str, Any]]:
 
 
 # ── 手续费 ────────────────────────────────────────────────────────────────
-def fees(side: str, amount: float) -> float:
-    """单笔交易成本（元）。费率取 **active 投资画像**的费率表，不再写死。
+def fees(side: str, amount: float, sched: "fee_model.FeeSchedule | None" = None) -> float:
+    """单笔交易成本（元）。费率取 sched；不给则取 **active 投资画像**的费率表。
+
+    sched 显式传入用于 **agent 多账户并行**——每个 agent 账户绑自己的画像(各有费率)，
+    不能都读全局 active，否则并行跑不同档位时成本模型全错。
 
     费率因券商/账户而异（同为国信，议价前万9、议价后万2.5，差 3.6 倍），
     写死会让模拟盘系统性低估成本、给出假的正收益。见 `fees.py`。
     """
-    try:
-        sched = profile_store.fee_schedule()
-    except (sqlite3.Error, OSError) as e:
-        logger.warning("读取画像费率失败，退回默认档: %s", e)
-        sched = fee_model.FeeSchedule()
+    if sched is None:
+        try:
+            sched = profile_store.fee_schedule()
+        except (sqlite3.Error, OSError) as e:
+            logger.warning("读取画像费率失败，退回默认档: %s", e)
+            sched = fee_model.FeeSchedule()
     return fee_model.total(side, amount, sched)
 
 
@@ -123,8 +127,12 @@ def _log_order(c, aid, code, name, side, otype, price, shares, amount, fee, stat
 
 
 def order(aid: int, code: str, name: str, side: str, otype: str, req_price: float,
-          shares: int, quote: dict[str, Any], market_open: bool) -> dict[str, Any]:
-    """下单撮合（即时成交）。quote 含 price/limit_up/limit_down。返回 {ok,msg,...}。"""
+          shares: int, quote: dict[str, Any], market_open: bool,
+          sched: "fee_model.FeeSchedule | None" = None) -> dict[str, Any]:
+    """下单撮合（即时成交）。quote 含 price/limit_up/limit_down。返回 {ok,msg,...}。
+
+    sched：该账户的费率表（agent 多账户并行时各账户不同）；不给则用 active 画像。
+    """
     price_now = float(quote.get("price") or 0)
     lu = float(quote.get("limit_up") or 0)
     ld = float(quote.get("limit_down") or 0)
@@ -161,7 +169,7 @@ def order(aid: int, code: str, name: str, side: str, otype: str, req_price: floa
         return reject("跌停封板，卖不出")
 
     amount = round(fill * shares, 2)
-    fee = fees(side, amount)
+    fee = fees(side, amount, sched)
     today = date.today().isoformat()
     with _LOCK, _conn() as c:
         _settle(c, aid)

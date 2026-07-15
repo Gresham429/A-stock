@@ -374,6 +374,9 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
     for c in cands:
         ctx["sector_chg"][c["code"]] = day_rank.get(c.get("primary"))
 
+    # 每个 agent 用**自己的**档位/费率块（档位按本账户总资产，非用户真实持仓）
+    if not blocks:
+        ctx["blocks"] = app._agent_blocks(ag, ctx["cash"], total, len(positions))
     # ③ 决策（可插拔）
     decider = DECIDERS.get(ag.get("decider") or "single", _single_decider)
     try:
@@ -434,6 +437,7 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
 
 
 def run_all(dry_run: bool = False, blocks: str = "", force: bool = False) -> list[dict[str, Any]]:
+    """blocks 留空则每个 agent 各自构建（推荐——多档位实验必须如此）。"""
     """跑所有启用的 agent（多档位 / 同档多账户并行实验）。串行——LLM 调用本就是瓶颈。
 
     **非交易日直接跳过**：周末/节假日没有行情，跑了只会拿昨收当今价、产生假决策。

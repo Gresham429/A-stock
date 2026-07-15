@@ -776,7 +776,7 @@ async function loadPortfolio(){
     const card=(lab,big,cls,sub)=>`<div class="assetCard${cls?' hl':''}"><div class="lab">${lab}</div><div class="big ${cls}">${big}</div><div class="sub ${cls}">${sub}</div></div>`;
     ag.innerHTML=
       card('总市值', fmtInt(s.market_value)+'元','','成本 '+fmtInt(s.cost_value)+'元')
-     +card('总盈亏', (s.pnl_amount>=0?'+':'')+fmtInt(s.pnl_amount)+'元', clr(s.pnl_amount), s.pnl_pct!=null?sgn(s.pnl_pct)+s.pnl_pct+'%':'—')
+     +card('总盈亏(净)', (s.pnl_net>=0?'+':'')+fmtInt(s.pnl_net)+'元', clr(s.pnl_net), (s.pnl_net_pct!=null?sgn(s.pnl_net_pct)+s.pnl_net_pct+'%':'—')+' · 毛 '+sgn(s.pnl_amount)+fmtInt(s.pnl_amount))
      +card('当日盈亏', (s.today_pnl>=0?'+':'')+fmtInt(s.today_pnl)+'元', clr(s.today_pnl), s.today_pnl_pct!=null?sgn(s.today_pnl_pct)+s.today_pnl_pct+'%':'—')
      +card('持仓', s.count+' 只','','分散度');
   }else ag.innerHTML='<div class="assetCard" style="grid-column:1/-1"><div class="lab">暂无持仓</div><div class="sub muted" style="margin-top:8px">在下方表单录入「代码 + 股数 + 成本价」，即可看总盈亏与当日盈亏，并让 AI 给卖出建议。</div></div>';
@@ -788,7 +788,8 @@ async function loadPortfolio(){
       <td>${fmt(h.cost_price)}</td>
       <td class="${clr(h.chg_pct)}">${fmt(h.price)}</td>
       <td>${fmtInt(h.market_value)}</td>
-      <td class="${clr(h.pnl_pct)}"><b>${h.pnl_pct!=null?sgn(h.pnl_pct)+h.pnl_pct+'%':'—'}</b><div class="small">${sgn(h.pnl_amount)}${fmtInt(h.pnl_amount)}元</div></td>
+      <td class="${clr(h.pnl_pct)}"><b>${h.pnl_pct!=null?sgn(h.pnl_pct)+h.pnl_pct+'%':'—'}</b><div class="small">${sgn(h.pnl_amount)}${fmtInt(h.pnl_amount)}元</div>
+        <div class="small ${clr(h.pnl_net)}" title="扣掉已付买入费 ${fmt(h.buy_fee)} 元 + 现在卖出要付 ${fmt(h.sell_fee_if_now)} 元">净 ${sgn(h.pnl_net)}${fmtInt(h.pnl_net)}元${h.pnl_net_pct!=null?' ('+sgn(h.pnl_net_pct)+h.pnl_net_pct+'%)':''}</div></td>
       <td class="${clr(h.today_pnl)}"><b>${h.today_pnl!=null?(h.today_pnl>=0?'+':'')+fmtInt(h.today_pnl):'—'}</b><div class="small ${clr(h.chg_pct)}">${sgn(h.chg_pct)}${fmt(h.chg_pct)}%</div></td>
       <td>${h.buy_date||'—'}</td>
       <td class="acts">
@@ -985,8 +986,10 @@ async function createAgent(){
   const name=document.getElementById('agName').value.trim();
   const cap=parseFloat(document.getElementById('agCap').value);
   if(!name||!(cap>0)){ alert('填存档名与启动资金'); return; }
+  const dec=document.getElementById('agDecider').value;
+  if(dec==='debate' && !confirm('多空辩论：每次决策跑 3 次 LLM（多头/空头并行 + 裁判），约 120s、成本 3 倍。\n\n建议先用「单决策」跑出基线——等数据证明 AI 确实偏多，再建个 debate 存档对比。\n两者归因数据落同一张表，可直接 A/B。\n\n仍要建 debate 存档吗？')) return;
   await fetch('/api/agents',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({name:name,capital:cap})});
+    body:JSON.stringify({name:name,capital:cap,decider:dec})});
   document.getElementById('agName').value=''; loadAgents();
 }
 

@@ -36,7 +36,7 @@ python app.py                        # http://127.0.0.1:5000
 | `paper_store.py` | 模拟委托交易（SQLite `data/paper.db`，多存档，按真实行情+A股规则[整手/涨跌停/T+1/手续费]撮合） |
 | `websearch.py` | 博查联网搜索（B 方案，可选）+ key 健康检测/到期提醒 |
 | `fees.py` | **交易成本模型（单一事实源）**：`FeeSchedule`(佣金率/最低佣金[可议价、**可免**] + 印花税千0.5[仅卖出，法定] + 过户费万0.1[双向，法定]) + `compute`/`round_trip`/`breakeven_pct`/`min_amount_for_rate`(佣金下限分界点) + `for_ai()`(给 AI **具体数字**而非「注意手续费」空话)。**费率不硬编码**——存投资画像（画像=一档资金=一个券商账户），`paper_store`/AI 共用 |
-| `portfolio.py` | 持仓 + 总盈亏 + 当日盈亏。**现金语义=可用现金**：`add()` 扣「成交额+买入费」、`remove(code, sell_price)` 加「卖出净收入」（不给 sell_price 则只删记录不动现金，用于「记错了」）；`cash_reconcile()` 只算差额不落盘。⚠️ 展示的盈亏本身仍不含手续费。**按投资画像隔离**（`portfolio.json={by_profile:{pid:[...]}}`，内部按 `profile_store` active 画像 scope）+ **多笔 lot 模型**（`{code, lots:[{shares,cost,date}], note}`：同股 `add` **追加一笔**不覆盖 → 总股数Σ、成本加权平均；**当日盈亏逐笔**：当天买入的用「该笔买入价」作基准、之前持有的才用昨收）。旧格式（裸列表/扁平单笔）**只读时内存迁移**、写入时落盘 |
+| `portfolio.py` | 持仓 + 总盈亏 + 当日盈亏。**现金语义=可用现金**：`add()` 扣「成交额+买入费」、`remove(code, sell_price)` 加「卖出净收入」（不给 sell_price 则只删记录不动现金，用于「记错了」）；`cash_reconcile()` 只算差额不落盘。**盈亏给毛+净两个**：`pnl_amount`(账面) 与 **`pnl_net`(到手的钱 = 毛利 − 已付买入费 − 现在卖出要付的费)** + `buy_fee`/`sell_fee_if_now`；前端汇总卡主显**净**、毛作副标。只给毛利会让人系统性高估表现（实测某笔毛亏 -0.49% 实为净亏 -0.72%，差 47%）。**按投资画像隔离**（`portfolio.json={by_profile:{pid:[...]}}`，内部按 `profile_store` active 画像 scope）+ **多笔 lot 模型**（`{code, lots:[{shares,cost,date}], note}`：同股 `add` **追加一笔**不覆盖 → 总股数Σ、成本加权平均；**当日盈亏逐笔**：当天买入的用「该笔买入价」作基准、之前持有的才用昨收）。旧格式（裸列表/扁平单笔）**只读时内存迁移**、写入时落盘 |
 | `profile_store.py` | 本地多档投资画像（SQLite `data/profiles.db`）：每档=现金本金+风险偏好，一个 active；**5 档 TIERS**（微/小/中/大/超大，按总资产=现金+持仓 落档）+ 每档玩法 template + `block_for_ai` 注入块 |
 | `universe_store.py` | **全市场股票池**（SQLite `data/universe.db`）：全A名单 5527(新浪 hs_a) + 板块归属(东财 slist 逐股回填) + 板块日变化统计。对外 `codes_of(focus)`/`sector_of`→(申万一级,细分)/`sectors_map(codes)`批量/`taxonomy()`/`status()`/`snapshot_daily()`/`sector_ranking()`/`sector_history()`。**签名与 `universe.py` 一致，未回填时自动降级手工池** |
 | `universe.py` | **降级为「精选龙头」标记**（10 一级 → 48 二级 → 170 只）。`universe_store` 未就绪/未回填时的 fallback + `is_leader` 标记。不再是主候选池 |
@@ -91,6 +91,7 @@ python app.py                        # http://127.0.0.1:5000
 - **公司叙事（做过/在做/要做，company_profile）**：两层。**单股深版**：entry/position 顶部「公司叙事」卡（做过/在做/要做 + 题材标签）+ 注入主分析——`llm.company_profile`(**v4-flash**) 据 近期新闻 + 财报多期 + 东财公告(`ds.announcements`) + 概念板块(`ds.concept_tags`) 合成 `{did,doing,will,tags}`；`ai_cache` kind=`profile` **当日缓存 12h**（叙事变化慢，同日不重复调），`app._profile_block` 拼进 entry/position 的 `web_ctx`。**每日推荐简版**：`daily_recommendation` 给每只自选股附本地新闻库近期标题（`news_store.query`）→ 输出每 pick 一句话 `narrative`，**0 额外 LLM**（同一次 daily 调用）。数据源纯 HTTP（避开 mootdx，海外可用）；叙事定性、不进 provenance 的 basis 校验，只作输入与展示。设计见 `plan/2026-07-14-company-narrative-design.md`。
 - **因子回测：`_pa_score` 的权重不再是拍的（factor_lab，2026-07-16）**。`GET /api/factors`、`/api/factors/rolling`、`POST /api/factors/backtest`。
   - **为什么这条路走得通而 LLM 回测走不通**：`_pa_score` 分量是确定性函数(只吃日K)，历史可精确重算、**无数据泄漏**；LLM 训练时见过 2025 年行情，重放历史决策会「记得」结果，**LLM agent 回测不可信**。两条腿验证方法不同，不能混。
+  - **止损线也回测了**（`backtest_stops` + `GET /api/factors/stops`）：108,139 个建仓点。**判据不是「哪个赚最多」**（那答案永远是不止损），而是「花多少收益把尾部压住」——不止损平均 +1.94% 但 5% 最差 **-17.66%**；**-10%** 花 0.27pp 把尾部压到 -10% 且触发率 33.6%（优于 -8% 的 43.1%）；-5% 太紧(60% 被扫出)；**-15%/-20% 被支配**(少赚更多、尾部还不比自然分布好)。`agent_loop.STOP_LOSS_PCT` 已据此由拍的 -8% 改为 **-10%**。
   - **实测结论（299只×600日=162,014样本）**：全样本三因子**全部反向且显著**——`cum20` IC=-0.056 **t=-8.16**(A股短期反转效应)、`range_pos` t=-5.48、`vol` t=-3.43(低波动异象)。**我原先拍的权重里动量与波动两个分量方向全错**。
   - **⚠️ 但近 60 日全部符号反转**：`vol` t=**+6.96**、`cum20` t=+2.99（`range_pos` t=+1.82 未显著）→ **A股 2026 年从反转 regime 切向动量 regime**。静态权重会持续押错方向。
   - **动态调整 = 监控方向，不是自动重拟合权重**：`direction()` 近60日\|t\|>2 才用近期方向、否则回落全样本、都不显著则**不参与打分**（不猜）。权重保持**等权**——量化实证里过度优化的权重样本外常打不过等权，且频繁重拟合让噪音驱动参数、在 regime 间来回甩（那是「用小样本优化」换个地方犯）。
@@ -100,7 +101,7 @@ python app.py                        # http://127.0.0.1:5000
 - **Agent 模拟交易 + 失败归因（agent_store/agent_loop，2026-07-16）**：`POST /api/agents` 建 agent（自动配套 paper 账户）、`POST /api/agents/<id>/run`(`{dry:true}` 只决策不下单)、`POST /api/agents/run_all`(后台线程，多档位/同档多账户并行实验)、`GET /api/agents`、`GET /api/agents/<id>/runs`。
   - **教训只记失败、由确定性检测器产出、kind 是闭集**（9 类：追高/赚不抵费/逆势/超仓/满仓/波动失控/僵持/违规/止损迟滞）。`range_pos=92→追高` 是**核对事实**，LLM 说「我觉得有点追高」不是——客观才可统计、才可反哺。LLM 只用在决策步。
   - **风控是确定性硬门**（现金/仓位上限/现金下限/T+1可卖/波动上限），LLM 说了不算。
-  - **决策可插拔**：`single`(默认，1×v4-pro≈36s) / `debate`(多空**并行**→裁判，≈120s 非 3×串行，已备好**默认不启用**——先跑 single 拿基线，用数据证明需要再切，两者归因落同一张表可 A/B)。
+  - **决策可插拔**：建存档时 UI 可选（默认 single，选 debate 会先弹窗说明代价）。`single`(默认，1×v4-pro≈36s) / `debate`(多空**并行**→裁判，≈120s 非 3×串行，已备好**默认不启用**——先跑 single 拿基线，用数据证明需要再切，两者归因落同一张表可 A/B)。
   - **教训反哺**：`app._lesson_block()` 与 `_tier_block`/`_fee_block`/`_macro_block` 并列**注入 5 个已有 AI**。喂的是**事实统计**（「追高 4 次」），非让 AI 改写提示词——故不受 784 笔样本量死局限制。
   - **条件单（解决「app 关着的区间段怎么操作」）**：`agent_store.conditions` + `agent_loop.sweep_conditions()`。**只做纪律不做预测**——买入即挂 `STOP_LOSS_PCT=-8%` 止损（规则），不挂「涨到X就追」（预测）。app 关闭期间无实时行情 → **用日K回溯补判**：`low ≤ 止损价` 即真触发过，按**触发价**成交（不按当日最优——日K无日内路径，乐观假设会系统性高估表现，是回测最常见的自欺）。同日止损止盈都触发时**止损优先**（保守）。实测触发日 2026-04-17 精确命中、自动撤单、自动记教训。
   - **启动即跑 + 双重门控**：`app._agent_boot()` 在启动后台线程里跑 `run_all()`。**非交易日门**(`news_store.is_trading_day`) + **每 agent 幂等门**(`already_ran` 查当日有无「复盘」记录) → 一天开三次 app 只跑一次（否则多花三份 API 钱、且同日三份矛盾决策会污染归因）。
@@ -178,7 +179,7 @@ Python 语法：`python3 -c "import ast; [ast.parse(open(f).read()) for f in [..
 - **backlog 已清空**，只剩**可选**后续（见 `plan/BACKLOG.md`，均未承诺）：美元指数/VIX 换源补齐（新浪外盘无此二者）、溯源推广到 daily/screen、5 档 template 文案做成 UI 可编辑。
 - launchd 定时任务需**用户在自己终端** `launchctl bootstrap` 安装（本环境无 `~/Library` 写权限）；见 README「自动抓取新闻库」。
 - 设计文档在 `plan/`（各特性 spec + 知识缓存架构总纲 + `BACKLOG.md`）。
-- **进行中：multi-agent 模拟交易 + 失败归因驱动的提示词进化**（`plan/2026-07-16-agent-evolution-design.md`）。一期(模板版本化)✅ / 二期(agent日循环+多账户)✅ / 三期(失败归因教训库)✅ / 四期(教训反哺5个AI)✅ / 五期 DebateDecider **代码已备好但默认不启用**（`decider='debate'` 可切）。**待用户浏览器验证**：🤖 Agent modal（存档增删/跑/看记录）。
+- **进行中：multi-agent 模拟交易 + 失败归因驱动的提示词进化**（`plan/2026-07-16-agent-evolution-design.md`）。一期(模板版本化)✅ / 二期(agent日循环+多账户)✅ / 三期(失败归因教训库)✅ / 四期(教训反哺5个AI)✅ / 五期 DebateDecider **代码已备好但默认不启用**（`decider='debate'` 可切）。**待用户浏览器验证**：🤖 Agent modal（存档增删/跑/看记录/选 decider）、持仓净盈亏显示。**板块统计不挂 launchd**——用户每交易日都开 app，`_universe_boot()` 已覆盖；非交易日本无数据可抓。**agent 也不挂定时**（用户：不开 app 就意味着那天不炒股）。
 - **踩坑备忘**：① 端口 **5000 被 macOS AirPlay 占**，本地起服务前关「隔空播放接收器」，或测试用 5001；② 涉及用户数据文件（`portfolio.json` 等）的测试**必须用临时副本**，别写真实数据；③ AI 类接口是推理模型，单次 30~90s，`curl` 用 `--max-time 200`；终端有代理时 `curl` 加 `--noproxy '*'`（python 脚本要 `os.environ.pop` 掉 `*_proxy`）。
 - **⚠️ 全市场池踩过的坑（改这块前必读）**：
   - **北交所号段 = 8xxxxx / 4xxxxx / 92xxxx**（920 为 2024 年起新号段）。`ds.market_prefix()` 里 **`92` 必须先于 `9` 判断**——9 开头的另一支是沪B（900xxx，仍属上海）。曾有 bug：920xxx 判成 `sh`、4xxxxx 判成 `sz`，导致北交所股票**行情/指标全取不到**（加进自选股会一片空白）。已修（2026-07-15），实测 `bj920000`/`bj430047` 有数据、`sh920000` 返回空。`universe_store.is_bj()` 与之等价，测试固化了「两者永远一致」的不变量。

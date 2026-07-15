@@ -1244,6 +1244,15 @@ def api_factors_rolling():
         _arg_int("window", 60))})
 
 
+@app.route("/api/factors/stops")
+def api_factor_stops():
+    """止损线网格回测：各档止损的平均收益/胜率/5%最差/触发率。?stocks=200&hold=20
+
+    判据不是「哪个赚最多」（那答案永远是不止损），而是「花多少收益把尾部压住」。
+    """
+    return jsonify(factor_lab.backtest_stops(_arg_int("stocks", 200), _arg_int("hold", 20)))
+
+
 @app.route("/api/factors/backtest", methods=["POST"])
 def api_factors_backtest():
     """重跑因子回测（299 只 × 600 日 ≈ 14s）。后台线程。"""

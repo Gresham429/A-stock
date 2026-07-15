@@ -361,3 +361,60 @@ def status() -> dict[str, Any]:
     return {"ready": n > 0, "ic_rows": n, "db_mb": db_mb, "keep_days": IC_KEEP_DAYS,
             "last_run": dict(last) if last else None,
             "note": "net20(资金)因数据源只给30天，未纳入回测"}
+
+
+# ── 止损参数回测（纪律参数也能验，只是问的问题不同） ───────────────────────
+STOP_GRID = (-5.0, -8.0, -10.0, -15.0, -20.0, None)   # None = 不止损
+
+
+def backtest_stops(n_stocks: int = 200, hold_days: int = 20, workers: int = 8) -> dict[str, Any]:
+    """止损线网格回测：历史上每个可能的建仓点，测各档止损线的最终收益。
+
+    **和因子回测问的问题不同**：因子问「什么能预测收益」，止损问「亏损时何时认输」。
+    止损是**纪律参数**（控制单笔最大亏损），不是预测参数——所以判据不是「哪个赚最多」，
+    而是「哪个在可接受的收益代价下，把尾部亏损压住」。只看均值会得出「别止损」的错论
+    （因为 A 股反弹多），但那忽略了**最差情况**和**心理承受**。
+
+    规则：第 t 日以收盘价建仓，之后 hold_days 内若任一日 low ≤ 止损价 → 按止损价出场；
+    否则持满以收盘价出场。**按止损价成交而非当日最优**（保守，不自欺）。
+    """
+    init()
+    codes = sample_codes(n_stocks)
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        series = dict(ex.map(_series_of, codes))
+    series = {c: k for c, k in series.items() if len(k) > WARMUP + hold_days + 5}
+    if not series:
+        return {"ok": False, "msg": "无有效日K"}
+    res: dict[Any, list[float]] = {s: [] for s in STOP_GRID}
+    for kl in series.values():
+        for t in range(WARMUP, len(kl) - hold_days):
+            entry = float(kl[t]["close"])
+            if entry <= 0:
+                continue
+            window = kl[t + 1: t + 1 + hold_days]
+            for stop in STOP_GRID:
+                if stop is None:
+                    res[stop].append((float(window[-1]["close"]) / entry - 1) * 100)
+                    continue
+                trig = entry * (1 + stop / 100)
+                hit = next((b for b in window if float(b["low"]) <= trig), None)
+                res[stop].append(stop if hit else (float(window[-1]["close"]) / entry - 1) * 100)
+    out = []
+    for stop, rs in res.items():
+        n = len(rs)
+        if not n:
+            continue
+        rs_sorted = sorted(rs)
+        mean = sum(rs) / n
+        out.append({
+            "stop": stop, "n": n,
+            "mean_ret": round(mean, 3),
+            "win_rate": round(100 * sum(1 for x in rs if x > 0) / n, 1),
+            "p05": round(rs_sorted[int(n * 0.05)], 2),      # 5% 最差情况 —— 止损真正管的是这个
+            "p50": round(rs_sorted[n // 2], 2),
+            "worst": round(rs_sorted[0], 2),
+            "stopped_pct": (round(100 * sum(1 for x in rs if stop is not None and abs(x - stop) < 1e-9) / n, 1)
+                            if stop is not None else 0.0),
+        })
+    return {"ok": True, "stocks": len(series), "hold_days": hold_days,
+            "samples": len(res[STOP_GRID[0]]), "grid": out}

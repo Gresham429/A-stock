@@ -4,14 +4,21 @@
 `paper_store` 撮合、`portfolio` 盈亏、AI 提示词三处共用此模块，避免各算各的。
 
 费率构成（2026-07 现行）：
-    佣金    双向，按成交额收，有**最低值**（多数券商 5 元）。券商间差异大、可议价。
+    佣金    双向，按成交额收。多数券商有**最低值**（常见 5 元），但**部分账户免最低**
+            （如国信金太阳万9免最低）。费率与是否免最低都因账户而异、可议价。
     印花税  **仅卖出**，千分之 0.5（2023-08-28 由千1 减半至千0.5）。国家收，不可议。
     过户费  双向，万分之 0.1（2022-04 起沪深统一）。不可议。
 
-**最低佣金是小资金的隐形杀手**：`佣金 = max(成交额 × 费率, 最低值)`，
-故存在一个分界点 `最低值 / 费率`，单笔低于它时实际费率被抬高。
-例：最低 5 元 + 万2.5 → 分界 2 万；最低 5 元 + 万9 → 分界 5555 元。
-低于分界点时**分笔买入会成倍放大佣金**（两笔各 5000 = 2×最低值，而合并一笔只收一次）。
+**有无最低佣金决定了能不能分批**，比费率本身更影响小资金：
+`佣金 = max(成交额 × 费率, 最低值)`，故存在分界点 `最低值 / 费率`，单笔低于它时实际费率被抬高，
+**分笔买入会成倍放大佣金**（4 笔各 2500 = 4×最低值，合并一笔只收一次）。
+免最低时佣金完全线性，**拆单零惩罚**，可自由分批控制风险。
+
+因此低费率不一定更省——取决于单笔金额：
+    单笔 2500 元：万9免最低 = 2.25 元  <  万2.5+最低5 = 5 元
+    单笔 1 万  ：万9免最低 = 9 元     >  万2.5+最低5 = 5 元
+    分界点 = 最低值 / 高费率（万9 + 最低5 → 5556 元）
+议价时**要同时争取低费率与免最低**，只降费率却带回最低值，对分批建仓反而更贵。
 """
 from __future__ import annotations
 
@@ -36,15 +43,21 @@ class FeeSchedule:
     transfer_rate: float = TRANSFER_RATE
 
     @property
+    def has_min(self) -> bool:
+        """是否有最低佣金。部分账户免最低（如万9免5元），此时拆单无额外成本。"""
+        return self.min_commission > 0
+
+    @property
     def min_amount_for_rate(self) -> float:
-        """佣金下限分界点：单笔低于此金额时，实付佣金被最低值抬高。"""
-        if self.commission_rate <= 0:
+        """佣金下限分界点：单笔低于此金额时实付佣金被最低值抬高。免最低时返回 0。"""
+        if self.commission_rate <= 0 or not self.has_min:
             return 0.0
         return round(self.min_commission / self.commission_rate, 0)
 
     def describe(self) -> str:
         """人读的一行摘要（供 UI 与 AI 提示词）。"""
-        return (f"佣金{self.commission_rate * 10000:.3g}‱(最低{self.min_commission:.0f}元)"
+        floor = f"(最低{self.min_commission:.0f}元)" if self.has_min else "(免最低)"
+        return (f"佣金{self.commission_rate * 10000:.3g}‱{floor}"
                 f" + 卖出印花{self.stamp_rate * 1000:.3g}‰ + 过户{self.transfer_rate * 10000:.3g}‱")
 
 
@@ -113,7 +126,11 @@ def for_ai(sched: FeeSchedule, capital: float) -> str:
              f"- 以当前可用资金 {capital:.0f} 元单笔满仓计：买入费 {rt['buy']:.2f} 元，"
              f"卖出费 {rt['sell']:.2f} 元，**一轮往返 {rt['total']:.2f} 元 = {rt['pct']:.3f}%**",
              f"- **保本涨幅 {rt['pct']:.3f}%**：买入后涨幅不超过它就是亏损，不要建议博取小于此的价差"]
-    if one["hit_min"]:
+    if not sched.has_min:
+        lines.append("- 该账户**免最低佣金**：佣金按成交额线性收取，"
+                     "**分批建仓/减仓不产生额外佣金**（拆 4 笔与一次买入佣金相同），"
+                     "故可自由分批控制风险，不必为省佣金而一次性满仓")
+    elif one["hit_min"]:
         lines.append(f"- ⚠️ 该笔触发最低佣金 {sched.min_commission:.0f} 元"
                      f"（单笔低于 {sched.min_amount_for_rate:.0f} 元时实际费率被抬高）"
                      f"，**分笔买入会成倍放大佣金**，建议一次建仓而非拆单")

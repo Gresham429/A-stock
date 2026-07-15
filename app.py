@@ -495,7 +495,10 @@ def portfolio_list():
 
 @app.route("/api/portfolio/add", methods=["POST"])
 def portfolio_add():
-    """记录持仓：{code, shares, cost_price, buy_date?, note?}。"""
+    """记录一笔买入：{code, shares, cost_price, buy_date?, note?}。
+
+    同代码**追加一笔 lot**（不覆盖）→ 总股数累加、成本加权平均；当日盈亏按笔算基准。
+    """
     body = request.json or {}
     code = ds.normalize(body.get("code", ""))
     if not code.isdigit() or len(code) != 6:

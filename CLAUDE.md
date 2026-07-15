@@ -31,7 +31,7 @@ python app.py                        # http://127.0.0.1:5000
 | `provenance.py` | AI 建议溯源与依据校验（仅 entry/position）：闭集信号字典 `SIGNAL_DEFS`（单一事实源）+ `build_provenance`（A 确定性溯源）+ `verify_basis`（B 校验 AI 引用的信号名/规则ID→✓可核对/⚠对不上/·名对值缺） |
 | `paper_store.py` | 模拟委托交易（SQLite `data/paper.db`，多存档，按真实行情+A股规则[整手/涨跌停/T+1/手续费]撮合） |
 | `websearch.py` | 博查联网搜索（B 方案，可选）+ key 健康检测/到期提醒 |
-| `portfolio.py` | 持仓记录 + 总盈亏 + 当日盈亏（**按投资画像隔离** `portfolio.json={by_profile:{pid:[...]}}`，旧格式自动迁移到当前画像；内部按 `profile_store` active 画像 scope） |
+| `portfolio.py` | 持仓 + 总盈亏 + 当日盈亏。**按投资画像隔离**（`portfolio.json={by_profile:{pid:[...]}}`，内部按 `profile_store` active 画像 scope）+ **多笔 lot 模型**（`{code, lots:[{shares,cost,date}], note}`：同股 `add` **追加一笔**不覆盖 → 总股数Σ、成本加权平均；**当日盈亏逐笔**：当天买入的用「该笔买入价」作基准、之前持有的才用昨收）。旧格式（裸列表/扁平单笔）**只读时内存迁移**、写入时落盘 |
 | `profile_store.py` | 本地多档投资画像（SQLite `data/profiles.db`）：每档=现金本金+风险偏好，一个 active；**5 档 TIERS**（微/小/中/大/超大，按总资产=现金+持仓 落档）+ 每档玩法 template + `block_for_ai` 注入块 |
 | `universe.py` | 全市场候选池（两级：10 一级板块 → 48 二级细分 → 170 龙头；`codes_of(focus)`/`sector_of`→(一级,二级)/`taxonomy()`） |
 | `store.py` | 自选股持久化 |

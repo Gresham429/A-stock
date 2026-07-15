@@ -15,6 +15,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+import fees
 import profile_store
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,45 @@ def _pid() -> str:
     """当前 active 画像 id（字符串键）。无画像时用 '0' 兜底。"""
     prof = profile_store.get_active()
     return str(prof["id"]) if prof else "0"
+
+
+def _adjust_cash(delta: float) -> None:
+    """按 delta 调整 active 画像的可用现金（买入为负、卖出为正），下限 0。
+
+    画像的 cash 语义是**可用现金**：买入扣、卖出加。此前买入不扣，导致
+    `_total_assets()` 把买股票的钱算两次（既在持仓市值、又还在现金里），
+    总资产虚增、分级可能错档、AI 拿到的「可用资金」也是假的。
+    """
+    prof = profile_store.get_active()
+    if not prof:
+        return
+    new_cash = max(float(prof.get("cash") or 0) + delta, 0.0)
+    profile_store.update(int(prof["id"]), cash=round(new_cash, 2))
+    logger.info("画像 %s 现金 %.2f → %.2f (%+.2f)",
+                prof.get("name"), prof.get("cash") or 0, new_cash, delta)
+
+
+def cash_reconcile(pid: int | None = None) -> dict[str, Any]:
+    """对账：按「现金应 = 当前现金 − 未扣减的持仓成本」给出差额，**不落盘**。
+
+    历史持仓是在「买入不扣现金」的旧逻辑下记的，现金偏高。此函数只算差额供确认，
+    实际修正由调用方显式执行（涉及用户资金，不做静默改写）。
+    """
+    prof = profile_store.get_active() if pid is None else profile_store.get(pid)
+    if not prof:
+        return {"ok": False}
+    hs = _read_raw().get(str(prof["id"]), [])
+    sched = profile_store.fee_schedule(int(prof["id"]))
+    spent = 0.0
+    for h in hs:
+        for lot in h.get("lots", []) or []:
+            amt = float(lot.get("shares") or 0) * float(lot.get("cost") or 0)
+            spent += amt + fees.total("buy", amt, sched)
+    cash = float(prof.get("cash") or 0)
+    return {"ok": True, "profile": prof.get("name"), "pid": int(prof["id"]),
+            "cash_now": round(cash, 2), "holdings_cost": round(spent, 2),
+            "cash_should_be": round(max(cash - spent, 0.0), 2),
+            "delta": round(-min(spent, cash), 2), "holdings": len(hs)}
 
 
 def _today() -> str:
@@ -84,7 +124,13 @@ def load() -> list[dict[str, Any]]:
 
 def add(code: str, shares: float, cost_price: float,
         buy_date: str = "", note: str = "") -> list[dict[str, Any]]:
-    """加仓：当前画像下同代码**追加一笔 lot**（不覆盖旧笔）；新代码则建仓。"""
+    """加仓：当前画像下同代码**追加一笔 lot**（不覆盖旧笔）；新代码则建仓。
+
+    同时按「成交额 + 买入手续费」扣减画像可用现金——现金语义是可用现金，
+    不扣会让总资产把这笔钱算两次。
+    """
+    amount = float(shares) * float(cost_price)
+    _adjust_cash(-(amount + fees.total("buy", amount, profile_store.fee_schedule())))
     allp = _read_raw()
     hs = allp.get(_pid(), [])
     lot = {"shares": float(shares), "cost": float(cost_price), "date": buy_date or _today()}
@@ -101,11 +147,20 @@ def add(code: str, shares: float, cost_price: float,
     return load()
 
 
-def remove(code: str) -> list[dict[str, Any]]:
-    """清仓：删除当前画像下该代码的全部 lot。"""
+def remove(code: str, sell_price: float | None = None) -> list[dict[str, Any]]:
+    """清仓：删除当前画像下该代码的全部 lot；给了 sell_price 则把卖出净收入加回画像现金。
+
+    sell_price 为 None 时只删持仓、不动现金（用于「记错了想删掉」而非真的卖出）。
+    """
     allp = _read_raw()
-    allp[_pid()] = [h for h in allp.get(_pid(), []) if h.get("code") != code]
+    hs = allp.get(_pid(), [])
+    sold = next((h for h in hs if h.get("code") == code), None)
+    allp[_pid()] = [h for h in hs if h.get("code") != code]
     _write_all(allp)
+    if sold is not None and sell_price:
+        shares = sum(float(l.get("shares") or 0) for l in sold.get("lots", []))
+        amount = shares * float(sell_price)
+        _adjust_cash(+amount - fees.total("sell", amount, profile_store.fee_schedule()))
     return load()
 
 

@@ -586,8 +586,9 @@ def _macro_block() -> str:
         d = hit["result"].get("digest") or {}
     else:
         news = ds.eastmoney_global_news(30) + ds.cls_telegraph(30)
+        markets = ds.global_markets()      # 外围数值：油价/黄金/铜/美股三大指数
         try:
-            d = llm.macro_digest(news)
+            d = llm.macro_digest(news, markets)
         except llm.LLMError:
             return ""
         ai_cache.put("macro", {}, {"digest": d}, llm.FLASH_MODEL)

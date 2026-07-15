@@ -523,8 +523,39 @@ def portfolio_add():
 
 @app.route("/api/portfolio/remove", methods=["POST"])
 def portfolio_remove():
-    code = ds.normalize((request.json or {}).get("code", ""))
-    return jsonify({"ok": True, "holdings": portfolio.remove(code)})
+    """清仓。body 带 sell_price 则按「卖出净收入」加回画像现金；不带则只删记录、不动现金
+    （用于「记错了想删掉」）。sell_price='market' 用当前市价。
+    """
+    b = request.json or {}
+    code = ds.normalize(b.get("code", ""))
+    raw = b.get("sell_price")
+    price: float | None = None
+    if raw == "market":
+        price = (ds.tencent_quote([code]).get(code, {}) or {}).get("price") or None
+    elif raw not in (None, ""):
+        try:
+            price = float(raw)
+        except (TypeError, ValueError):
+            price = None
+    return jsonify({"ok": True, "holdings": portfolio.remove(code, price),
+                    "sold_at": price})
+
+
+@app.route("/api/portfolio/reconcile")
+def portfolio_reconcile_check():
+    """对账预览：历史持仓是在「买入不扣现金」的旧逻辑下记的，现金偏高多少。只算不改。"""
+    return jsonify(portfolio.cash_reconcile())
+
+
+@app.route("/api/portfolio/reconcile", methods=["POST"])
+def portfolio_reconcile_apply():
+    """执行对账：把画像现金减去未扣减的持仓成本。涉及资金，需显式调用。"""
+    r = portfolio.cash_reconcile()
+    if not r.get("ok") or not r.get("delta"):
+        return jsonify({**r, "applied": False})
+    profile_store.update(r["pid"], cash=r["cash_should_be"])
+    logger.info("画像 %s 对账: 现金 %.2f → %.2f", r["profile"], r["cash_now"], r["cash_should_be"])
+    return jsonify({**r, "applied": True})
 
 
 # ── DeepSeek 推荐 ─────────────────────────────────────────────────────────

@@ -188,14 +188,33 @@ def _yi(v: float) -> str:
     return f"{v / 1e4:.1f}万" if abs(v) >= 1e4 else f"{v:.0f}元"
 
 
-def block_for_ai(cash: float, total_assets: float, holdings_n: int = 0) -> str:
-    """拼给 AI 的【本金玩法档】文本块（前置到 web_context 注入所有分析）。"""
+# 风险偏好 → 给 AI 的具体行为指令。**别只给标签**——「激进」两个字 AI 不知道该怎么做，
+# 得说清它意味着仓位/止损/换手上具体怎么变。
+RISK_GUIDE: dict[str, str] = {
+    "稳健": "偏保守：宁可错过不可做错；仓位取该档上限的**下半区**；只做形态确定性高的；"
+            "同等条件下优先低波动标的；宁可空仓等待，不为「有所动作」而交易。",
+    "均衡": "按该档打法的中位执行：仓位取档位上限的中段；确定性与机会兼顾。",
+    "激进": "偏进攻：可取该档仓位上限的**上半区**；容忍更高波动以换取弹性；"
+            "但**止损纪律不放松**——激进指的是仓位与标的选择，不是抗单。",
+}
+
+
+def block_for_ai(cash: float, total_assets: float, holdings_n: int = 0,
+                 risk_pref: str = "均衡") -> str:
+    """拼给 AI 的【本金玩法档】文本块（前置到 web_context 注入所有分析）。
+
+    risk_pref 此前**存了但从未进过提示词**（`llm.py` 里 0 处）——用户在画像里选
+    稳健/均衡/激进，AI 完全看不到，等于死字段。现按 `RISK_GUIDE` 译成具体行为指令注入。
+    """
     tier = tier_of(total_assets)
+    guide = RISK_GUIDE.get(risk_pref or "均衡", RISK_GUIDE["均衡"])
     return (
         f"\n【本金玩法档·据总资产动态分级】\n"
         f"总资产≈{_yi(total_assets)}（现金{_yi(cash)} + 持仓{holdings_n}只）→ 档位：{tier['name']}\n"
         f"该档打法：持仓{tier['size']}、单标的仓位{tier['max_pos']}、标的池「{tier['pool']}」、"
         f"周期{tier['horizon']}、可用打法「{tier['plays']}」、换手{tier['churn']}、"
         f"单笔风险{tier['risk']}、现金管理{tier['cash']}。\n"
-        f"核心目标=期望为正：{tier['anchor']}。请按此档打法给**组合级**建议"
+        f"核心目标=期望为正：{tier['anchor']}。\n"
+        f"风险偏好：**{risk_pref or '均衡'}** —— {guide}\n"
+        f"请按此档打法给**组合级**建议"
         f"（该加/该减/是否分散、单标的是否超仓位上限、是否符合本档标的池与周期）。\n")

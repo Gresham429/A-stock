@@ -619,7 +619,8 @@ def _tier_block() -> str:
     if not prof:
         return ""
     total, hn = _total_assets()
-    return profile_store.block_for_ai(prof.get("cash") or 0, total, hn)
+    return profile_store.block_for_ai(prof.get("cash") or 0, total, hn,
+                                      prof.get("risk_pref", "均衡"))
 
 
 def _record_basis_stats(basis: list[dict] | None) -> None:
@@ -661,7 +662,8 @@ def _agent_blocks(ag: dict, cash: float, total: float, n_pos: int) -> str:
     拆法：**档位跟这个账户的钱走**（agent 的 paper 账户总资产），
     **费率跟券商走**（agent 绑的画像——都是同一个券商，故共用合理）。
     """
-    tier = profile_store.block_for_ai(cash, total, n_pos)
+    prof = profile_store.get(ag.get("profile_id")) or {}
+    tier = profile_store.block_for_ai(cash, total, n_pos, prof.get("risk_pref", "均衡"))
     try:
         sched = profile_store.fee_schedule(ag.get("profile_id"))
         fee = fees.for_ai(sched, cash or 10000.0) + "\n\n"

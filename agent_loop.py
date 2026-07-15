@@ -436,9 +436,16 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
             "ms": int((time.time() - t0) * 1000)}
 
 
-def run_all(dry_run: bool = False, blocks: str = "", force: bool = False) -> list[dict[str, Any]]:
-    """blocks 留空则每个 agent 各自构建（推荐——多档位实验必须如此）。"""
-    """跑所有启用的 agent（多档位 / 同档多账户并行实验）。串行——LLM 调用本就是瓶颈。
+def run_all(dry_run: bool = False, blocks: str = "", force: bool = False,
+            workers: int = 3) -> list[dict[str, Any]]:
+    """跑所有启用的 agent（多档位 / 同档多账户并行实验）。
+
+    blocks 留空则每个 agent 各自构建（推荐——多档位实验必须如此）。
+
+    **并行 workers=3**：LLM 调用是 I/O 阻塞，串行 12 个 agent 要 8 分钟。
+    不设更高是因为：① 每个 agent 还会打新浪/腾讯取行情，并发太高会被限流；
+    ② DeepSeek 侧的并发上限未知，宁可保守。各 agent 的 paper 账户互不相干，
+    SQLite 走 WAL 之外的写入由各 store 的 _LOCK 串行化，故并行是安全的。
 
     **非交易日直接跳过**：周末/节假日没有行情，跑了只会拿昨收当今价、产生假决策。
     """
@@ -446,11 +453,20 @@ def run_all(dry_run: bool = False, blocks: str = "", force: bool = False) -> lis
     if not force and not news_store.is_trading_day():
         logger.info("非交易日，agent 日循环跳过")
         return [{"ok": True, "skipped": "非交易日"}]
-    out = []
-    for ag in agent_store.list_agents(active_only=True):
+    agents = agent_store.list_agents(active_only=True)
+    if not agents:
+        return []
+
+    def one(ag: dict[str, Any]) -> dict[str, Any]:
         try:
-            out.append(run_day(ag["id"], dry_run=dry_run, blocks=blocks, force=force))
+            return run_day(ag["id"], dry_run=dry_run, blocks=blocks, force=force)
         except Exception as e:  # noqa: BLE001 单个 agent 崩了不该拖垮整批
             logger.exception("agent %s 日循环失败", ag["name"])
-            out.append({"ok": False, "agent": ag["name"], "msg": str(e)})
+            return {"ok": False, "agent": ag["name"], "msg": str(e)}
+
+    from concurrent.futures import ThreadPoolExecutor
+    t0 = time.time()
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+        out = list(ex.map(one, agents))
+    logger.info("agent 日循环完成：%d 个，%.0fs（并行 %d）", len(out), time.time() - t0, workers)
     return out

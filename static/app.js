@@ -1023,6 +1023,50 @@ async function delRule(id){ if(!confirm('删除这条规则？'))return; await f
 
 /* ── 模拟委托交易（多存档，按真实行情+A股规则撮合） ── */
 let PAPER_ACCTS=[], PAPER_SEL=null;
+/* ── 投资画像（多档本金 → 总资产分级玩法） ── */
+function _yiCash(v){ v=+v||0; return Math.abs(v)>=1e4?(v/1e4).toFixed(1)+'万':fmtInt(v)+'元'; }
+function openProfiles(){ loadProfiles(); document.getElementById('profileModal').classList.add('open'); }
+function closeProfiles(){ document.getElementById('profileModal').classList.remove('open'); }
+async function loadProfiles(){
+  let j; try{ j=await (await fetch('/api/profiles')).json(); }catch(e){ return; }
+  const t=j.tier||{}, a=j.active||{};
+  document.getElementById('profActive').innerHTML=
+     `<div class="pa-hd">当前 <b>${esc(a.name||'—')}</b> · 现金 ${_yiCash(a.cash)} · 持仓 ${j.holdings_n||0} 只 → <b>总资产 ${_yiCash(j.total_assets)}</b></div>`
+    +`<div class="pa-tier">档位 <span class="tier-badge">${esc(t.name||'')}</span> <span class="muted">${esc(t.anchor||'')}</span></div>`
+    +`<div class="pa-play">持仓${esc(t.size||'')} · 单标的${esc(t.max_pos||'')} · 「${esc(t.pool||'')}」 · ${esc(t.horizon||'')} · 单笔风险${esc(t.risk||'')} · 现金${esc(t.cash||'')}</div>`;
+  const rs=document.getElementById('pf_risk');
+  if(rs && !rs.options.length) rs.innerHTML=(j.risk_prefs||[]).map(r=>`<option>${r}</option>`).join('');
+  document.getElementById('profList').innerHTML=(j.profiles||[]).map(p=>{
+    const on=p.id===j.active_id;
+    return `<div class="prof-row${on?' on':''}">
+      <span class="pf-nm">${esc(p.name)}${on?' <span class="rule-scen">当前</span>':''}</span>
+      <span class="pf-cash">现金 ${_yiCash(p.cash)} · ${esc(p.risk_pref||'')}</span>
+      <span class="pf-act">${on?'':`<button class="btn" onclick="activateProfile(${p.id})">激活</button>`}
+        <button class="btn" onclick="editProfileCash(${p.id},${p.cash})">改本金</button>
+        ${(j.profiles.length>1)?`<button class="del" onclick="deleteProfile(${p.id})">✕</button>`:''}</span></div>`;
+  }).join('');
+  document.getElementById('profTiers').innerHTML=(j.tiers||[]).map(tr=>{
+    const cur=tr.name===t.name, hi=(tr.hi==null)?'∞':(tr.hi/1e4)+'万';
+    return `<div class="tier-row${cur?' on':''}"><b>${esc(tr.name)}</b> <span class="muted">${tr.lo/1e4}万–${hi}</span> · ${esc(tr.size)} · 单标的${esc(tr.max_pos)} · ${esc(tr.pool)} · <span class="muted">${esc(tr.anchor)}</span></div>`;
+  }).join('');
+}
+async function createProfile(){
+  const name=document.getElementById('pf_name').value.trim();
+  const cash=+document.getElementById('pf_cash').value;
+  if(!cash){ alert('请填现金本金(元)'); return; }
+  await fetch('/api/profiles',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({name,cash,risk_pref:document.getElementById('pf_risk').value,activate:true})});
+  document.getElementById('pf_name').value=''; document.getElementById('pf_cash').value='';
+  loadProfiles(); loadPortfolio();   // 新画像持仓为空 → 刷新持仓面板
+}
+async function activateProfile(id){ await fetch('/api/profiles/active/'+id,{method:'POST'}); loadProfiles(); loadPortfolio(); }
+async function editProfileCash(id,cur){
+  const v=prompt('新的现金本金(元)：',cur); if(v===null) return;
+  const cash=+v; if(isNaN(cash)) return;
+  await fetch('/api/profiles/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({cash})});
+  loadProfiles();
+}
+async function deleteProfile(id){ if(!confirm('删除这个画像？')) return; await fetch('/api/profiles/'+id,{method:'DELETE'}); loadProfiles(); }
 function openPaper(){ loadPaperAccounts(); document.getElementById('paperModal').classList.add('open'); }
 function closePaper(){ document.getElementById('paperModal').classList.remove('open'); }
 async function loadPaperAccounts(){
@@ -1092,7 +1136,7 @@ async function placeOrder(){
   else alert('未成交：'+(j.msg||''));
 }
 
-document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeDrawer();closeGloss();closeRec();closeNews();closeNotes();closeRules();closePaper();}});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeDrawer();closeGloss();closeRec();closeNews();closeNotes();closeRules();closePaper();closeProfiles();}});
 initTooltips();
 loadConfig();
 load();

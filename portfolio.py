@@ -1,7 +1,8 @@
-"""持仓记录与盈亏计算：读写 portfolio.json。
+"""持仓记录与盈亏计算：读写 portfolio.json，**按投资画像(profile)隔离**（方案 B）。
 
-每条持仓: {code, shares, cost_price, buy_date, note}
-盈亏用实时价现算，不落库（避免陈旧）。
+每个画像各记各的持仓，互不干扰。存储格式：{"by_profile": {profile_id(str): [holdings]}}。
+切换 active 画像后，load()/add()/remove() 自动作用于该画像的持仓。
+每条持仓: {code, shares, cost_price, buy_date, note}；盈亏用实时价现算，不落库（避免陈旧）。
 """
 from __future__ import annotations
 
@@ -10,32 +11,58 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import profile_store
+
 logger = logging.getLogger(__name__)
 
 PORTFOLIO_PATH = Path(__file__).parent / "portfolio.json"
 
 
-def load() -> list[dict[str, Any]]:
-    """读取全部持仓记录。"""
+def _pid() -> str:
+    """当前 active 画像 id（字符串键）。无画像时用 '0' 兜底。"""
+    prof = profile_store.get_active()
+    return str(prof["id"]) if prof else "0"
+
+
+def _read_all() -> dict[str, list]:
+    """读整份 {pid: [holdings]}；自动迁移旧格式（裸列表 / {holdings:[...]}）到当前画像。"""
     if not PORTFOLIO_PATH.exists():
-        return []
+        return {}
     try:
         data = json.loads(PORTFOLIO_PATH.read_text(encoding="utf-8"))
-        return data.get("holdings", []) if isinstance(data, dict) else data
     except (json.JSONDecodeError, OSError) as e:
         logger.error("读取 portfolio 失败: %s", e)
-        return []
+        return {}
+    if isinstance(data, dict) and "by_profile" in data:
+        return data["by_profile"] or {}
+    # 旧格式（裸列表 或 {"holdings":[...]}）→ 整份历史持仓归到当前 active 画像，并落成新格式。
+    old = data.get("holdings", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+    migrated = {_pid(): old} if old else {}
+    if migrated:
+        _write_all(migrated)
+        logger.info("portfolio 旧格式迁移到画像 %s（%d 只）", _pid(), len(old))
+    return migrated
+
+
+def _write_all(by_pid: dict[str, list]) -> None:
+    PORTFOLIO_PATH.write_text(
+        json.dumps({"by_profile": by_pid}, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load() -> list[dict[str, Any]]:
+    """当前画像的全部持仓记录。"""
+    return _read_all().get(_pid(), [])
 
 
 def _save(holdings: list[dict[str, Any]]) -> None:
-    PORTFOLIO_PATH.write_text(
-        json.dumps({"holdings": holdings}, ensure_ascii=False, indent=2),
-        encoding="utf-8")
+    allp = _read_all()
+    allp[_pid()] = holdings
+    _write_all(allp)
 
 
 def add(code: str, shares: float, cost_price: float,
         buy_date: str = "", note: str = "") -> list[dict[str, Any]]:
-    """新增/覆盖一只持仓（同代码则更新）。"""
+    """当前画像新增/覆盖一只持仓（同代码则更新）。"""
     holdings = [h for h in load() if h.get("code") != code]
     holdings.append({
         "code": code,
@@ -49,14 +76,14 @@ def add(code: str, shares: float, cost_price: float,
 
 
 def remove(code: str) -> list[dict[str, Any]]:
-    """卖出/删除一只持仓。"""
+    """当前画像卖出/删除一只持仓。"""
     holdings = [h for h in load() if h.get("code") != code]
     _save(holdings)
     return holdings
 
 
 def codes() -> list[str]:
-    """当前持仓代码列表。"""
+    """当前画像持仓代码列表。"""
     return [h["code"] for h in load() if h.get("code")]
 
 

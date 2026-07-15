@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
@@ -871,18 +872,57 @@ _SCREEN_CAP_TOTAL = 36  # 喂给 LLM 的候选总量上限（控 token 与时延
 _PRESCREEN = 600        # 全市场未指定板块时，均衡采样前先按流通市值预筛到这么多只
 
 
+_PA_RANK_MAX = 200   # 板块内 ≤ 该只数时，对全部成分股算形态再排序（超过则退回市值预筛）
+_METRIC_TTL = 900    # 形态指标进程内缓存秒数（同板块反复选股不重复取数）
+_metric_cache: dict[str, tuple[float, dict]] = {}
+_EMPTY_METRICS = {"vol": None, "range_pos": None, "cum20": None,
+                  "net5": None, "net20": None, "series": []}
+
+
 def _safe_metrics(code: str) -> dict:
-    """sina_metrics 的兜底包装：单只异常不拖垮整批。
+    """sina_metrics 的兜底包装 + 进程内 TTL 缓存：单只异常不拖垮整批。
 
     全市场池数据质量参差（0 收盘价、空字段、退市残留），executor.map 里任一只抛异常
     都会让整个选股 500。指标缺失退化为 None，AI 侧本就按缺失处理。
     """
+    hit = _metric_cache.get(code)
+    if hit and time.time() - hit[0] < _METRIC_TTL:
+        return hit[1]
     try:
-        return ds.sina_metrics(code)
+        m = ds.sina_metrics(code)
     except Exception as e:  # noqa: BLE001 兜底：宁可该股无指标，不可整批失败
         logger.warning("指标计算失败 %s（跳过该股指标）: %s", code, e)
-        return {"vol": None, "range_pos": None, "cum20": None,
-                "net5": None, "net20": None, "series": []}
+        return dict(_EMPTY_METRICS)
+    _metric_cache[code] = (time.time(), m)
+    return m
+
+
+def _pa_score(m: dict) -> float | None:
+    """形态初筛打分（0–100）。None = 形态不可分析，该股出局。
+
+    这是**粗筛**，不是买卖判断——它只决定哪些股值得占用送进 AI 的 36 个名额，
+    真正的 PA 判断由 AI 依 rules_store 的规则库做。
+
+    权重是启发式先验（非回测得出），按「波段 + 波动型」取向设定，四项各 25 分：
+      可分析性  vol 为 None 直接出局 —— 数据不足 60 日者（次新、长期停牌）在此自然剔除
+      波动      年化波动率落在 30–90% 得满分，过低是死水、过高难控风险
+      资金      主力 20 日净流入为正者得分，按流入额饱和到 25 分
+      动量      20 日涨幅 0–30% 区间得分，已翻倍的追高股扣分
+      位置      20 日区间位置 30–70 居中得分，避免追顶与接刀
+    """
+    vol = m.get("vol")
+    if vol is None:  # 形态算不出来 -> 不进候选（次新/停牌/数据缺口）
+        return None
+    s = 25.0 if 30 <= vol <= 90 else (12.0 if 15 <= vol < 30 or 90 < vol <= 130 else 0.0)
+    net20 = m.get("net20") or 0
+    s += min(max(net20, 0) / 2.0, 1.0) * 25 if net20 > 0 else 0.0
+    cum20 = m.get("cum20")
+    if cum20 is not None:
+        s += 25.0 if 0 <= cum20 <= 30 else (12.0 if -15 <= cum20 < 0 else 0.0)
+    rp = m.get("range_pos")
+    if rp is not None:
+        s += 25.0 if 30 <= rp <= 70 else (12.0 if 15 <= rp < 30 or 70 < rp <= 85 else 0.0)
+    return round(s, 1)
 
 
 def _balanced_pick(codes: list[str], cap_total: int, cap_per_sub: int,
@@ -932,29 +972,52 @@ def _screen_rows(capital: float, focus: str = "") -> list[dict]:
     # 先按 1 手成本可负担过滤（资金太小买不起任何 1 手则退回全池给参考）
     affordable = [c for c in codes if quotes.get(c, {}).get("lot_cost", 9e9) <= capital]
     pool = affordable or codes
-    # 全市场（未指定板块）时先按流通市值预筛：均衡采样是按池内顺序取的，
-    # 5000 只全池若不预筛，取到的是各板块里代码号最小的股而非龙头，扩池反而选出垃圾。
-    if not focus and len(pool) > _PRESCREEN:
-        pool = sorted(pool, key=lambda c: quotes.get(c, {}).get("float_mcap_yi", 0),
-                      reverse=True)[:_PRESCREEN]
     smap = universe_store.sectors_map(pool)  # 批量查板块，避免逐只 DB 往返
-    # 侧重某个细分/概念时放宽单细分配额（否则跨一级/全市场按 3 只/细分均衡）
     subs_all = {s for subs in universe_store.taxonomy().values() for s in subs}
-    cap_per_sub = 6 if focus and focus in subs_all else 3
-    picked = _balanced_pick(pool, _SCREEN_CAP_TOTAL, cap_per_sub, smap)
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        metrics_list = list(executor.map(_safe_metrics, picked))
+    # 池子够小（关注某板块，主路径）-> 对全部成分股算形态再按分排序，形态真正参与筛选。
+    # 池子过大（全市场）-> 退回流通市值预筛 + 均衡采样：均衡采样按池内顺序取，
+    # 5000 只不预筛会取到各板块代码号最小的股而非龙头，扩池反成选垃圾。
+    if focus and len(pool) <= _PA_RANK_MAX:
+        metrics = _metrics_of(pool)
+        scored = [(c, metrics[c], _pa_score(metrics[c])) for c in pool]
+        keep = [(c, m, s) for c, m, s in scored if s is not None]
+        keep.sort(key=lambda x: x[2], reverse=True)
+        chosen = keep[:_SCREEN_CAP_TOTAL]
+        logger.info("形态初筛 focus=%s: 池 %d -> 可分析 %d -> 取前 %d",
+                    focus, len(pool), len(keep), len(chosen))
+        picked = [c for c, _, _ in chosen]
+        mmap = {c: m for c, m, _ in chosen}
+        score_map = {c: s for c, _, s in chosen}
+    else:
+        if not focus and len(pool) > _PRESCREEN:
+            pool = sorted(pool, key=lambda c: quotes.get(c, {}).get("float_mcap_yi", 0),
+                          reverse=True)[:_PRESCREEN]
+            smap = universe_store.sectors_map(pool)
+        cap_per_sub = 6 if focus and focus in subs_all else 3
+        picked = _balanced_pick(pool, _SCREEN_CAP_TOTAL, cap_per_sub, smap)
+        mmap = _metrics_of(picked)
+        score_map = {c: _pa_score(mmap[c]) for c in picked}
     rows = []
-    for c, m in zip(picked, metrics_list):
-        q = quotes.get(c, {})
+    for c in picked:
+        q, m = quotes.get(c, {}), mmap.get(c, _EMPTY_METRICS)
         primary, sub = smap.get(c) or universe_store.sector_of(c)
         rows.append({"code": c, "name": q.get("name", c),
                      "primary": primary, "sub": sub,
                      "price": q.get("price"), "pe_ttm": q.get("pe_ttm"), "pb": q.get("pb"),
                      "vol": m.get("vol"), "cum20": m.get("cum20"),
                      "range_pos": m.get("range_pos"), "net20": m.get("net20"),
+                     "pa_score": score_map.get(c),
+                     "turnover": q.get("turnover"),
                      "lot_cost": q.get("lot_cost")})
     return rows
+
+
+def _metrics_of(codes: list[str]) -> dict[str, dict]:
+    """并发拉一批股票的形态指标（带进程内 TTL 缓存）。"""
+    if not codes:
+        return {}
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        return dict(zip(codes, executor.map(_safe_metrics, codes)))
 
 
 def _ai_web_context(scope: str, code: str = "", name: str = "") -> str:

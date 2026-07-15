@@ -85,7 +85,7 @@ def api_config():
                     "model": config.DEEPSEEK_MODEL if config.llm_enabled() else None,
                     "news_augment": True,
                     "web_search": config.bocha_enabled(),
-                    "taxonomy": universe.taxonomy()})
+                    "taxonomy": universe_store.taxonomy()})
 
 
 @app.route("/api/websearch/status")
@@ -868,13 +868,34 @@ def _vol_hist(kl: list[dict]) -> dict:
 
 
 _SCREEN_CAP_TOTAL = 36  # 喂给 LLM 的候选总量上限（控 token 与时延）
+_PRESCREEN = 600        # 全市场未指定板块时，均衡采样前先按流通市值预筛到这么多只
 
 
-def _balanced_pick(codes: list[str], cap_total: int, cap_per_sub: int) -> list[str]:
-    """跨一级板块均衡采样：按一级轮询取，每个二级细分最多 cap_per_sub 只，总量 ≤ cap_total。"""
+def _safe_metrics(code: str) -> dict:
+    """sina_metrics 的兜底包装：单只异常不拖垮整批。
+
+    全市场池数据质量参差（0 收盘价、空字段、退市残留），executor.map 里任一只抛异常
+    都会让整个选股 500。指标缺失退化为 None，AI 侧本就按缺失处理。
+    """
+    try:
+        return ds.sina_metrics(code)
+    except Exception as e:  # noqa: BLE001 兜底：宁可该股无指标，不可整批失败
+        logger.warning("指标计算失败 %s（跳过该股指标）: %s", code, e)
+        return {"vol": None, "range_pos": None, "cum20": None,
+                "net5": None, "net20": None, "series": []}
+
+
+def _balanced_pick(codes: list[str], cap_total: int, cap_per_sub: int,
+                   smap: dict[str, tuple[str, str]] | None = None) -> list[str]:
+    """跨一级板块均衡采样：按一级轮询取，每个细分最多 cap_per_sub 只，总量 ≤ cap_total。
+
+    smap 为批量板块映射（全市场池 ~5000 只逐只查 DB 会退化，必须批量传入）；
+    不传则回退到手工池的内存查询，保持旧行为。
+    """
+    look = (lambda c: smap[c]) if smap else universe.sector_of
     by_primary: dict[str, list[str]] = {}
     for c in codes:
-        primary, _ = universe.sector_of(c)
+        primary, _ = look(c)
         by_primary.setdefault(primary, []).append(c)
     queues = list(by_primary.values())
     cursor = [0] * len(queues)
@@ -887,7 +908,7 @@ def _balanced_pick(codes: list[str], cap_total: int, cap_per_sub: int) -> list[s
             while cursor[qi] < len(q):
                 c = q[cursor[qi]]
                 cursor[qi] += 1
-                _, sub = universe.sector_of(c)
+                _, sub = look(c)
                 if per_sub.get(sub, 0) < cap_per_sub:
                     per_sub[sub] = per_sub.get(sub, 0) + 1
                     picked.append(c)
@@ -899,24 +920,34 @@ def _balanced_pick(codes: list[str], cap_total: int, cap_per_sub: int) -> list[s
 
 
 def _screen_rows(capital: float, focus: str = "") -> list[dict]:
-    """候选池行情 + 指标（按 focus 取数 + 负担得起优先 + 跨板块均衡采样）。"""
-    codes = universe.codes_of(focus)
-    quotes = ds.tencent_quote(codes)
+    """候选池行情 + 指标（按 focus 取数 + 负担得起优先 + 跨板块均衡采样）。
+
+    focus 为板块名（一级/细分/概念）时只在该板块内选；为空则全市场。
+    候选池来自 universe_store（全A ~4989 只 eligible），未回填时自动降级手工池。
+    """
+    codes = universe_store.codes_of(focus)
+    quotes = ds.tencent_quote(codes)  # 自动分批：全池 4989 只 ≈1.7s
     if not quotes:
         return []
     # 先按 1 手成本可负担过滤（资金太小买不起任何 1 手则退回全池给参考）
     affordable = [c for c in codes if quotes.get(c, {}).get("lot_cost", 9e9) <= capital]
     pool = affordable or codes
-    # 侧重某个二级细分时放宽单细分配额（否则跨一级/全市场按 3 只/细分均衡）
-    subs_all = {s for subs in universe.taxonomy().values() for s in subs}
-    cap_per_sub = 6 if focus in subs_all else 3
-    picked = _balanced_pick(pool, _SCREEN_CAP_TOTAL, cap_per_sub)
+    # 全市场（未指定板块）时先按流通市值预筛：均衡采样是按池内顺序取的，
+    # 5000 只全池若不预筛，取到的是各板块里代码号最小的股而非龙头，扩池反而选出垃圾。
+    if not focus and len(pool) > _PRESCREEN:
+        pool = sorted(pool, key=lambda c: quotes.get(c, {}).get("float_mcap_yi", 0),
+                      reverse=True)[:_PRESCREEN]
+    smap = universe_store.sectors_map(pool)  # 批量查板块，避免逐只 DB 往返
+    # 侧重某个细分/概念时放宽单细分配额（否则跨一级/全市场按 3 只/细分均衡）
+    subs_all = {s for subs in universe_store.taxonomy().values() for s in subs}
+    cap_per_sub = 6 if focus and focus in subs_all else 3
+    picked = _balanced_pick(pool, _SCREEN_CAP_TOTAL, cap_per_sub, smap)
     with ThreadPoolExecutor(max_workers=8) as executor:
-        metrics_list = list(executor.map(ds.sina_metrics, picked))
+        metrics_list = list(executor.map(_safe_metrics, picked))
     rows = []
     for c, m in zip(picked, metrics_list):
         q = quotes.get(c, {})
-        primary, sub = universe.sector_of(c)
+        primary, sub = smap.get(c) or universe_store.sector_of(c)
         rows.append({"code": c, "name": q.get("name", c),
                      "primary": primary, "sub": sub,
                      "price": q.get("price"), "pe_ttm": q.get("pe_ttm"), "pb": q.get("pb"),
@@ -959,7 +990,7 @@ def _ai_web_context(scope: str, code: str = "", name: str = "") -> str:
                          + "\n".join(lines[:12]))
     # L5：私域笔记（我本人的判断，带时间戳供按新鲜度加权；须与客观数据区分、勿当事实）
     if scope == "position" and code:
-        p, s = universe.sector_of(code)
+        p, s = universe_store.sector_of(code)
         my_notes = notes_store.for_ai(code=code, sectors=[p, s], limit=5)
     else:
         my_notes = notes_store.list_notes(limit=5)

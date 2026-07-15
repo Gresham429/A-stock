@@ -304,6 +304,32 @@ def sector_of(code: str) -> tuple[str, str]:
     return (p, s) if p != OTHER else (OTHER, OTHER)
 
 
+def sectors_map(codes: list[str]) -> dict[str, tuple[str, str]]:
+    """批量 code -> (一级, 细分)，一次查询。
+
+    `_balanced_pick` 会对候选池每只股查板块；全市场 ~5000 只若逐只走 sector_of()
+    就是 5000 次 DB 查询，必须批量。未回填/查不到的降级手工池，与 sector_of 一致。
+    """
+    if not codes:
+        return {}
+    out: dict[str, tuple[str, str]] = {}
+    try:
+        with _conn() as c:
+            for i in range(0, len(codes), 900):  # SQLite 变量数上限 999
+                chunk = codes[i:i + 900]
+                ph = ",".join("?" * len(chunk))
+                for r in c.execute(
+                        f"SELECT code, sw1, sub FROM stocks WHERE code IN ({ph}) AND sw1!=''",
+                        chunk):
+                    out[r["code"]] = (r["sw1"], r["sub"] or r["sw1"])
+    except sqlite3.Error as e:
+        logger.warning("sectors_map 查询失败: %s", e)
+    for c_ in codes:  # 未回填的降级手工池
+        if c_ not in out:
+            out[c_] = universe.sector_of(c_)
+    return out
+
+
 def codes_of(focus: str = "", eligible_only: bool = True) -> list[str]:
     """板块名（申万一级/细分/概念）-> 成分股代码；空 focus -> 全池。db 未就绪时降级手工池。"""
     if not _ready():

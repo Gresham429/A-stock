@@ -78,16 +78,30 @@ def em_get(url: str, ref: str = "https://data.eastmoney.com/",
 
 
 # ── 行情/估值（腾讯） ─────────────────────────────────────────────────────
-def tencent_quote(codes: list[str]) -> dict[str, dict[str, Any]]:
-    """批量实时行情：价格/涨跌/PE/PB/市值/换手/振幅。返回 {code: {...}}。"""
+QUOTE_CHUNK = 400  # 单次请求代码数上限：实测 800 可过、2000 报 HTTP 414，取 400 留足余量
+
+
+def tencent_quote(codes: list[str], workers: int = 8) -> dict[str, dict[str, Any]]:
+    """批量实时行情：价格/涨跌/PE/PB/市值/换手/振幅。返回 {code: {...}}。
+
+    自动分批：全部代码拼一个 URL 在全市场池（~5000 只 = 44KB URL）会报 HTTP 414，
+    故按 QUOTE_CHUNK 切片并发请求；单批失败只丢该批、不拖垮整体。
+    """
     if not codes:
         return {}
+    if len(codes) > QUOTE_CHUNK:
+        chunks = [codes[i:i + QUOTE_CHUNK] for i in range(0, len(codes), QUOTE_CHUNK)]
+        merged: dict[str, dict[str, Any]] = {}
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for part in ex.map(lambda cs: tencent_quote(cs, workers), chunks):
+                merged.update(part)
+        return merged
     prefixed = [market_prefix(c) + c for c in codes]
     url = "https://qt.gtimg.cn/q=" + ",".join(prefixed)
     try:
         data = _http_get(url, gbk=True, timeout=15)
     except OSError as e:
-        logger.error("腾讯行情请求失败: %s", e)
+        logger.error("腾讯行情请求失败(%d 只): %s", len(codes), e)
         return {}
 
     result: dict[str, dict[str, Any]] = {}
@@ -219,12 +233,18 @@ def sina_metrics(code: str, num: int = 45) -> dict[str, Any]:
         return empty
 
     arr = list(reversed(arr))  # 时间正序
-    closes = [float(x["trade"]) for x in arr]
-    r0net = [float(x.get("r0_net", 0)) for x in arr]  # 主力(超大单)净额，元
-    dates = [x["opendate"] for x in arr]
+    try:  # 全市场池里字段可能为空串/异常值（手工龙头池不会），解析失败按无数据处理
+        closes = [float(x["trade"]) for x in arr]
+        r0net = [float(x.get("r0_net", 0)) for x in arr]  # 主力(超大单)净额，元
+        dates = [x["opendate"] for x in arr]
+    except (KeyError, TypeError, ValueError) as e:
+        logger.warning("新浪资金流字段解析失败 %s: %s", code, e)
+        return empty
 
     vol = _annualized_vol(closes, 20)
-    cum20 = (closes[-1] / closes[-21] - 1) * 100 if len(closes) > 20 else None
+    # 分母可能为 0（停牌日收盘价缺失），不设防会 ZeroDivisionError 打崩整个选股
+    cum20 = ((closes[-1] / closes[-21] - 1) * 100
+             if len(closes) > 20 and closes[-21] > 0 else None)
     range_pos = None
     if len(closes) >= 20:
         w = closes[-20:]
@@ -244,8 +264,15 @@ def sina_metrics(code: str, num: int = 45) -> dict[str, Any]:
 
 
 def _annualized_vol(closes: list[float], n: int = 20) -> float | None:
-    """近 n 日日对数收益率的年化波动率(%)。"""
+    """近 n 日日对数收益率的年化波动率(%)。收盘价含 0/负值（停牌日、源缺口）则返回 None。
+
+    全市场池里确实存在收盘价为 0 的记录（手工龙头池不会），不设防会 math domain error
+    并穿透 executor.map 把整个选股打崩。
+    """
     if len(closes) < n + 1:
+        return None
+    window = closes[len(closes) - n - 1:]
+    if any(c <= 0 for c in window):
         return None
     rets = [math.log(closes[i] / closes[i - 1])
             for i in range(len(closes) - n, len(closes))]

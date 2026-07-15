@@ -416,7 +416,8 @@
     <input id="h_shares" class="w-num" placeholder="股数 如 100" inputmode="numeric">
     <input id="h_cost" class="w-num" placeholder="成本价 如 34.5" inputmode="decimal">
     <input id="h_date" class="w-date" placeholder="买入日 2026-07-10">
-    <button class="btn ai" onclick="addHolding()">＋ 记录持仓</button>
+    <button class="btn ai" onclick="addHolding()">＋ 记录买入</button>
+    <span class="scr-cap-hint">同一只再录=<b>加仓追加一笔</b>（自动加权平均成本）；改错了先「清仓」再重录</span>
   </div>
   <div class="tablecard">
     <table><thead><tr>

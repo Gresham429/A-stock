@@ -1,13 +1,17 @@
-"""持仓记录与盈亏计算：读写 portfolio.json，**按投资画像(profile)隔离**（方案 B）。
+"""持仓记录与盈亏计算：读写 portfolio.json，**按投资画像隔离 + 多笔(lot)模型**。
 
-每个画像各记各的持仓，互不干扰。存储格式：{"by_profile": {profile_id(str): [holdings]}}。
-切换 active 画像后，load()/add()/remove() 自动作用于该画像的持仓。
-每条持仓: {code, shares, cost_price, buy_date, note}；盈亏用实时价现算，不落库（避免陈旧）。
+每只股票存多笔买入 lot：`{code, lots:[{shares, cost, date}], note}`。
+- 同代码再 `add()` = **追加一笔**（不覆盖旧笔）；总股数=Σ、成本=**加权平均**。
+- **当日盈亏逐笔算**：当天买入的 lot 基准=**该笔买入价**（昨收那段涨跌与你无关），
+  之前就持有的 lot 才用**昨收**基准。混合（昨持+今日加仓）也准。
+存储：`{"by_profile": {profile_id(str): [holding...]}}`；旧格式（裸列表/{holdings:[...]}/扁平单笔）自动迁移。
+盈亏用实时价现算，不落库（避免陈旧）。
 """
 from __future__ import annotations
 
 import json
 import logging
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -24,8 +28,22 @@ def _pid() -> str:
     return str(prof["id"]) if prof else "0"
 
 
-def _read_all() -> dict[str, list]:
-    """读整份 {pid: [holdings]}；自动迁移旧格式（裸列表 / {holdings:[...]}）到当前画像。"""
+def _today() -> str:
+    return date.today().isoformat()
+
+
+def _migrate_holding(h: dict[str, Any]) -> dict[str, Any]:
+    """旧扁平单笔 {code,shares,cost_price,buy_date} → lots 模型。"""
+    if "lots" in h:
+        return h
+    return {"code": h.get("code", ""), "note": h.get("note", ""),
+            "lots": [{"shares": float(h.get("shares") or 0),
+                      "cost": float(h.get("cost_price") or 0),
+                      "date": h.get("buy_date") or ""}]}
+
+
+def _read_raw() -> dict[str, list]:
+    """整份 {pid: [holding(lots 模型)]}；自动迁移旧格式。"""
     if not PORTFOLIO_PATH.exists():
         return {}
     try:
@@ -34,14 +52,14 @@ def _read_all() -> dict[str, list]:
         logger.error("读取 portfolio 失败: %s", e)
         return {}
     if isinstance(data, dict) and "by_profile" in data:
-        return data["by_profile"] or {}
-    # 旧格式（裸列表 或 {"holdings":[...]}）→ 整份历史持仓归到当前 active 画像，并落成新格式。
-    old = data.get("holdings", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
-    migrated = {_pid(): old} if old else {}
-    if migrated:
-        _write_all(migrated)
-        logger.info("portfolio 旧格式迁移到画像 %s（%d 只）", _pid(), len(old))
-    return migrated
+        by = data["by_profile"] or {}
+    else:   # 旧格式（裸列表 或 {"holdings":[...]}）→ 归到当前画像
+        old = (data.get("holdings", []) if isinstance(data, dict)
+               else (data if isinstance(data, list) else []))
+        by = {_pid(): old} if old else {}
+        if by:
+            logger.info("portfolio 旧格式迁移到画像 %s（%d 只）", _pid(), len(old))
+    return {pid: [_migrate_holding(h) for h in hs] for pid, hs in by.items()}
 
 
 def _write_all(by_pid: dict[str, list]) -> None:
@@ -49,37 +67,46 @@ def _write_all(by_pid: dict[str, list]) -> None:
         json.dumps({"by_profile": by_pid}, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _derive(h: dict[str, Any]) -> dict[str, Any]:
+    """由 lots 派生 总股数 / 加权平均成本 / 最近买入日——上层(面板/AI)沿用旧字段名。"""
+    lots = h.get("lots") or []
+    shares = sum(float(lot.get("shares") or 0) for lot in lots)
+    cost_val = sum(float(lot.get("shares") or 0) * float(lot.get("cost") or 0) for lot in lots)
+    return {**h, "shares": shares,
+            "cost_price": round(cost_val / shares, 4) if shares else 0.0,
+            "buy_date": max((lot.get("date") or "") for lot in lots) if lots else ""}
+
+
 def load() -> list[dict[str, Any]]:
-    """当前画像的全部持仓记录。"""
-    return _read_all().get(_pid(), [])
-
-
-def _save(holdings: list[dict[str, Any]]) -> None:
-    allp = _read_all()
-    allp[_pid()] = holdings
-    _write_all(allp)
+    """当前画像的持仓（含 lots 明细 + 派生的 shares/cost_price/buy_date）。"""
+    return [_derive(h) for h in _read_raw().get(_pid(), [])]
 
 
 def add(code: str, shares: float, cost_price: float,
         buy_date: str = "", note: str = "") -> list[dict[str, Any]]:
-    """当前画像新增/覆盖一只持仓（同代码则更新）。"""
-    holdings = [h for h in load() if h.get("code") != code]
-    holdings.append({
-        "code": code,
-        "shares": float(shares),
-        "cost_price": float(cost_price),
-        "buy_date": buy_date,
-        "note": note,
-    })
-    _save(holdings)
-    return holdings
+    """加仓：当前画像下同代码**追加一笔 lot**（不覆盖旧笔）；新代码则建仓。"""
+    allp = _read_raw()
+    hs = allp.get(_pid(), [])
+    lot = {"shares": float(shares), "cost": float(cost_price), "date": buy_date or _today()}
+    for h in hs:
+        if h.get("code") == code:
+            h.setdefault("lots", []).append(lot)
+            if note:
+                h["note"] = note
+            break
+    else:
+        hs.append({"code": code, "lots": [lot], "note": note})
+    allp[_pid()] = hs
+    _write_all(allp)
+    return load()
 
 
 def remove(code: str) -> list[dict[str, Any]]:
-    """当前画像卖出/删除一只持仓。"""
-    holdings = [h for h in load() if h.get("code") != code]
-    _save(holdings)
-    return holdings
+    """清仓：删除当前画像下该代码的全部 lot。"""
+    allp = _read_raw()
+    allp[_pid()] = [h for h in allp.get(_pid(), []) if h.get("code") != code]
+    _write_all(allp)
+    return load()
 
 
 def codes() -> list[str]:
@@ -90,22 +117,31 @@ def codes() -> list[str]:
 def with_pnl(quotes: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     """合并实时行情，计算市值与盈亏。
 
-    quotes: {code: {name, price, ...}}（来自 datasources.tencent_quote）
-    每条附加: name, price, market_value, cost_value, pnl_amount, pnl_pct。
+    quotes: {code: {name, price, last_close, ...}}（来自 datasources.tencent_quote）
+    **当日盈亏逐笔**：今日买入的 lot 用「该笔买入价」作基准，之前持有的用「昨收」。
     """
     out = []
+    today = _today()
     for h in load():
         q = quotes.get(h["code"], {})
         price = q.get("price", 0) or 0
         last_close = q.get("last_close", 0) or 0
+        lots = h.get("lots") or []
         shares = h.get("shares", 0) or 0
-        cost = h.get("cost_price", 0) or 0
+        # 成本按 lots 精确累加（不用四舍五入后的均价，避免累计误差）
+        cost_value = round(sum(float(lot.get("shares") or 0) * float(lot.get("cost") or 0)
+                               for lot in lots), 2)
         market_value = round(price * shares, 2)
-        cost_value = round(cost * shares, 2)
         pnl_amount = round(market_value - cost_value, 2)
-        pnl_pct = round((price / cost - 1) * 100, 2) if cost > 0 else None
-        # 当日盈亏 = 股数 ×（现价 - 昨收）
-        today_pnl = round((price - last_close) * shares, 2) if last_close else 0.0
+        avg_cost = (cost_value / shares) if shares else 0
+        pnl_pct = round((price / avg_cost - 1) * 100, 2) if avg_cost > 0 else None
+        today_pnl = 0.0
+        for lot in lots:
+            ls = float(lot.get("shares") or 0)
+            # 今天买的 → 基准=买入价；之前持有的 → 基准=昨收
+            base = float(lot.get("cost") or 0) if (lot.get("date") or "") == today else last_close
+            if base:
+                today_pnl += (price - base) * ls
         out.append({
             **h,
             "name": q.get("name", h["code"]),
@@ -115,7 +151,7 @@ def with_pnl(quotes: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
             "cost_value": cost_value,
             "pnl_amount": pnl_amount,
             "pnl_pct": pnl_pct,
-            "today_pnl": today_pnl,
+            "today_pnl": round(today_pnl, 2),
         })
     return out
 

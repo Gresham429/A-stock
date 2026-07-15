@@ -939,6 +939,7 @@ async function reloadSectors(force){
     const pend=st.sectors_pending||0;
     document.getElementById('secStatus').innerHTML =
       `${j.date||'—'} · 全池 ${st.total||0} 只(可选 ${st.eligible||0}) · 板块 ${st.sector_count||0} 个`
+      + ` · 库 ${st.db_mb||0}MB(留${Math.round((st.keep_days||365)/365)}年·${st.sector_daily_days||0}天)`
       + (pend>0?` · <span style="color:var(--gold)">板块回填中 ${st.sectors_tagged||0}/${st.eligible||0}</span>`:'');
     if(!j.rows||!j.rows.length){ list.innerHTML='<div class="muted small" style="padding:14px">暂无数据。板块归属回填完成后自动出现。</div>'; return; }
     const mxAmt=Math.max(...j.rows.map(r=>r.amount||0),1);

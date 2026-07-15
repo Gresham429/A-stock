@@ -141,7 +141,7 @@ Python 语法：`python3 -c "import ast; [ast.parse(open(f).read()) for f in [..
   - ★**全球宏观 digest**：外围数值(油价/黄金/铜/美股) + 全球快讯 → A股板块指向，注入 5 个 AI
   - ★交易规则库 **84 条** = PA_Agent 蒸馏 67 + **A股制度特性 17**（T+1/涨跌停/集合竞价/换手率T+1含义…）
   - 知识与缓存架构 L1–L5、launchd 定时抓取（动态交易日历）、模拟盘
-- **⚠️ 待用户浏览器验证**（后端均已 LIVE 实测通过，DOM 交互未验）：★**🧭 板块 modal**（一级/细分/概念切换、点板块看成分股、点成分股跳深挖）；💼 画像 modal（切换/新建/改本金）；单股分析顶部「公司叙事卡 + 溯源条 + 结论依据 ✓/⚠」；每日推荐每只一句话叙事；AI 结论是否体现「全球宏观 + 本金玩法档」。
+- **⚠️ 待用户浏览器验证**（后端均已 LIVE 实测通过，DOM 交互未验）：~~🧭 板块 modal~~ **已验通过 2026-07-15**；💼 画像 modal（切换/新建/改本金）；单股分析顶部「公司叙事卡 + 溯源条 + 结论依据 ✓/⚠」；每日推荐每只一句话叙事；AI 结论是否体现「全球宏观 + 本金玩法档」。
 - **⏳ 板块归属回填**：首次需 ~100 分钟（4989 只 × em_get 限流 1.25s）。**断点续传**，app 启动时 `_universe_boot()` 自动续跑；也可 `curl -X POST localhost:5000/api/universe/refresh`。回填期间板块口径是混的（已回填→申万、未回填→降级手工池、都没有→其他/其他），跑完自动一致，**不需要改代码**。进度看 `GET /api/universe/status` 的 `sectors_tagged/eligible`。
 - 本地数据文件（gitignore，用户机上）：`watchlist.json` / `portfolio.json`（新格式 `{by_profile:{pid:[...]}}` **按画像隔离**，旧格式自动迁移）/ `ai_cache.json` / `data/news.db` / `data/notes.db` / `data/rules.db` / `data/paper.db` / `data/profiles.db` / ★`data/universe.db`（全A名单+板块归属+板块日统计）。
 - **backlog 已清空**，只剩**可选**后续（见 `plan/BACKLOG.md`，均未承诺）：美元指数/VIX 换源补齐（新浪外盘无此二者）、溯源推广到 daily/screen、5 档 template 文案做成 UI 可编辑。
@@ -149,7 +149,7 @@ Python 语法：`python3 -c "import ast; [ast.parse(open(f).read()) for f in [..
 - 设计文档在 `plan/`（各特性 spec + 知识缓存架构总纲 + `BACKLOG.md`）。
 - **踩坑备忘**：① 端口 **5000 被 macOS AirPlay 占**，本地起服务前关「隔空播放接收器」，或测试用 5001；② 涉及用户数据文件（`portfolio.json` 等）的测试**必须用临时副本**，别写真实数据；③ AI 类接口是推理模型，单次 30~90s，`curl` 用 `--max-time 200`；终端有代理时 `curl` 加 `--noproxy '*'`（python 脚本要 `os.environ.pop` 掉 `*_proxy`）。
 - **⚠️ 全市场池踩过的坑（改这块前必读）**：
-  - **`ds.market_prefix()` 有 bug**：把 `9` 开头判为 `sh`（沪B 老逻辑），但**北交所新号段是 920xxx**（新浪返回里有 `bj920000`）→ 会误判成上海；`4xxxxx` 也错落 `sz`。**未修**（怕影响既有调用），`universe_store.is_bj()` 独立判 `4/8/92` 绕开。**这函数仍是雷**。
+  - **北交所号段 = 8xxxxx / 4xxxxx / 92xxxx**（920 为 2024 年起新号段）。`ds.market_prefix()` 里 **`92` 必须先于 `9` 判断**——9 开头的另一支是沪B（900xxx，仍属上海）。曾有 bug：920xxx 判成 `sh`、4xxxxx 判成 `sz`，导致北交所股票**行情/指标全取不到**（加进自选股会一片空白）。已修（2026-07-15），实测 `bj920000`/`bj430047` 有数据、`sh920000` 返回空。`universe_store.is_bj()` 与之等价，测试固化了「两者永远一致」的不变量。
   - **扩池会引爆手工池永不触发的崩溃**（已修，勿回退）：`tencent_quote` 单 URL 拼全部代码 → 全池 44KB 报 **HTTP 414**（实测 800 只可过、2000 只失败）→ 已 `QUOTE_CHUNK=400` 分批并发；`_annualized_vol` 遇 0 收盘价 → **math domain error 穿透 `executor.map` 打崩整个选股**；`sina_metrics` 的 `closes[-21]==0` ZeroDivisionError + try 块外的 `float(x['trade'])` ValueError。兜底见 `app._safe_metrics`。
   - **slist 标签去重顺序坑**：东财同板块会以 `银行Ⅱ` 与 `银行` 两种形态返回。若按**原始标签**分类却按**去后缀名**去重，`银行Ⅱ` 判成 concept 抢占去重位 → **`sw1` 标记永久静默丢失**（`codes_of('银行')` 照常能用、只有 `sector_ranking(kind='sw1')` 漏板块，极隐蔽）。已固化为回归用例。
   - **回填必须跨进程互斥**：`ds.em_get` 限流器是**进程内**全局（`_em_last_call`），app 与命令行同时回填 → 东财请求速率翻倍 → clist 就是这么被封的，slist 再被封功能全废。故用 db 心跳锁（`meta.backfill_hb = pid,ts`，超 120s 可抢占）+ `threading.Lock` 双重互斥。

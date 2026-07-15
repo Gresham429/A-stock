@@ -43,11 +43,16 @@ def normalize(code: str) -> str:
 
 
 def market_prefix(code: str) -> str:
-    """6 位代码 -> 交易所前缀。"""
-    if code.startswith(("6", "9")):
-        return "sh"
-    if code.startswith("8"):
+    """6 位代码 -> 交易所前缀（sh / sz / bj）。
+
+    北交所号段：8xxxxx、4xxxxx、**92xxxx**（920 为 2024 年起启用的新号段）。
+    `92` 必须先于 `9` 判断——9 开头的另一支是沪B（900xxx），仍属上海。
+    实测（腾讯 qt.gtimg.cn）：`bj920000`/`bj430047` 有数据，`sh920000`/`sz430047` 返回空。
+    """
+    if code.startswith(("4", "8", "92")):
         return "bj"
+    if code.startswith(("6", "9")):  # 9 开头剩沪B(900xxx)
+        return "sh"
     return "sz"
 
 

@@ -95,10 +95,10 @@ def init() -> None:
 
 # ── 代码分类 helper ────────────────────────────────────────────────────────
 def is_bj(code: str) -> bool:
-    """北交所：8xxxxx / 4xxxxx / 920xxx（920 为新号段）。
+    """北交所：8xxxxx / 4xxxxx / 920xxx（920 为 2024 年起的新号段）。
 
-    注意不能用 `ds.market_prefix()` 判断——它把 9 开头判为 sh（沪B 老逻辑），
-    会把 920xxx 北交所股票误判成上海。
+    与 `ds.market_prefix(code) == "bj"` 等价，测试固化了该不变量；
+    此处独立实现是为了语义清晰（判交易所归属，不关心 URL 前缀）。
     """
     return code.startswith(("4", "8", "92"))
 

@@ -3,7 +3,7 @@
 跑法：python3 tests/test_universe_store.py
 （项目无 pytest；用 plain assert，装了 pytest 也能直接跑。）
 
-只测不打网络的部分：板块标签解析 + 代码分类。取数/落库走冒烟测试。
+只测不打网络的部分：板块标签解析 + 代码分类 + 交易所前缀。取数/落库走冒烟测试。
 """
 import os
 import sys
@@ -61,11 +61,33 @@ def test_parse_tags_empty_falls_back_to_other():
 
 
 def test_is_bj_covers_920_segment():
-    """920xxx 是北交所新号段；ds.market_prefix 把 9 开头判为 sh，不能用它判北交所。"""
+    """北交所号段：8xxxxx / 4xxxxx / 920xxx（920 为 2024 年起的新号段）。"""
     for code in ("920000", "830799", "430047", "400001"):
         assert us.is_bj(code), f"{code} 应判为北交所"
-    for code in ("600760", "000001", "300750", "688981"):
+    for code in ("600760", "000001", "300750", "688981", "900901"):
         assert not us.is_bj(code), f"{code} 不应判为北交所"
+
+
+def test_is_bj_agrees_with_market_prefix():
+    """两处北交所判定必须永远一致，否则又是一个静默错配。
+
+    历史 bug：market_prefix 把 9 开头判 sh（沪B 老逻辑），920xxx 北交所被误判成上海，
+    腾讯返回空；4xxxxx 落 sz 同样错。实测 bj920000/bj430047 有数据、sh920000 为空。
+    """
+    import datasources as ds
+    for code in ("920000", "830799", "430047", "400001",
+                 "600760", "000001", "300750", "688981", "900901", "601398"):
+        assert us.is_bj(code) == (ds.market_prefix(code) == "bj"), (
+            f"{code}: is_bj={us.is_bj(code)} 但 market_prefix={ds.market_prefix(code)}")
+
+
+def test_market_prefix_shanghai_b_shares_stay_sh():
+    """沪B 900xxx 也是 9 开头，但属上海——'92' 必须先于 '9' 判断。"""
+    import datasources as ds
+    assert ds.market_prefix("900901") == "sh"   # 云赛B股，实测 sh900901 有数据
+    assert ds.market_prefix("920000") == "bj"   # 安徽凤凰，实测 bj920000 有数据
+    assert ds.market_prefix("600760") == "sh"
+    assert ds.market_prefix("000001") == "sz"
 
 
 def test_board_of():

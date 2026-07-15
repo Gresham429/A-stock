@@ -21,7 +21,8 @@ _LOCK = threading.Lock()
 
 # 各类型 TTL（秒）：个股/每日/选股 30 分钟，大盘 5 分钟
 _TTL = {"daily": 1800, "screen": 1800, "position": 1800, "market": 300,
-        "profile": 43200}  # 公司叙事变化慢，当日长缓存(12h)，跨日 key 自然失效
+        "profile": 43200,  # 公司叙事变化慢，当日长缓存(12h)，跨日 key 自然失效
+        "macro": 21600}    # 全球宏观 digest：当日 6h 缓存（一天算几次即可）
 
 
 def _today() -> str:

@@ -31,6 +31,7 @@ import news_store
 import notes_store
 import paper_store
 import portfolio
+import profile_store
 import provenance
 import rules_store
 import store
@@ -46,6 +47,7 @@ news_store.init()  # 确保 news.db 表存在（廉价，幂等）
 notes_store.init()  # 私域笔记表
 rules_store.init()  # 交易规则库（首次灌入蒸馏种子）
 paper_store.init()  # 模拟交易存档
+profile_store.init()  # 本地多档投资画像（现金本金→按总资产分级玩法）
 _news_refreshing = [False]
 
 
@@ -124,7 +126,7 @@ def _market_overview_payload(force: bool = False, with_ai: bool = True) -> dict:
     ai = None
     if config.llm_enabled() and idx.get("indices"):
         try:
-            ai = llm.market_overview(idx["indices"], breadth, _ai_web_context("market"))
+            ai = llm.market_overview(idx["indices"], breadth, _tier_block() + _ai_web_context("market"))
         except llm.LLMError as e:
             logger.warning("大盘研判 AI 失败: %s", e)
     model = config.DEEPSEEK_MODEL if config.llm_enabled() else None
@@ -539,7 +541,7 @@ def recommend_daily():
     rows = _overview_rows(watchlist)
     quotes = ds.tencent_quote(portfolio.codes()) if portfolio.codes() else {}
     holdings = portfolio.with_pnl(quotes)
-    web_ctx = _ai_web_context("market")
+    web_ctx = _tier_block() + _ai_web_context("market")
     news_map = {c: [n.get("title", "") for n in news_store.query(code=c, days=30, limit=3)]
                 for c in watchlist}   # 每股本地库近期标题 → 一句话叙事(0 额外 LLM)
     try:
@@ -550,6 +552,101 @@ def recommend_daily():
     return jsonify({"ok": True, "result": result, "model": config.DEEPSEEK_MODEL,
                     "web_search": config.bocha_enabled(), "cached": False,
                     "analyzed_at": ts, "age_min": 0})
+
+
+def _total_assets() -> tuple[float, int]:
+    """(总资产, 持仓只数) = active 画像现金 + 全局真实持仓市值（腾讯实时价）。"""
+    prof = profile_store.get_active() or {}
+    cash = float(prof.get("cash") or 0)
+    holds = portfolio.load()
+    val = 0.0
+    if holds:
+        quotes = ds.tencent_quote([h["code"] for h in holds])
+        for h in holds:
+            price = (quotes.get(h["code"], {}) or {}).get("price") or 0
+            val += float(price) * float(h.get("shares") or 0)
+    return cash + val, len(holds)
+
+
+def _tier_block() -> str:
+    """当前画像的【本金玩法档】注入块（据总资产落档）。无画像返回空串。"""
+    prof = profile_store.get_active()
+    if not prof:
+        return ""
+    total, hn = _total_assets()
+    return profile_store.block_for_ai(prof.get("cash") or 0, total, hn)
+
+
+def _sync_scenario() -> None:
+    """按 active 画像的档位自动设 rules 场景的本金维（保留用户选的周期维）。"""
+    try:
+        total, _ = _total_assets()
+        scen_cap = profile_store.tier_of(total)["scen"]
+        cur = [t.strip() for t in rules_store.get_scenario().split(",") if t.strip()]
+        horizon = [t for t in cur if t in rules_store.HORIZON_SCENARIOS]
+        rules_store.set_scenario(",".join([scen_cap] + horizon))
+    except Exception:
+        logger.debug("同步场景失败", exc_info=True)
+
+
+def _safe_tier(t: dict) -> dict:
+    """inf → None，供前端 JSON.parse（浏览器不接受 Infinity）。"""
+    d = dict(t)
+    if d.get("hi") == float("inf"):
+        d["hi"] = None
+    return d
+
+
+@app.route("/api/profiles")
+def profiles_list():
+    prof = profile_store.get_active() or {}
+    total, hn = _total_assets()
+    return jsonify({"profiles": profile_store.list_profiles(), "active_id": prof.get("id"),
+                    "active": prof, "total_assets": round(total, 2), "holdings_n": hn,
+                    "tier": _safe_tier(profile_store.tier_of(total)),
+                    "tiers": [_safe_tier(t) for t in profile_store.TIERS],
+                    "risk_prefs": profile_store.RISK_PREFS})
+
+
+@app.route("/api/profiles", methods=["POST"])
+def profiles_create():
+    b = request.get_json(silent=True) or {}
+    try:
+        cash = float(b.get("cash", 0))
+    except (TypeError, ValueError):
+        cash = 0.0
+    pid = profile_store.create(b.get("name", ""), cash, b.get("risk_pref", "均衡"))
+    if b.get("activate"):
+        profile_store.set_active(pid)
+        _sync_scenario()
+    return jsonify({"ok": True, "id": pid})
+
+
+@app.route("/api/profiles/<int:pid>", methods=["PUT"])
+def profiles_update(pid: int):
+    b = request.get_json(silent=True) or {}
+    fields = {k: b[k] for k in ("name", "cash", "risk_pref") if k in b}
+    if "cash" in fields:
+        try:
+            fields["cash"] = float(fields["cash"])
+        except (TypeError, ValueError):
+            fields.pop("cash")
+    profile_store.update(pid, **fields)
+    _sync_scenario()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/profiles/<int:pid>", methods=["DELETE"])
+def profiles_delete(pid: int):
+    profile_store.delete(pid)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/profiles/active/<int:pid>", methods=["POST"])
+def profiles_activate(pid: int):
+    profile_store.set_active(pid)
+    _sync_scenario()
+    return jsonify({"ok": True})
 
 
 def _profile_block(prof: dict | None) -> str:
@@ -613,7 +710,7 @@ def recommend_position(code: str):
                                          f_news.result(), f_kline.result())
     vol_hist = _vol_hist(kl)
     prof = _company_profile(code, q.get("name", ""), news, financials)
-    web_ctx = _profile_block(prof) + _ai_web_context("position", code, q.get("name", ""))
+    web_ctx = _tier_block() + _profile_block(prof) + _ai_web_context("position", code, q.get("name", ""))
     scen = rules_store.get_scenario()
     rule_map = rules_store.active_rule_map(scen)
     try:
@@ -642,10 +739,11 @@ def recommend_entry(code: str):
     code = ds.normalize(code)
     body = request.get_json(silent=True) or {}
     force = bool(body.get("force"))
+    _act = profile_store.get_active() or {}
     try:
-        capital = float(body.get("capital", 10000))
+        capital = float(body.get("capital") or _act.get("cash") or 10000)
     except (TypeError, ValueError):
-        capital = 10000.0
+        capital = float(_act.get("cash") or 10000)
     inputs = {"code": code, "capital": capital, "rules": rules_store.signature()}
     if not force:
         hit = ai_cache.get("entry", inputs)
@@ -667,7 +765,7 @@ def recommend_entry(code: str):
     vol_hist = _vol_hist(kl)
     market_ctx = _market_overview_payload().get("ai")
     prof = _company_profile(code, q.get("name", ""), news, financials)
-    web_ctx = _profile_block(prof) + _ai_web_context("position", code, q.get("name", ""))
+    web_ctx = _tier_block() + _profile_block(prof) + _ai_web_context("position", code, q.get("name", ""))
     scen = rules_store.get_scenario()
     rule_map = rules_store.active_rule_map(scen)
     try:
@@ -712,7 +810,7 @@ def recommend_screen():
     if not rows:
         return jsonify({"ok": False, "msg": "候选池行情拉取失败，请重试"}), 502
     market_ctx = _market_overview_payload().get("ai")  # 复用缓存的大盘研判结论
-    web_ctx = _ai_web_context("market")
+    web_ctx = _tier_block() + _ai_web_context("market")
     try:
         result = llm.market_screen(rows, capital, focus, market_ctx, web_ctx)
     except llm.LLMError as e:

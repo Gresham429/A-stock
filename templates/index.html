@@ -300,6 +300,21 @@
   .cptags{margin-top:6px}
   .ptag{display:inline-block;background:rgba(224,169,46,.10);border:1px solid var(--gold-dim);color:var(--gold);border-radius:10px;padding:1px 8px;margin:2px 4px 0 0;font-size:10.5px}
   .rc-narr{font-size:11.5px;color:var(--muted);margin-top:5px;padding-left:2px}
+  /* 投资画像 · 本金分级 */
+  .prof-active{background:var(--bg2);border:1px solid var(--gold-dim);border-radius:9px;padding:10px 12px;margin:10px 0}
+  .pa-hd{font-size:13px;color:var(--txt)} .pa-hd b{color:var(--gold)}
+  .pa-tier{margin-top:5px;font-size:12px}
+  .tier-badge{display:inline-block;background:rgba(224,169,46,.14);border:1px solid var(--gold);color:var(--gold);border-radius:6px;padding:1px 9px;font-weight:600;margin-right:6px}
+  .pa-play{margin-top:4px;font-size:11.5px;color:var(--muted)}
+  .prof-list{display:flex;flex-direction:column;gap:6px;margin:8px 0}
+  .prof-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:7px 10px;border:1px solid var(--line);border-radius:8px}
+  .prof-row.on{border-color:var(--gold-dim);background:rgba(224,169,46,.05)}
+  .pf-nm{font-weight:600;color:var(--txt);min-width:90px}
+  .pf-cash{color:var(--muted);font-size:12px;flex:1}
+  .pf-act{display:flex;gap:6px;align-items:center}
+  .prof-tiers{display:flex;flex-direction:column;gap:4px}
+  .tier-row{font-size:11.5px;color:var(--txt);padding:5px 8px;border-radius:6px;border:1px solid transparent}
+  .tier-row.on{border-color:var(--gold);background:rgba(224,169,46,.08)}
   /* 对比表是总览的说明条 */
   .ov-note{font-size:11.5px;color:var(--muted);margin:2px 0 8px;padding:6px 10px;background:var(--bg2);border-left:2px solid var(--gold-dim);border-radius:4px}
   /* 模拟盘 */
@@ -329,6 +344,7 @@
       <button class="btn ai ai-only" onclick="runDaily()">🤖 自选推荐</button>
       <button class="btn ai ai-only" onclick="openScreen()">🔍 全市场选股</button>
       <button class="btn" onclick="openNews()">📰 新闻</button>
+      <button class="btn" onclick="openProfiles()">💼 画像</button>
       <button class="btn" onclick="openNotes()">📝 笔记</button>
       <button class="btn" onclick="openRules()">📐 规则</button>
       <button class="btn" onclick="openPaper()">💰 模拟盘</button>
@@ -509,6 +525,25 @@
       </div>
     </div>
     <div id="rulesBody"></div>
+  </div>
+</div>
+
+<div class="modal" id="profileModal" onclick="if(event.target===this)closeProfiles()">
+  <div class="modalcard">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start">
+      <div><h2>💼 投资画像 · 本金分级</h2><div class="sub2">现金本金 + 已持有股票 = 总资产 → 自动落档，不同资产不同玩法（核心：期望为正），注入所有 AI 分析。多档本地保存、切换即生效。</div></div>
+      <button class="xclose" onclick="closeProfiles()">×</button>
+    </div>
+    <div id="profActive" class="prof-active"></div>
+    <div class="prof-list" id="profList"></div>
+    <div class="rule-form" style="flex-direction:row;flex-wrap:wrap;align-items:center">
+      <input id="pf_name" placeholder="画像名(如 主力仓)" style="width:130px">
+      <input id="pf_cash" placeholder="现金本金元" style="width:130px">
+      <select id="pf_risk" class="scen-sel"></select>
+      <button class="btn ai" onclick="createProfile()">＋ 新建画像</button>
+    </div>
+    <div class="subh" style="margin-top:14px">5 档玩法（按总资产自动落档 · 当前档高亮）</div>
+    <div id="profTiers" class="prof-tiers"></div>
   </div>
 </div>
 

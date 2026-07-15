@@ -60,6 +60,8 @@ python app.py                        # http://127.0.0.1:5000
 | 全A名单 | 新浪 `hs_a` | ✅ 5527 只，`getHQNodeStockCount` 拿总数 + `getHQNodeData` 分页(80/页×70页并发)。**返回自带行情字段**，名单与板块统计共用 |
 | 板块归属 | 东财 `slist`（逐股） | ⚠️ **东财按端点封 IP**：`clist`(批量出数)**封死**（带/不带代理、走/不走 `em_get` 均 RemoteDisconnected），`slist`(逐股)放行 0.2s。故只能逐股回填 ~100min。**别再试 clist** |
 | 行业分类 | 新浪 `newSinaHy.php` | ❌ 仅 49 类、覆盖 3013/5527(**54%**)，表老旧，**已弃用** |
+| 历史资金流 | 新浪 MoneyFlow | 🔒 **只给 30 天**（传 `num=260` 也只回 30）→ `_pa_score` 的 `net20` 分量**无法回测**、不参与打分。需 ≥600 天源才能补，见 `plan/BACKLOG.md` |
+| 美元指数 / VIX | — | 🔒 **无可用源**：新浪外盘 `hf_DX` 实测返回空、VIX 无代码 → `macro_digest` 缺这两个关键风险指标。见 `plan/BACKLOG.md` |
 | 财报三表 | 新浪 | `financial_summary` 取营收/归母净利 + 同比 |
 | 新闻 | 东财个股新闻 + 财联社快讯 + 东财7×24 | 财联社走 v1 API + 本地签名（`md5(sha1(sorted query))`），零 key |
 
@@ -179,6 +181,9 @@ Python 语法：`python3 -c "import ast; [ast.parse(open(f).read()) for f in [..
 - **backlog 已清空**，只剩**可选**后续（见 `plan/BACKLOG.md`，均未承诺）：美元指数/VIX 换源补齐（新浪外盘无此二者）、溯源推广到 daily/screen、5 档 template 文案做成 UI 可编辑。
 - launchd 定时任务需**用户在自己终端** `launchctl bootstrap` 安装（本环境无 `~/Library` 写权限）；见 README「自动抓取新闻库」。
 - 设计文档在 `plan/`（各特性 spec + 知识缓存架构总纲 + `BACKLOG.md`）。
+- **🔒 卡在数据源的两项（代码已就位，拿到源即可接上；用户要求找到源时提醒他加）**，详见 `plan/BACKLOG.md`：
+  ① **`net20` 资金分量无法回测**——新浪 MoneyFlow 只给 30 天，因子回测要 ≥600 天。现该分量不参与打分、仅展示。接上后：`factor_lab.FACTORS` 加 `net20` → 重跑 `backtest()` → `_pa_score` 自动纳入。
+  ② **宏观缺 美元指数/VIX**——新浪外盘没有。接上后：`ds.global_markets()` 加两个条目即可，`macro_digest` 自动带上、提示词无需改。
 - **进行中：multi-agent 模拟交易 + 失败归因驱动的提示词进化**（`plan/2026-07-16-agent-evolution-design.md`）。一期(模板版本化)✅ / 二期(agent日循环+多账户)✅ / 三期(失败归因教训库)✅ / 四期(教训反哺5个AI)✅ / 五期 DebateDecider **代码已备好但默认不启用**（`decider='debate'` 可切）。**待用户浏览器验证**：🤖 Agent modal（存档增删/跑/看记录/选 decider）、持仓净盈亏显示。**板块统计不挂 launchd**——用户每交易日都开 app，`_universe_boot()` 已覆盖；非交易日本无数据可抓。**agent 也不挂定时**（用户：不开 app 就意味着那天不炒股）。
 - **踩坑备忘**：① 端口 **5000 被 macOS AirPlay 占**，本地起服务前关「隔空播放接收器」，或测试用 5001；② 涉及用户数据文件（`portfolio.json` 等）的测试**必须用临时副本**，别写真实数据；③ AI 类接口是推理模型，单次 30~90s，`curl` 用 `--max-time 200`；终端有代理时 `curl` 加 `--noproxy '*'`（python 脚本要 `os.environ.pop` 掉 `*_proxy`）。
 - **⚠️ 全市场池踩过的坑（改这块前必读）**：

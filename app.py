@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -36,6 +37,7 @@ import provenance
 import rules_store
 import store
 import universe
+import universe_store
 import websearch
 
 logging.basicConfig(level=logging.INFO,
@@ -987,9 +989,81 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+# ── 全市场股票池 + 板块日变化（universe_store） ────────────────────────────
+@app.route("/api/universe/status")
+def api_universe_status():
+    """池子健康度：总数/eligible/板块回填进度/板块数/最近刷新。"""
+    return jsonify(universe_store.status())
+
+
+@app.route("/api/universe/refresh", methods=["POST"])
+def api_universe_refresh():
+    """刷新全A名单（新浪 hs_a，~12s）+ 后台续跑板块回填（断点续传）。"""
+    n = universe_store.refresh_roster()
+    threading.Thread(target=universe_store.backfill_sectors, daemon=True).start()
+    return jsonify({"refreshed": n, **universe_store.status()})
+
+
+@app.route("/api/sectors")
+def api_sectors():
+    """板块日排行。?kind=sw1|sub|concept（默认 sw1）&date=&limit=
+
+    数据来自 universe_store.sector_daily；无当日数据时惰性补算一次（~6s）。
+    """
+    kind = request.args.get("kind", "sw1")
+    date = request.args.get("date", "")
+    limit = max(1, min(int(request.args.get("limit", 30)), 100))
+    rows = universe_store.sector_ranking(date=date, kind=kind, limit=limit)
+    if not rows and not date:  # 当日尚未统计过 -> 惰性补算
+        universe_store.snapshot_daily()
+        rows = universe_store.sector_ranking(kind=kind, limit=limit)
+    return jsonify({"date": rows[0]["date"] if rows else "", "kind": kind,
+                    "rows": rows, "status": universe_store.status()})
+
+
+@app.route("/api/sectors/snapshot", methods=["POST"])
+def api_sectors_snapshot():
+    """手动重算当日板块统计（~6s）。"""
+    return jsonify({"sectors": universe_store.snapshot_daily()})
+
+
+@app.route("/api/sectors/<name>")
+def api_sector_detail(name: str):
+    """单板块：近 N 日变化历史 + 成分股行情（按流通市值降序，上限 40）。"""
+    days = max(2, min(int(request.args.get("days", 30)), 250))
+    codes = universe_store.codes_of(name)
+    quotes = ds.tencent_quote(codes[:40]) if codes else {}
+    members = [{"code": c, "name": quotes.get(c, {}).get("name", c),
+                "price": quotes.get(c, {}).get("price"),
+                "chg_pct": quotes.get(c, {}).get("chg_pct"),
+                "turnover": quotes.get(c, {}).get("turnover"),
+                "lot_cost": quotes.get(c, {}).get("lot_cost")}
+               for c in codes[:40] if c in quotes]
+    members.sort(key=lambda m: m.get("chg_pct") or -99, reverse=True)
+    return jsonify({"sector": name, "total": len(codes),
+                    "history": universe_store.sector_history(name, days),
+                    "members": members})
+
+
+def _universe_boot() -> None:
+    """启动时后台预热：名单刷新 + 板块回填续跑 + 当日统计。不阻塞启动。"""
+    try:
+        universe_store.init()
+        st = universe_store.status()
+        if not st.get("ready") or st.get("roster_at", "")[:10] != _now()[:10]:
+            universe_store.refresh_roster()
+        if universe_store.status().get("sectors_pending", 0) > 0:
+            logger.info("板块归属回填续跑…（断点续传，期间 sector_of 降级手工池）")
+            universe_store.backfill_sectors()
+        universe_store.snapshot_daily()
+    except (OSError, ValueError, sqlite3.Error) as e:
+        logger.warning("全市场池预热失败（不影响其余功能）: %s", e)
+
+
 if __name__ == "__main__":
     if news_store.stats()["total"] == 0:  # 首次运行：后台一次性回填新闻库(不阻塞启动)
         threading.Thread(target=news_store.backfill, daemon=True).start()
         logger.info("首次运行：后台回填新闻库…（1–2 季度，约几分钟）")
+    threading.Thread(target=_universe_boot, daemon=True).start()
     logger.info("A股观察台启动 -> http://127.0.0.1:5000")
     app.run(host="127.0.0.1", port=5000, debug=False)

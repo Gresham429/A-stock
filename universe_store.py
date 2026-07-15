@@ -15,6 +15,7 @@ import logging
 import os
 import sqlite3
 import threading
+import time
 from datetime import datetime
 from typing import Any
 
@@ -38,7 +39,8 @@ SW1_SET = frozenset({
 })
 
 OTHER = "其他"
-_SUB_SCAN = 4  # 细分只在前 N 个标签里找（再往后是概念/地域/指数）
+_SUB_SCAN = 4          # 细分只在前 N 个标签里找（再往后是概念/地域/指数）
+_HEARTBEAT_STALE = 120  # 回填心跳超过该秒数视为进程已死、锁可抢占
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS stocks(
@@ -196,38 +198,80 @@ def pending_sector_codes(eligible_only: bool = True) -> list[str]:
         return [r["code"] for r in c.execute(sql)]
 
 
+def _claim_backfill() -> bool:
+    """跨进程抢锁：db 里写 pid + 心跳。心跳 <_HEARTBEAT_STALE 秒视为他人在跑。
+
+    必须跨进程——`ds.em_get` 的限流器是进程内全局（`_em_last_call`），
+    两个进程同时回填会让东财实际请求速率翻倍；东财已因此封掉 clist 端点，
+    slist 再被封则整个板块归属功能失效。
+    """
+    now = time.time()
+    with _LOCK, _conn() as c:
+        row = c.execute("SELECT v FROM meta WHERE k='backfill_hb'").fetchone()
+        if row:
+            try:
+                pid_s, ts_s = row["v"].split(",")
+                if int(pid_s) != os.getpid() and now - float(ts_s) < _HEARTBEAT_STALE:
+                    return False
+            except (ValueError, AttributeError):
+                pass  # 心跳格式坏了，视为无主
+        c.execute("INSERT INTO meta(k,v) VALUES('backfill_hb',?) "
+                  "ON CONFLICT(k) DO UPDATE SET v=excluded.v", (f"{os.getpid()},{now}",))
+    return True
+
+
+def _beat() -> None:
+    with _LOCK, _conn() as c:
+        c.execute("UPDATE meta SET v=? WHERE k='backfill_hb'", (f"{os.getpid()},{time.time()}",))
+
+
+def _release_backfill() -> None:
+    with _LOCK, _conn() as c:
+        c.execute("DELETE FROM meta WHERE k='backfill_hb'")
+
+
 def backfill_sectors(limit: int | None = None, eligible_only: bool = True) -> int:
     """逐股回填板块归属（东财 slist，走 em_get 限流 ≥1s）。可断点续传：只抓 sectors_at 为空的。
 
     全量 ~4989 只 eligible × ~1.25s ≈ 100 分钟，故设计为后台线程跑。
     回填期间 sector_of() 自动降级到手工池，功能不中断。
+    线程锁 + db 心跳双重互斥：前者挡同进程并发，后者挡多进程（app 与命令行同时跑）。
     """
     if not _backfill_lock.acquire(blocking=False):
-        logger.info("板块回填已在运行，跳过本次")
+        logger.info("板块回填已在本进程运行，跳过")
         return 0
     try:
+        if not _claim_backfill():
+            logger.info("板块回填已由其他进程运行（db 心跳未过期），跳过")
+            return 0
         todo = pending_sector_codes(eligible_only)
         if limit:
             todo = todo[:limit]
         if not todo:
+            _release_backfill()
             return 0
         logger.info("板块归属回填开始：%d 只待抓（预计 %.0f 分钟）", len(todo), len(todo) * 1.25 / 60)
         done = 0
-        for i, code in enumerate(todo, 1):
-            tags = ds.concept_tags(code, limit=30)
-            if not tags:
-                continue
-            sw1, sub, pairs = parse_tags(tags)
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            with _LOCK, _conn() as c:
-                c.execute("UPDATE stocks SET sw1=?, sub=?, sectors_at=? WHERE code=?",
-                          (sw1, sub, now, code))
-                c.executemany(
-                    "INSERT OR IGNORE INTO stock_sectors(code,sector,kind) VALUES(?,?,?)",
-                    [(code, s, k) for s, k in pairs])
-            done += 1
-            if i % 200 == 0:
-                logger.info("板块回填进度 %d/%d", i, len(todo))
+        try:
+            for i, code in enumerate(todo, 1):
+                tags = ds.concept_tags(code, limit=30)
+                if not tags:
+                    continue
+                sw1, sub, pairs = parse_tags(tags)
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                with _LOCK, _conn() as c:
+                    c.execute("UPDATE stocks SET sw1=?, sub=?, sectors_at=? WHERE code=?",
+                              (sw1, sub, now, code))
+                    c.executemany(
+                        "INSERT OR IGNORE INTO stock_sectors(code,sector,kind) VALUES(?,?,?)",
+                        [(code, s, k) for s, k in pairs])
+                done += 1
+                if i % 100 == 0:
+                    _beat()
+                if i % 200 == 0:
+                    logger.info("板块回填进度 %d/%d", i, len(todo))
+        finally:
+            _release_backfill()
         logger.info("板块归属回填完成：%d/%d 只", done, len(todo))
         return done
     finally:

@@ -190,6 +190,14 @@ def with_pnl(quotes: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
         pnl_amount = round(market_value - cost_value, 2)
         avg_cost = (cost_value / shares) if shares else 0
         pnl_pct = round((price / avg_cost - 1) * 100, 2) if avg_cost > 0 else None
+        # 净盈亏（到手的钱）：毛利 − 已付的买入费 − 若现在卖出要付的卖出费。
+        # 毛利是「账面数字」，净盈亏才是「你能拿走多少」——两者都给，别只给一个。
+        sched = profile_store.fee_schedule()
+        buy_fee = sum(fees.total("buy", float(lot.get("shares") or 0) * float(lot.get("cost") or 0),
+                                 sched) for lot in lots)
+        sell_fee = fees.total("sell", market_value, sched) if market_value > 0 else 0.0
+        pnl_net = round(pnl_amount - buy_fee - sell_fee, 2)
+        pnl_net_pct = round(pnl_net / cost_value * 100, 2) if cost_value > 0 else None
         today_pnl = 0.0
         for lot in lots:
             ls = float(lot.get("shares") or 0)
@@ -203,6 +211,8 @@ def with_pnl(quotes: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
             "price": price,
             "chg_pct": q.get("chg_pct"),
             "market_value": market_value,
+            "buy_fee": round(buy_fee, 2), "sell_fee_if_now": round(sell_fee, 2),
+            "pnl_net": pnl_net, "pnl_net_pct": pnl_net_pct,
             "cost_value": cost_value,
             "pnl_amount": pnl_amount,
             "pnl_pct": pnl_pct,
@@ -212,15 +222,25 @@ def with_pnl(quotes: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """组合总市值/总成本/总盈亏/当日盈亏。"""
+    """组合总市值/总成本/总盈亏（毛+净）/当日盈亏。
+
+    毛盈亏是账面数字，**净盈亏才是你能拿走多少**（扣掉已付买入费 + 现在卖出要付的费）。
+    两个都给——只给毛利会让人系统性高估自己的表现。
+    """
     mv = sum(r["market_value"] for r in rows)
     cv = sum(r["cost_value"] for r in rows)
     today = sum(r.get("today_pnl", 0) for r in rows)
+    net = sum(r.get("pnl_net", 0) for r in rows)
+    fee_paid = sum(r.get("buy_fee", 0) for r in rows)
+    fee_todo = sum(r.get("sell_fee_if_now", 0) for r in rows)
     return {
         "market_value": round(mv, 2),
         "cost_value": round(cv, 2),
         "pnl_amount": round(mv - cv, 2),
         "pnl_pct": round((mv / cv - 1) * 100, 2) if cv > 0 else None,
+        "pnl_net": round(net, 2),
+        "pnl_net_pct": round(net / cv * 100, 2) if cv > 0 else None,
+        "fee_paid": round(fee_paid, 2), "fee_if_sell_all": round(fee_todo, 2),
         "today_pnl": round(today, 2),
         "today_pnl_pct": round(today / (mv - today) * 100, 2) if (mv - today) > 0 else None,
         "count": len(rows),

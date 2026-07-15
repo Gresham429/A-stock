@@ -531,6 +531,10 @@
     <div class="sec-bar">
       <input id="agName" placeholder="存档名（如 微型A）" style="background:transparent;border:1px solid var(--line2);border-radius:6px;color:var(--txt);padding:7px 10px;font-size:12px;width:130px">
       <input id="agCap" placeholder="启动资金" value="10000" style="background:transparent;border:1px solid var(--line2);border-radius:6px;color:var(--txt);font-family:var(--mono);padding:7px 10px;font-size:12px;width:90px">
+      <select id="agDecider" style="background:var(--panel);border:1px solid var(--line2);border-radius:6px;color:var(--txt);padding:7px 8px;font-size:12px">
+        <option value="single">单决策(默认·快)</option>
+        <option value="debate">多空辩论(慢3倍)</option>
+      </select>
       <button class="btn" onclick="createAgent()">＋ 建存档</button>
       <button class="btn ai" onclick="runAllAgents(true)">▶ 全部试跑(不下单)</button>
       <span class="sec-status" id="agStatus">…</span>

@@ -22,6 +22,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from flask import Flask, jsonify, render_template, request
 
@@ -306,7 +307,13 @@ def rules_scenario():
 
 # ── 模拟委托交易（多存档，按真实行情+A股规则撮合） ────────────────────────
 def _market_open() -> bool:
-    now = datetime.now()
+    """A股是否在交易时段（9:30–11:30 / 13:00–15:00，北京时间）。
+
+    **必须用 Asia/Shanghai，不能用本地时区** —— 前端 `_cnTradingNow` 早就这么做了，
+    后端此前用 `datetime.now()`（本地），机器不在北京时区就会错判整个交易时段
+    （本机恰好是 CST 故未暴露）。撮合门控依赖它，判错 = agent 在错的时间下单/不下单。
+    """
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
     if not news_store.is_trading_day(now.date()):
         return False
     t = now.hour * 60 + now.minute
@@ -1427,7 +1434,8 @@ def _agent_boot() -> None:
     """
     if not agent_store.list_agents(active_only=True):
         return
-    for r in agent_loop.run_all():   # blocks 留空 → 每个 agent 各自按自己的档位/费率构建
+    # require_open：非交易时段只补判条件单、不跑决策（否则 16 次 v4-pro 全部被拒单白烧）
+    for r in agent_loop.run_all(require_open=True):
         if r.get("skipped"):
             logger.info("agent %s: %s", r.get("agent", "-"), r["skipped"])
         elif r.get("ok"):

@@ -460,6 +460,49 @@ def concept_tags(code: str, limit: int = 12) -> list[str]:
     return [it.get("f14", "") for it in items if it.get("f14")][:limit]
 
 
+def global_markets() -> list[dict[str, Any]]:
+    """外围市场**数值**指标（新浪外盘，纯 HTTP、不封 IP、海外可用）。
+
+    覆盖：WTI原油/布伦特原油/黄金/铜（`hf_*` 外盘期货）+ 道指/纳指/标普500（`gb_$*`）。
+    注：该源无美元指数(`hf_DX`)与 VIX，实测返回空，故不含。
+    返回 [{name, price, chg_pct}]；失败降级 []。
+    """
+    url = ("https://hq.sinajs.cn/list="
+           "hf_CL,hf_OIL,hf_GC,hf_HG,gb_$dji,gb_$ixic,gb_$inx")
+    try:
+        req = urllib.request.Request(url)
+        req.add_header("User-Agent", UA)
+        req.add_header("Referer", "https://finance.sina.com.cn/")
+        text = urllib.request.urlopen(req, timeout=10).read().decode("gbk", "ignore")
+    except OSError as e:
+        logger.warning("新浪外盘行情请求失败: %s", e)
+        return []
+    alias = {"纽约原油": "WTI原油", "伦敦原油": "布伦特原油",
+             "纽约黄金": "黄金", "纽约铜": "铜"}
+    out: list[dict[str, Any]] = []
+    for line in text.strip().split("\n"):
+        if '="' not in line:
+            continue
+        key = line.split("=")[0].strip().replace("var hq_str_", "")
+        v = line.split('"')[1].split(",")
+        if len(v) < 4 or not v[0]:
+            continue
+        try:
+            if key.startswith("hf_"):      # 外盘期货：[0]现价 [7]昨结算 [13]名称
+                price = float(v[0])
+                prev = float(v[7]) if v[7] else 0.0
+                name = v[13] if len(v) > 13 else key
+                chg = round((price - prev) / prev * 100, 2) if prev else None
+            else:                          # 美股指数 gb_$：[0]名称 [1]现价 [2]涨跌幅%
+                name = v[0]
+                price = float(v[1])
+                chg = round(float(v[2]), 2)
+        except (ValueError, IndexError):
+            continue
+        out.append({"name": alias.get(name, name), "price": price, "chg_pct": chg})
+    return out
+
+
 # ── 全市场财经/政策快讯（财联社 + 东财 7×24，用于 AI「自我更新知识」A 方案）──
 def cls_telegraph(page_size: int = 30) -> list[dict[str, Any]]:
     """财联社电报（全市场实时快讯，v1 API + 本地签名，零 key）。"""

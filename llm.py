@@ -292,11 +292,16 @@ def company_profile(name: str, code: str,
     return _parse_json(content)
 
 
-def macro_digest(news: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    """从全球/财经快讯提炼「对A股有指向的外围要点 + 板块传导」，flash 合成。只据给定、不编造。"""
+def macro_digest(news: list[dict[str, Any]] | None = None,
+                 markets: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """从全球快讯 + 外围市场数值提炼「对A股有指向的外围要点 + 板块传导」，flash 合成。只据给定、不编造。"""
     txt = "\n".join(f"- {n.get('time', '') or n.get('date', '')} {n.get('title', '')}"
                     for n in (news or [])[:40]) or "（暂无快讯）"
-    prompt = f"""下面是全球/财经实时快讯。请提炼**对 A股有指向性**的外围因素，只据给定、不编造、不预测指数点位。
+    mk = "、".join(f"{m.get('name')} {m.get('price')}({m.get('chg_pct'):+}%)"
+                  for m in (markets or []) if m.get("chg_pct") is not None) or "（无）"
+    prompt = f"""下面是外围市场实时数值 + 全球/财经快讯。请提炼**对 A股有指向性**的外围因素，只据给定、不编造、不预测指数点位。
+【外围市场实时数值】（客观涨跌，优先据此判断，别只看新闻措辞）
+{mk}
 【快讯】
 {txt}
 严格返回 JSON：

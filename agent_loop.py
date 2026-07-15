@@ -310,10 +310,14 @@ def sweep_conditions(agent_id: int) -> list[dict[str, Any]]:
 
 # ── 日循环 ─────────────────────────────────────────────────────────────────
 def already_ran(agent_id: int, date: str = "") -> bool:
-    """今天是否已跑过 —— 幂等门。用户一天开三次 app，不能跑三次（多花三份 API 钱、
-    且会在同一天产生三份互相矛盾的决策，污染归因数据）。"""
+    """今天是否**真跑**过 —— 幂等门。一天开三次 app 不能跑三次（多花三份 API 钱，
+    且同日三份互相矛盾的决策会污染归因数据）。
+
+    **只认真跑**：试跑(dry_run)的阶段名带「试跑-」前缀，不计入。否则试跑会把当天锁死，
+    开盘后的真跑反被自己挡掉——试跑必须是无副作用的。
+    """
     date = date or date_cls.today().isoformat()
-    return any(r["phase"] == "复盘" for r in agent_store.runs_of(agent_id, date, limit=20))
+    return any(r["phase"] == "复盘" for r in agent_store.runs_of(agent_id, date, limit=30))
 
 
 def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
@@ -326,6 +330,9 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
     today = date_cls.today().isoformat()
     if not force and not dry_run and already_ran(agent_id, today):
         return {"ok": True, "skipped": "今日已跑过（幂等）", "agent": ag["name"], "date": today}
+    # 试跑的日志加前缀 —— 不污染幂等门、不与真跑记录混淆
+    def _ph(p: str) -> str:
+        return ("试跑-" + p) if dry_run else p
     acct = paper_store.get_account(ag["account_id"])
     if not acct:
         return {"ok": False, "msg": "模拟盘账户不存在"}
@@ -338,14 +345,14 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
     swept = sweep_conditions(agent_id)   # 先补判：app 关闭期间条件单可能已触发
     if swept:
         acct = paper_store.get_account(ag["account_id"]) or acct
-    agent_store.log_run(agent_id, today, "研判",
+    agent_store.log_run(agent_id, today, _ph("研判"),
                         f"关注板块={focus or '全市场'}"
                         + (f"；条件单补判触发 {len(swept)} 笔" if swept else ""))
 
     # ② 选股（复用既有 _screen_rows；延迟导入避免循环依赖）
     import app
     cands = app._screen_rows(float(acct["cash"]), focus)[:20]
-    agent_store.log_run(agent_id, today, "选股", f"候选 {len(cands)} 只 focus={focus}")
+    agent_store.log_run(agent_id, today, _ph("选股"), f"候选 {len(cands)} 只 focus={focus}")
 
     # 持仓 + 行情
     positions = paper_store.positions_of(ag["account_id"])
@@ -382,9 +389,9 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
     try:
         intents, raw = decider(ctx)
     except (llm.LLMError, ValueError) as e:
-        agent_store.log_run(agent_id, today, "决策", f"失败: {e}", ok=False)
+        agent_store.log_run(agent_id, today, _ph("决策"), f"失败: {e}", ok=False)
         return {"ok": False, "msg": f"决策失败: {e}"}
-    agent_store.log_run(agent_id, today, "决策",
+    agent_store.log_run(agent_id, today, _ph("决策"),
                         f"{ag.get('decider')} → {len(intents)} 条意向", detail=raw,
                         ms=int((time.time() - t0) * 1000))
 
@@ -416,13 +423,13 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
                     note=f"建仓价 {fill} 的 {STOP_LOSS_PCT}%")
             else:
                 agent_store.cancel_conditions(agent_id, it.code)
-    agent_store.log_run(agent_id, today, "下单",
+    agent_store.log_run(agent_id, today, _ph("下单"),
                         f"成交 {len(filled)} / 否决 {len(rejected)}",
                         detail={"filled": filled, "rejected": rejected})
 
     # ⑥ 复盘：确定性失败检测
     lessons = detect_failures(agent_id, ctx, [f for f in filled if not f.get("dry")])
-    agent_store.log_run(agent_id, today, "复盘",
+    agent_store.log_run(agent_id, today, _ph("复盘"),
                         f"教训 {len(lessons)} 条: {', '.join(lessons) or '无'}")
     acct2 = paper_store.get_account(ag["account_id"]) or acct
     agent_store.log_equity(agent_id, today, float(acct2["cash"]), mv,
@@ -437,10 +444,14 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
 
 
 def run_all(dry_run: bool = False, blocks: str = "", force: bool = False,
-            workers: int = 3) -> list[dict[str, Any]]:
+            workers: int = 3, require_open: bool = False) -> list[dict[str, Any]]:
     """跑所有启用的 agent（多档位 / 同档多账户并行实验）。
 
     blocks 留空则每个 agent 各自构建（推荐——多档位实验必须如此）。
+
+    **require_open=True（启动自动跑用）：非交易时段只补判条件单，不跑决策。**
+    因为 `paper_store.order` 在 `market_open=False` 时一律拒单——非交易时段跑决策
+    等于烧掉每 agent 一次 v4-pro 却一笔不成。手动触发(force)与试跑(dry_run)不受此限。
 
     **并行 workers=3**：LLM 调用是 I/O 阻塞，串行 12 个 agent 要 8 分钟。
     不设更高是因为：① 每个 agent 还会打新浪/腾讯取行情，并发太高会被限流；
@@ -456,6 +467,19 @@ def run_all(dry_run: bool = False, blocks: str = "", force: bool = False,
     agents = agent_store.list_agents(active_only=True)
     if not agents:
         return []
+    if require_open and not dry_run and not force:
+        import app
+        if not app._market_open():
+            fired = []
+            for ag in agents:      # 非交易时段仍补判条件单：补的是**历史**已发生的触发
+                try:
+                    fired += sweep_conditions(ag["id"])
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("条件单补判失败 %s: %s", ag["name"], e)
+            logger.info("非交易时段：跳过 %d 个 agent 的决策（补判条件单 %d 笔）",
+                        len(agents), len(fired))
+            return [{"ok": True, "skipped": "非交易时段（决策已跳过，条件单已补判）",
+                     "swept": len(fired)}]
 
     def one(ag: dict[str, Any]) -> dict[str, Any]:
         try:

@@ -42,6 +42,7 @@ python app.py                        # http://127.0.0.1:5000
 | `universe.py` | **降级为「精选龙头」标记**（10 一级 → 48 二级 → 170 只）。`universe_store` 未就绪/未回填时的 fallback + `is_leader` 标记。不再是主候选池 |
 | `tests/test_universe_store.py` | 板块解析回归测试（9 例，零依赖，`python3 tests/test_universe_store.py` 直接跑；项目无 pytest） |
 | `tests/test_screen_branches.py` | 选股三分支存在性 + `_balanced_pick` 契约（5 例，离线）。**因 `_balanced_pick` 曾被盲切片整个删掉而生**——见踩坑备忘 |
+| `tests/test_agent_gates.py` | agent 三道门 + 教训闭集（5 例，离线）。**因「试跑污染幂等门」「非交易时段白烧 LLM」两个 bug 而生** |
 | `store.py` | 自选股持久化 |
 | `config.py` | 读 `.env`（DeepSeek + 博查 key，绝不硬编码） |
 | `templates/index.html` | UI 结构 + 全部 CSS（深色终端风） |
@@ -111,7 +112,11 @@ python app.py                        # http://127.0.0.1:5000
   - **决策可插拔**：建存档时 UI 可选（默认 single，选 debate 会先弹窗说明代价）。`single`(默认，1×v4-pro≈36s) / `debate`(多空**并行**→裁判，≈120s 非 3×串行，已备好**默认不启用**——先跑 single 拿基线，用数据证明需要再切，两者归因落同一张表可 A/B)。
   - **教训反哺**：`app._lesson_block()` 与 `_tier_block`/`_fee_block`/`_macro_block` 并列**注入 5 个已有 AI**。喂的是**事实统计**（「追高 4 次」），非让 AI 改写提示词——故不受 784 笔样本量死局限制。
   - **条件单（解决「app 关着的区间段怎么操作」）**：`agent_store.conditions` + `agent_loop.sweep_conditions()`。**只做纪律不做预测**——买入即挂 `STOP_LOSS_PCT=-8%` 止损（规则），不挂「涨到X就追」（预测）。app 关闭期间无实时行情 → **用日K回溯补判**：`low ≤ 止损价` 即真触发过，按**触发价**成交（不按当日最优——日K无日内路径，乐观假设会系统性高估表现，是回测最常见的自欺）。同日止损止盈都触发时**止损优先**（保守）。实测触发日 2026-04-17 精确命中、自动撤单、自动记教训。
-  - **启动即跑 + 双重门控**：`app._agent_boot()` 在启动后台线程里跑 `run_all()`。**非交易日门**(`news_store.is_trading_day`) + **每 agent 幂等门**(`already_ran` 查当日有无「复盘」记录) → 一天开三次 app 只跑一次（否则多花三份 API 钱、且同日三份矛盾决策会污染归因）。
+  - **启动即跑 + 三道门**：`app._agent_boot()` 在启动后台线程里跑 `run_all(require_open=True)`。
+    ① **非交易日门**(`news_store.is_trading_day`)；
+    ② **交易时段门**(`require_open` → `app._market_open()`)：**非交易时段只补判条件单、不跑决策**——`paper_store.order` 在 `market_open=False` 时一律拒单，半夜开 app 跑决策 = 16 次 v4-pro 全部产出后被拒，纯烧钱且一笔不成。手动 `force` 与 `dry_run` 不受此限；
+    ③ **每 agent 幂等门**(`already_ran` **精确匹配** phase=="复盘") → 一天开三次 app 只跑一次。
+  - **⚠️ 试跑必须无副作用**：`dry_run` 的阶段名带 **「试跑-」前缀**(`_ph()`)，`already_ran` 只认精确的「复盘」。曾有 bug：试跑也写「复盘」→ 幂等门以为今天跑过 → **开盘后的真跑被自己挡掉**，那天 agent 等于没交易。改 `run_day` 的日志点必须走 `_ph()`。
   - **前端「🤖 Agent」modal**：存档增删/试跑/跑 + 净值曲线 + **买卖记录(含否决原因)** + 条件单 + 教训 + 日循环日志。
   - **实测**：日循环 36s 跑通；AI 在候选普遍 `range_pos=100` 时**主动拒绝追高**（说明注入块生效）；8 类失败检测器合成场景全命中；风控三道门全否决。
   - **踩坑**：`paper_store` 无 `_market_open()`（那是 `order()` 的参数），实现在 `app._market_open()`；`paper_store.fees()/order()` 已加 `sched` 参数——agent 多账户并行时**各账户绑自己画像的费率**，不能都读全局 active。
@@ -197,5 +202,6 @@ Python 语法：`python3 -c "import ast; [ast.parse(open(f).read()) for f in [..
   - **北交所号段 = 8xxxxx / 4xxxxx / 92xxxx**（920 为 2024 年起新号段）。`ds.market_prefix()` 里 **`92` 必须先于 `9` 判断**——9 开头的另一支是沪B（900xxx，仍属上海）。曾有 bug：920xxx 判成 `sh`、4xxxxx 判成 `sz`，导致北交所股票**行情/指标全取不到**（加进自选股会一片空白）。已修（2026-07-15），实测 `bj920000`/`bj430047` 有数据、`sh920000` 返回空。`universe_store.is_bj()` 与之等价，测试固化了「两者永远一致」的不变量。
   - **扩池会引爆手工池永不触发的崩溃**（已修，勿回退）：`tencent_quote` 单 URL 拼全部代码 → 全池 44KB 报 **HTTP 414**（实测 800 只可过、2000 只失败）→ 已 `QUOTE_CHUNK=400` 分批并发；`_annualized_vol` 遇 0 收盘价 → **math domain error 穿透 `executor.map` 打崩整个选股**；`sina_metrics` 的 `closes[-21]==0` ZeroDivisionError + try 块外的 `float(x['trade'])` ValueError。兜底见 `app._safe_metrics`。
   - **slist 标签去重顺序坑**：东财同板块会以 `银行Ⅱ` 与 `银行` 两种形态返回。若按**原始标签**分类却按**去后缀名**去重，`银行Ⅱ` 判成 concept 抢占去重位 → **`sw1` 标记永久静默丢失**（`codes_of('银行')` 照常能用、只有 `sector_ranking(kind='sw1')` 漏板块，极隐蔽）。已固化为回归用例。
+  - **⚠️ 时段判定一律用 `Asia/Shanghai`，不用本地时区**：`app._market_open()` 曾用 `datetime.now()`（本地），本机恰是 CST 故未暴露——**机器不在北京时区（如出国）就会整个交易时段判错**，agent 会在错误时间下单/不下单。前端 `_cnTradingNow` 早就用 `Asia/Shanghai` 了，后端已统一。实测模拟洛杉矶时区：本地 11:49（旧代码误判为交易中）→ 修复后正确跟随北京 02:49 返回 False。
   - **⚠️ `_screen_rows` 有三条互斥分支，测一条 ≠ 另两条活着**：① `focus` 且池≤`_PA_RANK_MAX`(200) → 形态排序（**不调 `_balanced_pick`**）；② `focus` 但池>200 → 均衡采样；③ `focus=''` 全市场 → 流通市值预筛 + 均衡采样（**agent 默认走这条**）。曾因一次盲切片（`s[:idx(_pa_score)] + new + s[idx(_screen_rows):]`，`_balanced_pick` 正好夹在两者之间）把它整个删掉，而当时只测了分支①，NameError 潜伏到 agent 跑全市场才炸。**改 `_screen_rows` 一带的代码，三条分支都要跑**（`tests/test_screen_branches.py` 已固化）。
   - **回填必须跨进程互斥**：`ds.em_get` 限流器是**进程内**全局（`_em_last_call`），app 与命令行同时回填 → 东财请求速率翻倍 → clist 就是这么被封的，slist 再被封功能全废。故用 db 心跳锁（`meta.backfill_hb = pid,ts`，超 120s 可抢占）+ `threading.Lock` 双重互斥。

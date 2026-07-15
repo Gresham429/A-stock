@@ -19,6 +19,7 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -124,6 +125,76 @@ def tencent_quote(codes: list[str]) -> dict[str, dict[str, Any]]:
             "lot_cost": round(f(3) * 100, 0),  # 1手(100股)成本
         }
     return result
+
+
+# ── 全市场名单 + 快照（新浪 hs_a，一份数据两用：名单 + 板块日统计） ────────
+_SINA_HQ = ("https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php"
+            "/Market_Center.getHQNodeData?page={page}&num={num}&sort=symbol&asc=1&node=hs_a")
+_SINA_CNT = ("https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php"
+             "/Market_Center.getHQNodeStockCount?node=hs_a")
+_SINA_REF = "https://vip.stock.finance.sina.com.cn/"
+
+
+def sina_stock_count() -> int:
+    """全 A 股票总数（新浪 hs_a 节点）。失败返回 0。"""
+    try:
+        return int(_http_get(_SINA_CNT, ref=_SINA_REF, gbk=True, timeout=10).strip().strip('"'))
+    except (OSError, ValueError) as e:
+        logger.warning("新浪 A 股总数请求失败: %s", e)
+        return 0
+
+
+def _sina_hq_page(page: int, num: int = 80) -> list[dict[str, Any]]:
+    """新浪 hs_a 单页。失败返回 []（单页失败不拖垮全量）。"""
+    try:
+        raw = _http_get(_SINA_HQ.format(page=page, num=num), ref=_SINA_REF, gbk=True, timeout=20)
+        data = json.loads(raw) if raw.strip().startswith("[") else []
+        return data if isinstance(data, list) else []
+    except (OSError, ValueError) as e:
+        logger.warning("新浪 hs_a 第 %d 页失败: %s", page, e)
+        return []
+
+
+def sina_all_stocks(num: int = 80, workers: int = 8) -> list[dict[str, Any]]:
+    """全 A 名单 + 实时快照（一次拉全，约 5527 只、70 页并发 ~10s）。
+
+    字段自带涨跌幅/成交额/换手/市值/PE/PB，故名单刷新与板块日统计共用这一份数据，
+    无需再走腾讯分批（单 URL 装不下 5000+ 代码）。失败返回 []。
+    """
+    total = sina_stock_count()
+    if not total:
+        return []
+    pages = (total + num - 1) // num
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        chunks = list(ex.map(lambda p: _sina_hq_page(p, num), range(1, pages + 1)))
+    out: dict[str, dict[str, Any]] = {}
+    for items in chunks:
+        for it in items:
+            code = str(it.get("code") or "").strip()
+            if len(code) != 6 or not code.isdigit():
+                continue
+            out[code] = {
+                "code": code,
+                "symbol": str(it.get("symbol") or ""),
+                "name": str(it.get("name") or "").strip(),
+                "price": _fnum(it.get("trade")),
+                "chg_pct": _fnum(it.get("changepercent")),
+                "amount": _fnum(it.get("amount")),          # 成交额（元）
+                "turnover": _fnum(it.get("turnoverratio")),  # 换手率（%）
+                "mktcap": _fnum(it.get("mktcap")),           # 总市值（万元）
+                "float_mcap": _fnum(it.get("nmc")),          # 流通市值（万元）
+                "pe_ttm": _fnum(it.get("per")),
+                "pb": _fnum(it.get("pb")),
+            }
+    logger.info("新浪全市场名单: %d/%d 只（%d 页）", len(out), total, pages)
+    return list(out.values())
+
+
+def _fnum(v: Any) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 # ── 波动率 + 资金流（新浪，一份数据两用） ─────────────────────────────────

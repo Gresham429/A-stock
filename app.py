@@ -126,7 +126,7 @@ def _market_overview_payload(force: bool = False, with_ai: bool = True) -> dict:
     ai = None
     if config.llm_enabled() and idx.get("indices"):
         try:
-            ai = llm.market_overview(idx["indices"], breadth, _tier_block() + _ai_web_context("market"))
+            ai = llm.market_overview(idx["indices"], breadth, _tier_block() + _macro_block() + _ai_web_context("market"))
         except llm.LLMError as e:
             logger.warning("大盘研判 AI 失败: %s", e)
     model = config.DEEPSEEK_MODEL if config.llm_enabled() else None
@@ -541,7 +541,7 @@ def recommend_daily():
     rows = _overview_rows(watchlist)
     quotes = ds.tencent_quote(portfolio.codes()) if portfolio.codes() else {}
     holdings = portfolio.with_pnl(quotes)
-    web_ctx = _tier_block() + _ai_web_context("market")
+    web_ctx = _tier_block() + _macro_block() + _ai_web_context("market")
     news_map = {c: [n.get("title", "") for n in news_store.query(code=c, days=30, limit=3)]
                 for c in watchlist}   # 每股本地库近期标题 → 一句话叙事(0 额外 LLM)
     try:
@@ -575,6 +575,28 @@ def _tier_block() -> str:
         return ""
     total, hn = _total_assets()
     return profile_store.block_for_ai(prof.get("cash") or 0, total, hn)
+
+
+def _macro_block() -> str:
+    """全球宏观/地缘 digest 注入块（据全球快讯 flash 合成「要点+板块指向」，ai_cache kind=macro 当日缓存）。"""
+    if not config.llm_enabled():
+        return ""
+    hit = ai_cache.get("macro", {})
+    if hit:
+        d = hit["result"].get("digest") or {}
+    else:
+        news = ds.eastmoney_global_news(30) + ds.cls_telegraph(30)
+        try:
+            d = llm.macro_digest(news)
+        except llm.LLMError:
+            return ""
+        ai_cache.put("macro", {}, {"digest": d}, llm.FLASH_MODEL)
+    pts = "；".join(d.get("points") or [])
+    smap = "；".join(d.get("sector_map") or [])
+    if not (pts or smap):
+        return ""
+    return (f"\n【全球宏观/地缘·对A股板块指向(每日更新)】\n"
+            f"要点：{pts}\n板块指向：{smap}\n外围倾向：{d.get('bias', '')}\n")
 
 
 def _sync_scenario() -> None:
@@ -710,7 +732,7 @@ def recommend_position(code: str):
                                          f_news.result(), f_kline.result())
     vol_hist = _vol_hist(kl)
     prof = _company_profile(code, q.get("name", ""), news, financials)
-    web_ctx = _tier_block() + _profile_block(prof) + _ai_web_context("position", code, q.get("name", ""))
+    web_ctx = _tier_block() + _macro_block() + _profile_block(prof) + _ai_web_context("position", code, q.get("name", ""))
     scen = rules_store.get_scenario()
     rule_map = rules_store.active_rule_map(scen)
     try:
@@ -765,7 +787,7 @@ def recommend_entry(code: str):
     vol_hist = _vol_hist(kl)
     market_ctx = _market_overview_payload().get("ai")
     prof = _company_profile(code, q.get("name", ""), news, financials)
-    web_ctx = _tier_block() + _profile_block(prof) + _ai_web_context("position", code, q.get("name", ""))
+    web_ctx = _tier_block() + _macro_block() + _profile_block(prof) + _ai_web_context("position", code, q.get("name", ""))
     scen = rules_store.get_scenario()
     rule_map = rules_store.active_rule_map(scen)
     try:
@@ -810,7 +832,7 @@ def recommend_screen():
     if not rows:
         return jsonify({"ok": False, "msg": "候选池行情拉取失败，请重试"}), 502
     market_ctx = _market_overview_payload().get("ai")  # 复用缓存的大盘研判结论
-    web_ctx = _tier_block() + _ai_web_context("market")
+    web_ctx = _tier_block() + _macro_block() + _ai_web_context("market")
     try:
         result = llm.market_screen(rows, capital, focus, market_ctx, web_ctx)
     except llm.LLMError as e:

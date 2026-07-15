@@ -292,6 +292,25 @@ def company_profile(name: str, code: str,
     return _parse_json(content)
 
 
+def macro_digest(news: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """从全球/财经快讯提炼「对A股有指向的外围要点 + 板块传导」，flash 合成。只据给定、不编造。"""
+    txt = "\n".join(f"- {n.get('time', '') or n.get('date', '')} {n.get('title', '')}"
+                    for n in (news or [])[:40]) or "（暂无快讯）"
+    prompt = f"""下面是全球/财经实时快讯。请提炼**对 A股有指向性**的外围因素，只据给定、不编造、不预测指数点位。
+【快讯】
+{txt}
+严格返回 JSON：
+{{
+  "points": ["3~6 条对A股有影响的全球宏观/地缘/大宗商品/美联储/汇率要点，每条一句"],
+  "sector_map": ["每条:某因素→利好/利空 哪些A股板块(如『油价涨→利好油气开采/油运，利空航空/化工下游』)"],
+  "bias": "综合外围对A股当前偏多/偏空/中性(一句,含理由)"
+}}"""
+    content = _chat([{"role": "system", "content": _DISCLAIMER},
+                     {"role": "user", "content": prompt}],
+                    model=FLASH_MODEL, max_tokens=3000)
+    return _parse_json(content)
+
+
 def position_advice(holding: dict[str, Any], quote: dict[str, Any],
                     metrics: dict[str, Any], financials: list[dict[str, Any]] | None = None,
                     news: list[dict[str, Any]] | None = None,

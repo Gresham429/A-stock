@@ -188,6 +188,23 @@
   .subh{font-size:11px;color:var(--muted);font-family:var(--mono);text-transform:uppercase;letter-spacing:1px;margin:18px 0 8px;border-left:2px solid var(--gold);padding-left:8px}
 
   /* 名词解释弹窗 */
+  /* Agent 模拟盘 */
+  .ag-row{display:grid;grid-template-columns:1.3fr .9fr .9fr .8fr .8fr 1.5fr;gap:8px;align-items:center;
+    padding:9px 10px;border-bottom:1px solid var(--line);font-size:12.5px;cursor:pointer;border-radius:6px}
+  .ag-row:hover{background:var(--panel)}
+  .ag-row.head{color:var(--muted);font-family:var(--mono);font-size:10.5px;text-transform:uppercase;
+    letter-spacing:1px;cursor:default;border-bottom:1px solid var(--line2)}
+  .ag-row.head:hover{background:transparent}
+  .ag-row .num{font-family:var(--mono);text-align:right}
+  .ag-tabs{display:flex;gap:6px;margin:12px 0 6px}
+  .ag-ord{display:grid;grid-template-columns:auto auto 1fr auto auto auto;gap:10px;padding:6px 9px;
+    border-bottom:1px solid var(--line);font-family:var(--mono);font-size:11.5px;align-items:center}
+  .ag-ord.rej{opacity:.55}
+  .ag-les{display:flex;justify-content:space-between;gap:10px;padding:7px 10px;background:var(--panel);
+    border:1px solid var(--line);border-radius:6px;margin-bottom:5px;font-size:12px}
+  .ag-les b{color:var(--up);font-family:var(--mono)}
+  .ag-log{font-family:var(--mono);font-size:11px;color:var(--muted);padding:5px 9px;border-left:2px solid var(--line2);margin-bottom:4px}
+  .ag-log b{color:var(--gold)}
   /* 板块每日变化 */
   .sec-bar{display:flex;align-items:center;gap:10px;margin:14px 0 4px;flex-wrap:wrap}
   .sec-kinds{display:flex;gap:6px}
@@ -365,6 +382,7 @@
       <button class="btn ai ai-only" onclick="runDaily()">🤖 自选推荐</button>
       <button class="btn ai ai-only" onclick="openScreen()">🔍 全市场选股</button>
       <button class="btn" onclick="openSectors()">🧭 板块</button>
+      <button class="btn ai ai-only" onclick="openAgents()">🤖 Agent</button>
       <button class="btn" onclick="openNews()">📰 新闻</button>
       <button class="btn" onclick="openProfiles()">💼 画像</button>
       <button class="btn" onclick="openNotes()">📝 笔记</button>
@@ -499,6 +517,26 @@
       </div>
     </div>
     <div id="newsBody"></div>
+  </div>
+</div>
+
+<div class="modal" id="agentsModal" onclick="if(event.target===this)closeAgents()">
+  <div class="modalcard" style="width:min(980px,97vw)">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start">
+      <div><h2>🤖 Agent 模拟盘</h2>
+        <div class="sub2">AI 每交易日自主选股/买卖 · 真实撮合(整手/涨跌停/T+1/真实费率) · 只从<b>失败</b>学教训。
+          启动 app 时自动跑一次（非交易日与重复打开会跳过）。</div></div>
+      <button class="xclose" onclick="closeAgents()">×</button>
+    </div>
+    <div class="sec-bar">
+      <input id="agName" placeholder="存档名（如 微型A）" style="background:transparent;border:1px solid var(--line2);border-radius:6px;color:var(--txt);padding:7px 10px;font-size:12px;width:130px">
+      <input id="agCap" placeholder="启动资金" value="10000" style="background:transparent;border:1px solid var(--line2);border-radius:6px;color:var(--txt);font-family:var(--mono);padding:7px 10px;font-size:12px;width:90px">
+      <button class="btn" onclick="createAgent()">＋ 建存档</button>
+      <button class="btn ai" onclick="runAllAgents(true)">▶ 全部试跑(不下单)</button>
+      <span class="sec-status" id="agStatus">…</span>
+    </div>
+    <div id="agList"></div>
+    <div id="agDetail"></div>
   </div>
 </div>
 

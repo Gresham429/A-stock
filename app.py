@@ -56,6 +56,9 @@ notes_store.init()  # 私域笔记表
 rules_store.init()  # 交易规则库（首次灌入蒸馏种子）
 paper_store.init()  # 模拟交易存档
 profile_store.init()  # 本地多档投资画像（现金本金→按总资产分级玩法）
+agent_store.init()  # agent 配置/日志/教训/条件单（表是增量加的，靠 IF NOT EXISTS 自愈）
+template_store.init()  # 提示词模板版本化
+factor_lab.init()  # 因子 IC 回测
 _news_refreshing = [False]
 
 
@@ -1319,7 +1322,8 @@ def api_agents_run(gid: int):
     b = request.get_json(silent=True) or {}
     blocks = _tier_block() + _fee_block() + _lesson_block() + rules_store.for_ai()
     return jsonify(agent_loop.run_day(gid, focus=b.get("focus", ""),
-                                      dry_run=bool(b.get("dry")), blocks=blocks))
+                                      dry_run=bool(b.get("dry")), blocks=blocks,
+                                      force=bool(b.get("force"))))
 
 
 @app.route("/api/agents/run_all", methods=["POST"])
@@ -1336,12 +1340,33 @@ def api_agents_run_all():
 @app.route("/api/agents/<int:gid>/runs")
 def api_agents_runs(gid: int):
     """某 agent 的日循环日志 + 净值曲线 + 教训。"""
+    ag = agent_store.get_agent(gid) or {}
     return jsonify({"runs": agent_store.runs_of(gid, request.args.get("date", ""),
                                                 _arg_int("limit", 40)),
+                    "orders": paper_store.orders_of(ag.get("account_id", 0), 60),
+                    "positions": paper_store.positions_of(ag.get("account_id", 0)),
+                    "conditions": agent_store.conditions_of(gid),
                     "equity": agent_store.equity_of(gid, _arg_int("days", 90)),
                     "lessons": agent_store.lessons(gid, 20),
                     "account": paper_store.get_account(
                         (agent_store.get_agent(gid) or {}).get("account_id", 0))})
+
+
+def _agent_boot() -> None:
+    """启动时跑 agent 日循环（用户要求「只在我每天打开 app.py 后进行持盘操作」）。
+
+    双重门控：`run_all` 内部有非交易日门 + 每 agent 幂等门（今日跑过就跳过）——
+    一天开三次 app 只会跑一次。
+    """
+    if not agent_store.list_agents(active_only=True):
+        return
+    blocks = _tier_block() + _fee_block() + _lesson_block() + rules_store.for_ai()
+    for r in agent_loop.run_all(blocks=blocks):
+        if r.get("skipped"):
+            logger.info("agent %s: %s", r.get("agent", "-"), r["skipped"])
+        elif r.get("ok"):
+            logger.info("agent %s 日循环: 成交 %d / 教训 %d", r.get("agent"),
+                        len(r.get("filled") or []), len(r.get("lessons") or []))
 
 
 def _universe_boot() -> None:
@@ -1361,6 +1386,7 @@ def _universe_boot() -> None:
         agent_store.purge()
         factor_lab.init()
         factor_lab.purge()
+        _agent_boot()
     except (OSError, ValueError, sqlite3.Error) as e:
         logger.warning("全市场池预热失败（不影响其余功能）: %s", e)
 

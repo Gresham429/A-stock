@@ -42,6 +42,7 @@ MIN_CASH_PCT = 10.0        # 现金下限
 MAX_VOL = 120.0            # 年化波动率上限
 STALE_DAYS = 20            # 持有超过 N 个交易日无动作 = 僵持
 LOSS_CUT_PCT = -12.0       # 浮亏超过此值仍未止损 = 止损迟滞
+STOP_LOSS_PCT = -8.0       # 买入即挂的止损线（纪律，非预测）
 
 
 @dataclass(frozen=True)
@@ -234,15 +235,93 @@ def detect_failures(agent_id: int, ctx: dict[str, Any], filled: list[dict]) -> l
     return found
 
 
+# ── 条件单补判（解决「app 关着的区间段怎么操作」） ─────────────────────────
+def sweep_conditions(agent_id: int) -> list[dict[str, Any]]:
+    """用**日K回溯**判定条件单在 app 关闭期间是否曾被触发，触发则按触发价成交。
+
+    为什么这么做：app 关着就没有实时行情，条件单无从触发。但**日K记录了真实发生过的
+    最高/最低价**——「跌破 38 止损」只要那几天有 low ≤ 38 就是真触发过，用它补判
+    不是作弊，是还原事实。
+
+    **保守成交**：按 trigger_price 而非当日最优价成交。日K只有 OHLC、不知道日内路径，
+    乐观假设会系统性高估策略表现（这正是回测最常见的自欺）。
+
+    局限：同日既触发止损又触发止盈时，无法判定孰先孰后 → 按**止损优先**处理（保守）。
+    """
+    ag = agent_store.get_agent(agent_id)
+    if not ag:
+        return []
+    conds = agent_store.live_conditions(agent_id)
+    if not conds:
+        return []
+    sched = profile_store.fee_schedule(ag["profile_id"])
+    fired: list[dict[str, Any]] = []
+    by_code: dict[str, list[dict]] = {}
+    for c in conds:
+        by_code.setdefault(c["code"], []).append(c)
+    for code, cs in by_code.items():
+        try:
+            kl = ds.sina_kline(code, num=60, scale=240)
+        except Exception as e:  # noqa: BLE001 单只失败不拖垮整批
+            logger.warning("条件单补判取 K 线失败 %s: %s", code, e)
+            continue
+        if not kl:
+            continue
+        # 止损优先：同日两者都触发时，先认止损（保守）
+        for c in sorted(cs, key=lambda x: 0 if x["kind"] == "stop_loss" else 1):
+            bar = next((k for k in kl if k["date"] > c["created_date"] and (
+                (c["kind"] == "stop_loss" and float(k["low"]) <= c["trigger_price"]) or
+                (c["kind"] == "take_profit" and float(k["high"]) >= c["trigger_price"]))), None)
+            if not bar:
+                continue
+            pos = next((p for p in paper_store.positions_of(ag["account_id"])
+                        if p["code"] == code), None)
+            if not pos or (pos.get("sellable") or 0) <= 0:
+                agent_store.close_condition(c["id"], "cancelled")
+                continue
+            shares = min(c["shares"], pos["sellable"])
+            q = ds.tencent_quote([code]).get(code, {}) or {}
+            r = paper_store.order(ag["account_id"], code, c["name"] or code, "sell", "limit",
+                                  c["trigger_price"], shares,
+                                  {**q, "price": c["trigger_price"]}, True, sched=sched)
+            agent_store.close_condition(c["id"], "triggered" if r.get("ok") else "cancelled",
+                                        bar["date"], c["trigger_price"])
+            if r.get("ok"):
+                fired.append({"code": code, "kind": c["kind"], "date": bar["date"],
+                              "price": c["trigger_price"], "shares": shares})
+                # 止损触发才记教训，且必须**真的亏了**——止损价高于成本时是止盈性质的
+                # 保护性离场，记成「止损迟滞」是错的（会污染教训统计）。
+                cost = pos.get("avg_cost") or 0
+                if c["kind"] == "stop_loss" and cost > 0:
+                    ret_pct = (c["trigger_price"] / cost - 1) * 100
+                    if ret_pct < 0:
+                        agent_store.add_lesson(agent_id, "loss_cut_late",
+                                               str(round(ret_pct, 1)), code)
+                agent_store.cancel_conditions(agent_id, code)
+    if fired:
+        agent_store.log_run(agent_id, date_cls.today().isoformat(), "条件单",
+                            f"补判触发 {len(fired)} 笔", detail=fired)
+    return fired
+
+
 # ── 日循环 ─────────────────────────────────────────────────────────────────
+def already_ran(agent_id: int, date: str = "") -> bool:
+    """今天是否已跑过 —— 幂等门。用户一天开三次 app，不能跑三次（多花三份 API 钱、
+    且会在同一天产生三份互相矛盾的决策，污染归因数据）。"""
+    date = date or date_cls.today().isoformat()
+    return any(r["phase"] == "复盘" for r in agent_store.runs_of(agent_id, date, limit=20))
+
+
 def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
-            blocks: str = "") -> dict[str, Any]:
-    """跑一个 agent 的完整一天。dry_run=True 只决策不下单。"""
+            blocks: str = "", force: bool = False) -> dict[str, Any]:
+    """跑一个 agent 的完整一天。dry_run=True 只决策不下单；force=True 跳过幂等门。"""
     t0 = time.time()
     ag = agent_store.get_agent(agent_id)
     if not ag:
         return {"ok": False, "msg": "agent 不存在"}
     today = date_cls.today().isoformat()
+    if not force and not dry_run and already_ran(agent_id, today):
+        return {"ok": True, "skipped": "今日已跑过（幂等）", "agent": ag["name"], "date": today}
     acct = paper_store.get_account(ag["account_id"])
     if not acct:
         return {"ok": False, "msg": "模拟盘账户不存在"}
@@ -252,7 +331,12 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
     if not focus:
         rank = universe_store.sector_ranking(kind="sw1", limit=1)
         focus = rank[0]["sector"] if rank else ""
-    agent_store.log_run(agent_id, today, "研判", f"关注板块={focus or '全市场'}")
+    swept = sweep_conditions(agent_id)   # 先补判：app 关闭期间条件单可能已触发
+    if swept:
+        acct = paper_store.get_account(ag["account_id"]) or acct
+    agent_store.log_run(agent_id, today, "研判",
+                        f"关注板块={focus or '全市场'}"
+                        + (f"；条件单补判触发 {len(swept)} 笔" if swept else ""))
 
     # ② 选股（复用既有 _screen_rows；延迟导入避免循环依赖）
     import app
@@ -317,6 +401,14 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
              "price": r.get("fill") or it.ref_price, "msg": r.get("msg", "")})
         if r.get("ok"):
             ctx["cash"] = float(paper_store.get_account(ag["account_id"])["cash"])
+            if it.side == "buy":   # 买入即挂止损 —— 纪律，不依赖 app 常驻
+                fill = float(r.get("fill") or it.ref_price)
+                agent_store.add_condition(
+                    agent_id, it.code, it.name, "stop_loss",
+                    round(fill * (1 + STOP_LOSS_PCT / 100), 3), it.shares,
+                    note=f"建仓价 {fill} 的 {STOP_LOSS_PCT}%")
+            else:
+                agent_store.cancel_conditions(agent_id, it.code)
     agent_store.log_run(agent_id, today, "下单",
                         f"成交 {len(filled)} / 否决 {len(rejected)}",
                         detail={"filled": filled, "rejected": rejected})
@@ -330,18 +422,26 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
                            float(acct["init_capital"] or 0))
     agent_store.purge()  # 按日累积的表一律清理
     return {"ok": True, "agent": ag["name"], "date": today, "focus": focus,
+            "swept": swept,
             "candidates": len(cands), "intents": len(intents),
             "filled": filled, "rejected": rejected, "lessons": lessons,
             "cash": float(acct2["cash"]), "market_value": round(mv, 2),
             "ms": int((time.time() - t0) * 1000)}
 
 
-def run_all(dry_run: bool = False, blocks: str = "") -> list[dict[str, Any]]:
-    """跑所有启用的 agent（多档位 / 同档多账户并行实验）。串行——LLM 调用本就是瓶颈。"""
+def run_all(dry_run: bool = False, blocks: str = "", force: bool = False) -> list[dict[str, Any]]:
+    """跑所有启用的 agent（多档位 / 同档多账户并行实验）。串行——LLM 调用本就是瓶颈。
+
+    **非交易日直接跳过**：周末/节假日没有行情，跑了只会拿昨收当今价、产生假决策。
+    """
+    import news_store
+    if not force and not news_store.is_trading_day():
+        logger.info("非交易日，agent 日循环跳过")
+        return [{"ok": True, "skipped": "非交易日"}]
     out = []
     for ag in agent_store.list_agents(active_only=True):
         try:
-            out.append(run_day(ag["id"], dry_run=dry_run, blocks=blocks))
+            out.append(run_day(ag["id"], dry_run=dry_run, blocks=blocks, force=force))
         except Exception as e:  # noqa: BLE001 单个 agent 崩了不该拖垮整批
             logger.exception("agent %s 日循环失败", ag["name"])
             out.append({"ok": False, "agent": ag["name"], "msg": str(e)})

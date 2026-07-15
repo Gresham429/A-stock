@@ -75,6 +75,16 @@ CREATE TABLE IF NOT EXISTS equity(
   cash REAL, market_value REAL, total REAL, pnl_pct REAL,
   PRIMARY KEY (agent_id, date)
 );
+CREATE TABLE IF NOT EXISTS conditions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_id INTEGER NOT NULL, code TEXT NOT NULL, name TEXT DEFAULT '',
+  kind TEXT NOT NULL,              -- stop_loss | take_profit
+  trigger_price REAL NOT NULL, shares INTEGER NOT NULL,
+  created_date TEXT NOT NULL,      -- 挂单日：补判只看这之后的日K
+  status TEXT DEFAULT 'live',      -- live | triggered | cancelled
+  triggered_date TEXT DEFAULT '', fill_price REAL DEFAULT 0, note TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_cond_agent ON conditions(agent_id, status);
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
 """
 
@@ -282,3 +292,54 @@ def status() -> dict[str, Any]:
             "lesson_hits": hits, "equity_rows": n_eq, "db_mb": db_mb,
             "keep": {"run_detail": RUN_DETAIL_KEEP_DAYS, "runs": RUN_KEEP_DAYS,
                      "equity": EQUITY_KEEP_DAYS, "lessons": "永久"}}
+
+
+# ── 条件单（止损/止盈：纪律，不是预测） ───────────────────────────────────
+def add_condition(agent_id: int, code: str, name: str, kind: str,
+                  trigger_price: float, shares: int, note: str = "") -> int:
+    """挂条件单。kind: stop_loss(跌破卖) | take_profit(涨到卖)。
+
+    **只做纪律，不做预测**：「跌破买入价 8% 止损」是规则；「涨到 41 就追」是预测，不做。
+    """
+    if kind not in ("stop_loss", "take_profit"):
+        raise ValueError(f"未知条件单类型: {kind}")
+    with _LOCK, _conn() as c:
+        cur = c.execute(
+            "INSERT INTO conditions(agent_id,code,name,kind,trigger_price,shares,"
+            "created_date,status,note) VALUES(?,?,?,?,?,?,?,'live',?)",
+            (agent_id, code, name, kind, round(float(trigger_price), 3), int(shares),
+             date_cls.today().isoformat(), note))
+        return cur.lastrowid
+
+
+def live_conditions(agent_id: int | None = None) -> list[dict[str, Any]]:
+    sql = "SELECT * FROM conditions WHERE status='live'"
+    args: list[Any] = []
+    if agent_id is not None:
+        sql += " AND agent_id=?"
+        args.append(agent_id)
+    with _conn() as c:
+        return [dict(r) for r in c.execute(sql + " ORDER BY id", args)]
+
+
+def conditions_of(agent_id: int, limit: int = 50) -> list[dict[str, Any]]:
+    with _conn() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT * FROM conditions WHERE agent_id=? ORDER BY id DESC LIMIT ?",
+            (agent_id, limit))]
+
+
+def close_condition(cid: int, status: str, triggered_date: str = "",
+                    fill_price: float = 0.0) -> None:
+    with _LOCK, _conn() as c:
+        c.execute("UPDATE conditions SET status=?, triggered_date=?, fill_price=? WHERE id=?",
+                  (status, triggered_date, round(fill_price, 3), cid))
+
+
+def cancel_conditions(agent_id: int, code: str) -> int:
+    """清仓后撤掉该股所有挂着的条件单（否则会对空仓触发）。"""
+    with _LOCK, _conn() as c:
+        b = c.total_changes
+        c.execute("UPDATE conditions SET status='cancelled' "
+                  "WHERE agent_id=? AND code=? AND status='live'", (agent_id, code))
+        return c.total_changes - b

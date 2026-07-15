@@ -39,7 +39,7 @@ const COLS=[
 ];
 let DATA=[], sortKey='net20', sortDir=-1, autoTimer=null, LLM=false, MODEL='', WEB=false;
 // 请求令牌：每次发起自增；异步响应回来前若已非最新，则丢弃（防面板/抽屉切换时旧响应错位）
-let recSeq=0, detailSeq=0, mktSeq=0, secSeq=0;
+let recSeq=0, detailSeq=0, mktSeq=0, secSeq=0, agSeq=0;
 let SEC_KIND='sw1';
 let TAXO=null;   // 板块两级分类（/api/config 下发）
 let WAVE=null, WAVE_PERIOD='day', WAVE_CTX=null, KL_CTX=null, waveTimer=null;   // 行情多周期数据 / 当前周期 / 折线hover几何 / 蜡烛hover几何 / 分时自动刷新定时器
@@ -914,6 +914,121 @@ function maybeRefreshNews(){
 let NOTE_DRAFT=null;
 function openNotes(){ NOTE_DRAFT=null; document.getElementById('noteInput').value=''; document.getElementById('noteDraft').innerHTML=''; loadNotesList(); document.getElementById('notesModal').classList.add('open'); }
 function closeNotes(){ document.getElementById('notesModal').classList.remove('open'); }
+
+/* ── 🤖 Agent 模拟盘 ───────────────────────────────────────────────────── */
+function openAgents(){ document.getElementById('agDetail').innerHTML=''; document.getElementById('agentsModal').classList.add('open'); loadAgents(); }
+function closeAgents(){ document.getElementById('agentsModal').classList.remove('open'); }
+
+async function loadAgents(){
+  const gen=++agSeq, list=document.getElementById('agList');
+  list.innerHTML='<div class="muted small" style="padding:14px">读取存档…</div>';
+  try{
+    const j=await (await fetch('/api/agents')).json();
+    if(gen!==agSeq) return;                       // 过期响应丢弃（约定：异步入口必带令牌）
+    const st=j.status||{};
+    document.getElementById('agStatus').innerHTML =
+      `存档 ${st.agents||0} · 教训 ${st.lessons||0} 类/${st.lesson_hits||0} 次 · 库 ${st.db_mb||0}MB`;
+    if(!j.agents||!j.agents.length){
+      list.innerHTML='<div class="muted small" style="padding:14px">还没有存档。上面建一个——建议同一档位建 2 个（看 AI 输出稳不稳），再建个不同资金档。</div>';
+      renderLessons(j.lessons||[]); return; }
+    list.innerHTML='<div class="ag-row head"><div>存档</div><div class="num">总资产</div>'
+      +'<div class="num">收益</div><div class="num">持仓</div><div>决策</div><div>操作</div></div>'
+      + j.agents.map(a=>`<div class="ag-row" onclick="openAgentDetail(${a.id})">
+          <div><b>${esc(a.name)}</b><div class="small muted" style="font-family:var(--mono)">#${a.id} · 账户${a.account_id}</div></div>
+          <div class="num" id="agTot${a.id}">…</div>
+          <div class="num" id="agPnl${a.id}">…</div>
+          <div class="num" id="agPos${a.id}">…</div>
+          <div class="small muted">${esc(a.decider)}</div>
+          <div onclick="event.stopPropagation()">
+            <button class="btn" style="padding:4px 8px;font-size:11px" onclick="runAgent(${a.id},true)">试跑</button>
+            <button class="btn ai" style="padding:4px 8px;font-size:11px" onclick="runAgent(${a.id},false)">跑</button>
+            <button class="btn" style="padding:4px 8px;font-size:11px" onclick="delAgent(${a.id},'${esc(a.name)}')">删</button>
+          </div></div>`).join('');
+    renderLessons(j.lessons||[]);
+    j.agents.forEach(a=>fillAgentEquity(a.id));
+  }catch(e){ if(gen===agSeq) list.innerHTML='<div class="muted small" style="padding:14px">读取失败。</div>'; }
+}
+
+function renderLessons(rows){
+  const box=document.getElementById('agDetail');
+  if(!rows.length){ box.innerHTML='<div class="subh">教训库</div><div class="muted small">还没有教训——agent 跑出失败才会有。没数据不编。</div>'; return; }
+  box.innerHTML='<div class="subh">教训库（只记失败 · 按次数排序 · 已注入所有 AI 分析）</div>'
+    + rows.map(r=>`<div class="ag-les"><span>[${esc(r.label)}]</span><b>${r.hits} 次</b></div>`).join('');
+}
+
+async function fillAgentEquity(id){
+  try{
+    const j=await (await fetch(`/api/agents/${id}/runs?days=2&limit=1`)).json();
+    const acc=j.account||{}, eq=(j.equity||[]).slice(-1)[0];
+    const tot=eq?eq.total:(acc.cash||0), init=acc.init_capital||1;
+    const pnl=(tot/init-1)*100;
+    const set=(k,v)=>{const el=document.getElementById(k); if(el) el.innerHTML=v;};
+    set('agTot'+id, tot.toFixed(0));
+    set('agPnl'+id, `<span style="color:${pnl>0?'var(--up)':pnl<0?'var(--down)':'var(--flat)'}">${pnl>0?'+':''}${pnl.toFixed(2)}%</span>`);
+    set('agPos'+id, (j.positions||[]).length);
+  }catch(e){}
+}
+
+async function runAgent(id, dry){
+  const btn=event.target; btn.disabled=true; const old=btn.textContent; btn.textContent='跑…';
+  try{
+    const j=await (await fetch(`/api/agents/${id}/run`,{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({dry:!!dry,force:true})})).json();
+    if(j.skipped) alert('已跳过：'+j.skipped);
+    else if(!j.ok) alert('失败：'+(j.msg||'未知'));
+    openAgentDetail(id); loadAgents();
+  }catch(e){ alert('请求失败'); }
+  finally{ btn.disabled=false; btn.textContent=old; }
+}
+
+async function createAgent(){
+  const name=document.getElementById('agName').value.trim();
+  const cap=parseFloat(document.getElementById('agCap').value);
+  if(!name||!(cap>0)){ alert('填存档名与启动资金'); return; }
+  await fetch('/api/agents',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({name:name,capital:cap})});
+  document.getElementById('agName').value=''; loadAgents();
+}
+
+async function delAgent(id,name){
+  if(!confirm(`删除存档「${name}」？其模拟盘账户、日志、净值、教训一并删除。`)) return;
+  await fetch(`/api/agents/${id}`,{method:'DELETE'}); document.getElementById('agDetail').innerHTML=''; loadAgents();
+}
+
+async function runAllAgents(dry){
+  await fetch('/api/agents/run_all',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({dry:!!dry})});
+  alert('已在后台开跑（每个 agent 约 30–90s）。稍后点存档看结果。');
+}
+
+async function openAgentDetail(id){
+  const gen=++agSeq, box=document.getElementById('agDetail');
+  box.innerHTML='<div class="subh">读取中…</div>';
+  try{
+    const j=await (await fetch(`/api/agents/${id}/runs?limit=30&days=90`)).json();
+    if(gen!==agSeq) return;
+    const eq=j.equity||[], spark=eq.length>1?sparkline(eq.map(e=>e.pnl_pct)):'';
+    const ords=(j.orders||[]).map(o=>`<div class="ag-ord ${o.status==='filled'?'':'rej'}">
+        <span style="color:${o.side==='buy'?'var(--up)':'var(--down)'}">${o.side==='buy'?'买':'卖'}</span>
+        <span>${esc(o.code)}</span><span>${esc(o.name||'')}</span>
+        <span>${o.shares}股 @${o.price}</span><span>费${(o.fee||0).toFixed(2)}</span>
+        <span style="color:${o.status==='filled'?'var(--gold)':'var(--muted)'}">${o.status==='filled'?'成交':'否决:'+esc((o.note||'').slice(0,14))}</span>
+      </div>`).join('') || '<div class="muted small">还没有委托记录</div>';
+    const conds=(j.conditions||[]).map(c=>`<div class="ag-ord">
+        <span>${c.kind==='stop_loss'?'止损':'止盈'}</span><span>${esc(c.code)}</span>
+        <span>${esc(c.name||'')}</span><span>触发价 ${c.trigger_price}</span><span>${c.shares}股</span>
+        <span style="color:${c.status==='live'?'var(--gold)':'var(--muted)'}">${c.status==='live'?'挂单中':(c.status==='triggered'?'已触发 '+c.triggered_date:'已撤')}</span>
+      </div>`).join('') || '<div class="muted small">无条件单</div>';
+    const logs=(j.runs||[]).map(r=>`<div class="ag-log"><b>${r.date} ${esc(r.phase)}</b> ${esc(r.summary)}</div>`).join('');
+    const les=(j.lessons||[]).map(l=>`<div class="ag-les"><span>${esc(l.lesson)}</span><b>${l.hits}次</b></div>`).join('')
+      || '<div class="muted small">该存档还没有教训</div>';
+    box.innerHTML=`<div class="subh">净值曲线（${eq.length} 天）</div>${spark||'<div class="muted small">不足两天，画不出曲线</div>'}
+      <div class="subh">买卖记录（含否决原因）</div>${ords}
+      <div class="subh">条件单（买入自动挂 -8% 止损 · app 关闭期间用日K补判触发）</div>${conds}
+      <div class="subh">该存档的教训</div>${les}
+      <div class="subh">日循环日志</div>${logs||'<div class="muted small">还没跑过</div>'}`;
+  }catch(e){ if(gen===agSeq) box.innerHTML='<div class="subh">读取失败</div>'; }
+}
 
 /* ── 🧭 板块每日变化 ───────────────────────────────────────────────────── */
 function openSectors(){ SEC_KIND='sw1'; document.getElementById('secDetail').innerHTML='';

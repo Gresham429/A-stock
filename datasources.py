@@ -19,6 +19,7 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -77,16 +78,30 @@ def em_get(url: str, ref: str = "https://data.eastmoney.com/",
 
 
 # ── 行情/估值（腾讯） ─────────────────────────────────────────────────────
-def tencent_quote(codes: list[str]) -> dict[str, dict[str, Any]]:
-    """批量实时行情：价格/涨跌/PE/PB/市值/换手/振幅。返回 {code: {...}}。"""
+QUOTE_CHUNK = 400  # 单次请求代码数上限：实测 800 可过、2000 报 HTTP 414，取 400 留足余量
+
+
+def tencent_quote(codes: list[str], workers: int = 8) -> dict[str, dict[str, Any]]:
+    """批量实时行情：价格/涨跌/PE/PB/市值/换手/振幅。返回 {code: {...}}。
+
+    自动分批：全部代码拼一个 URL 在全市场池（~5000 只 = 44KB URL）会报 HTTP 414，
+    故按 QUOTE_CHUNK 切片并发请求；单批失败只丢该批、不拖垮整体。
+    """
     if not codes:
         return {}
+    if len(codes) > QUOTE_CHUNK:
+        chunks = [codes[i:i + QUOTE_CHUNK] for i in range(0, len(codes), QUOTE_CHUNK)]
+        merged: dict[str, dict[str, Any]] = {}
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for part in ex.map(lambda cs: tencent_quote(cs, workers), chunks):
+                merged.update(part)
+        return merged
     prefixed = [market_prefix(c) + c for c in codes]
     url = "https://qt.gtimg.cn/q=" + ",".join(prefixed)
     try:
         data = _http_get(url, gbk=True, timeout=15)
     except OSError as e:
-        logger.error("腾讯行情请求失败: %s", e)
+        logger.error("腾讯行情请求失败(%d 只): %s", len(codes), e)
         return {}
 
     result: dict[str, dict[str, Any]] = {}
@@ -126,6 +141,76 @@ def tencent_quote(codes: list[str]) -> dict[str, dict[str, Any]]:
     return result
 
 
+# ── 全市场名单 + 快照（新浪 hs_a，一份数据两用：名单 + 板块日统计） ────────
+_SINA_HQ = ("https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php"
+            "/Market_Center.getHQNodeData?page={page}&num={num}&sort=symbol&asc=1&node=hs_a")
+_SINA_CNT = ("https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php"
+             "/Market_Center.getHQNodeStockCount?node=hs_a")
+_SINA_REF = "https://vip.stock.finance.sina.com.cn/"
+
+
+def sina_stock_count() -> int:
+    """全 A 股票总数（新浪 hs_a 节点）。失败返回 0。"""
+    try:
+        return int(_http_get(_SINA_CNT, ref=_SINA_REF, gbk=True, timeout=10).strip().strip('"'))
+    except (OSError, ValueError) as e:
+        logger.warning("新浪 A 股总数请求失败: %s", e)
+        return 0
+
+
+def _sina_hq_page(page: int, num: int = 80) -> list[dict[str, Any]]:
+    """新浪 hs_a 单页。失败返回 []（单页失败不拖垮全量）。"""
+    try:
+        raw = _http_get(_SINA_HQ.format(page=page, num=num), ref=_SINA_REF, gbk=True, timeout=20)
+        data = json.loads(raw) if raw.strip().startswith("[") else []
+        return data if isinstance(data, list) else []
+    except (OSError, ValueError) as e:
+        logger.warning("新浪 hs_a 第 %d 页失败: %s", page, e)
+        return []
+
+
+def sina_all_stocks(num: int = 80, workers: int = 8) -> list[dict[str, Any]]:
+    """全 A 名单 + 实时快照（一次拉全，约 5527 只、70 页并发 ~10s）。
+
+    字段自带涨跌幅/成交额/换手/市值/PE/PB，故名单刷新与板块日统计共用这一份数据，
+    无需再走腾讯分批（单 URL 装不下 5000+ 代码）。失败返回 []。
+    """
+    total = sina_stock_count()
+    if not total:
+        return []
+    pages = (total + num - 1) // num
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        chunks = list(ex.map(lambda p: _sina_hq_page(p, num), range(1, pages + 1)))
+    out: dict[str, dict[str, Any]] = {}
+    for items in chunks:
+        for it in items:
+            code = str(it.get("code") or "").strip()
+            if len(code) != 6 or not code.isdigit():
+                continue
+            out[code] = {
+                "code": code,
+                "symbol": str(it.get("symbol") or ""),
+                "name": str(it.get("name") or "").strip(),
+                "price": _fnum(it.get("trade")),
+                "chg_pct": _fnum(it.get("changepercent")),
+                "amount": _fnum(it.get("amount")),          # 成交额（元）
+                "turnover": _fnum(it.get("turnoverratio")),  # 换手率（%）
+                "mktcap": _fnum(it.get("mktcap")),           # 总市值（万元）
+                "float_mcap": _fnum(it.get("nmc")),          # 流通市值（万元）
+                "pe_ttm": _fnum(it.get("per")),
+                "pb": _fnum(it.get("pb")),
+            }
+    logger.info("新浪全市场名单: %d/%d 只（%d 页）", len(out), total, pages)
+    return list(out.values())
+
+
+def _fnum(v: Any) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 # ── 波动率 + 资金流（新浪，一份数据两用） ─────────────────────────────────
 def sina_metrics(code: str, num: int = 45) -> dict[str, Any]:
     """新浪 MoneyFlow：含每日收盘价 -> 波动率/区间位置/20日涨幅/主力资金流。
@@ -148,12 +233,18 @@ def sina_metrics(code: str, num: int = 45) -> dict[str, Any]:
         return empty
 
     arr = list(reversed(arr))  # 时间正序
-    closes = [float(x["trade"]) for x in arr]
-    r0net = [float(x.get("r0_net", 0)) for x in arr]  # 主力(超大单)净额，元
-    dates = [x["opendate"] for x in arr]
+    try:  # 全市场池里字段可能为空串/异常值（手工龙头池不会），解析失败按无数据处理
+        closes = [float(x["trade"]) for x in arr]
+        r0net = [float(x.get("r0_net", 0)) for x in arr]  # 主力(超大单)净额，元
+        dates = [x["opendate"] for x in arr]
+    except (KeyError, TypeError, ValueError) as e:
+        logger.warning("新浪资金流字段解析失败 %s: %s", code, e)
+        return empty
 
     vol = _annualized_vol(closes, 20)
-    cum20 = (closes[-1] / closes[-21] - 1) * 100 if len(closes) > 20 else None
+    # 分母可能为 0（停牌日收盘价缺失），不设防会 ZeroDivisionError 打崩整个选股
+    cum20 = ((closes[-1] / closes[-21] - 1) * 100
+             if len(closes) > 20 and closes[-21] > 0 else None)
     range_pos = None
     if len(closes) >= 20:
         w = closes[-20:]
@@ -173,8 +264,15 @@ def sina_metrics(code: str, num: int = 45) -> dict[str, Any]:
 
 
 def _annualized_vol(closes: list[float], n: int = 20) -> float | None:
-    """近 n 日日对数收益率的年化波动率(%)。"""
+    """近 n 日日对数收益率的年化波动率(%)。收盘价含 0/负值（停牌日、源缺口）则返回 None。
+
+    全市场池里确实存在收盘价为 0 的记录（手工龙头池不会），不设防会 math domain error
+    并穿透 executor.map 把整个选股打崩。
+    """
     if len(closes) < n + 1:
+        return None
+    window = closes[len(closes) - n - 1:]
+    if any(c <= 0 for c in window):
         return None
     rets = [math.log(closes[i] / closes[i - 1])
             for i in range(len(closes) - n, len(closes))]

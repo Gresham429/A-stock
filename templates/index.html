@@ -188,6 +188,25 @@
   .subh{font-size:11px;color:var(--muted);font-family:var(--mono);text-transform:uppercase;letter-spacing:1px;margin:18px 0 8px;border-left:2px solid var(--gold);padding-left:8px}
 
   /* 名词解释弹窗 */
+  /* 板块每日变化 */
+  .sec-bar{display:flex;align-items:center;gap:10px;margin:14px 0 4px;flex-wrap:wrap}
+  .sec-kinds{display:flex;gap:6px}
+  .sec-status{font-family:var(--mono);font-size:11px;color:var(--muted);margin-left:auto}
+  .sec-row{display:grid;grid-template-columns:1.6fr .8fr .6fr 1fr .7fr 1.4fr;gap:8px;align-items:center;
+    padding:9px 10px;border-bottom:1px solid var(--line);font-size:12.5px;cursor:pointer;border-radius:6px}
+  .sec-row:hover{background:var(--panel)}
+  .sec-row.head{color:var(--muted);font-family:var(--mono);font-size:10.5px;text-transform:uppercase;
+    letter-spacing:1px;cursor:default;border-bottom:1px solid var(--line2)}
+  .sec-row.head:hover{background:transparent}
+  .sec-row .nm{font-weight:600}
+  .sec-row .num{font-family:var(--mono);text-align:right}
+  .sec-bd{display:flex;align-items:center;gap:4px;font-family:var(--mono);font-size:11px}
+  .sec-bd i{height:5px;border-radius:2px;display:inline-block}
+  .sec-mem{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:6px;margin-top:10px}
+  .sec-mem div{display:flex;justify-content:space-between;gap:8px;padding:6px 9px;background:var(--panel);
+    border:1px solid var(--line);border-radius:6px;font-size:12px;cursor:pointer}
+  .sec-mem div:hover{border-color:var(--gold-dim)}
+  .sec-mem .c{font-family:var(--mono);color:var(--muted);font-size:10.5px}
   .modal{position:fixed;inset:0;z-index:60;background:rgba(4,7,11,.72);backdrop-filter:blur(4px);display:none;align-items:center;justify-content:center;padding:24px}
   .modal.open{display:flex}
   .modalcard{width:min(720px,96vw);max-height:86vh;overflow-y:auto;background:linear-gradient(180deg,var(--panel2),var(--bg));border:1px solid var(--line2);border-radius:14px;padding:24px 26px}
@@ -345,6 +364,7 @@
       <span class="stamp" id="stamp">—</span>
       <button class="btn ai ai-only" onclick="runDaily()">🤖 自选推荐</button>
       <button class="btn ai ai-only" onclick="openScreen()">🔍 全市场选股</button>
+      <button class="btn" onclick="openSectors()">🧭 板块</button>
       <button class="btn" onclick="openNews()">📰 新闻</button>
       <button class="btn" onclick="openProfiles()">💼 画像</button>
       <button class="btn" onclick="openNotes()">📝 笔记</button>
@@ -479,6 +499,27 @@
       </div>
     </div>
     <div id="newsBody"></div>
+  </div>
+</div>
+
+<div class="modal" id="sectorsModal" onclick="if(event.target===this)closeSectors()">
+  <div class="modalcard" style="width:min(920px,96vw)">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start">
+      <div><h2>🧭 板块每日变化</h2>
+        <div class="sub2">全市场 A 股按板块聚合 · 每日落盘可跨日对比 · 点板块看成分股与近期走势。</div></div>
+      <button class="xclose" onclick="closeSectors()">×</button>
+    </div>
+    <div class="sec-bar">
+      <div class="sec-kinds">
+        <button class="btn on" data-k="sw1" onclick="secKind('sw1')">一级行业</button>
+        <button class="btn" data-k="sub" onclick="secKind('sub')">细分</button>
+        <button class="btn" data-k="concept" onclick="secKind('concept')">概念</button>
+      </div>
+      <span class="sec-status" id="secStatus">…</span>
+      <button class="btn" onclick="reloadSectors(true)">🔄 重算</button>
+    </div>
+    <div id="secList"></div>
+    <div id="secDetail"></div>
   </div>
 </div>
 

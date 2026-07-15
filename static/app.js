@@ -39,7 +39,8 @@ const COLS=[
 ];
 let DATA=[], sortKey='net20', sortDir=-1, autoTimer=null, LLM=false, MODEL='', WEB=false;
 // 请求令牌：每次发起自增；异步响应回来前若已非最新，则丢弃（防面板/抽屉切换时旧响应错位）
-let recSeq=0, detailSeq=0, mktSeq=0;
+let recSeq=0, detailSeq=0, mktSeq=0, secSeq=0;
+let SEC_KIND='sw1';
 let TAXO=null;   // 板块两级分类（/api/config 下发）
 let WAVE=null, WAVE_PERIOD='day', WAVE_CTX=null, KL_CTX=null, waveTimer=null;   // 行情多周期数据 / 当前周期 / 折线hover几何 / 蜡烛hover几何 / 分时自动刷新定时器
 let FOLIO_ADV={};   // 持仓「何时卖」建议缓存 code->{html}|{loading:true}，跨自动刷新保留
@@ -913,6 +914,81 @@ function maybeRefreshNews(){
 let NOTE_DRAFT=null;
 function openNotes(){ NOTE_DRAFT=null; document.getElementById('noteInput').value=''; document.getElementById('noteDraft').innerHTML=''; loadNotesList(); document.getElementById('notesModal').classList.add('open'); }
 function closeNotes(){ document.getElementById('notesModal').classList.remove('open'); }
+
+/* ── 🧭 板块每日变化 ───────────────────────────────────────────────────── */
+function openSectors(){ SEC_KIND='sw1'; document.getElementById('secDetail').innerHTML='';
+  document.querySelectorAll('#sectorsModal .sec-kinds .btn').forEach(b=>b.classList.toggle('on',b.dataset.k==='sw1'));
+  document.getElementById('sectorsModal').classList.add('open'); reloadSectors(); }
+function closeSectors(){ document.getElementById('sectorsModal').classList.remove('open'); }
+function secKind(k){ SEC_KIND=k;
+  document.querySelectorAll('#sectorsModal .sec-kinds .btn').forEach(b=>b.classList.toggle('on',b.dataset.k===k));
+  document.getElementById('secDetail').innerHTML=''; reloadSectors(); }
+
+const secPct=v=>{const c=v>0?'var(--up)':v<0?'var(--down)':'var(--flat)';
+  return `<span class="num" style="color:${c}">${v>0?'+':''}${(v||0).toFixed(2)}%</span>`;};
+
+async function reloadSectors(force){
+  const gen=++secSeq, list=document.getElementById('secList');
+  list.innerHTML='<div class="muted small" style="padding:14px">读取板块统计…</div>';
+  try{
+    if(force){ await fetch('/api/sectors/snapshot',{method:'POST'}); if(gen!==secSeq) return; }
+    const r=await fetch(`/api/sectors?kind=${SEC_KIND}&limit=40`);
+    const j=await r.json();
+    if(gen!==secSeq) return;               // 过期响应丢弃，防切换时错位
+    const st=j.status||{};
+    const pend=st.sectors_pending||0;
+    document.getElementById('secStatus').innerHTML =
+      `${j.date||'—'} · 全池 ${st.total||0} 只(可选 ${st.eligible||0}) · 板块 ${st.sector_count||0} 个`
+      + (pend>0?` · <span style="color:var(--gold)">板块回填中 ${st.sectors_tagged||0}/${st.eligible||0}</span>`:'');
+    if(!j.rows||!j.rows.length){ list.innerHTML='<div class="muted small" style="padding:14px">暂无数据。板块归属回填完成后自动出现。</div>'; return; }
+    const mxAmt=Math.max(...j.rows.map(r=>r.amount||0),1);
+    list.innerHTML='<div class="sec-row head"><div>板块</div><div class="num">均涨跌</div>'
+      + '<div class="num">只数</div><div>涨/跌</div><div class="num">涨停</div><div>领涨股</div></div>'
+      + j.rows.map(r=>{
+        const tot=Math.max((r.up_n||0)+(r.down_n||0),1);
+        const uw=Math.round(100*(r.up_n||0)/tot);
+        return `<div class="sec-row" onclick="openSectorDetail('${encodeURIComponent(r.sector)}')">
+          <div class="nm">${esc(r.sector)}<div class="small muted" style="font-family:var(--mono)">成交 ${((r.amount||0)/1e8).toFixed(1)}亿</div></div>
+          <div>${secPct(r.avg_chg)}</div>
+          <div class="num muted">${r.n||0}</div>
+          <div class="sec-bd"><i style="width:${uw*0.5}px;background:var(--up)"></i><i style="width:${(100-uw)*0.5}px;background:var(--down)"></i>
+            <span style="color:var(--up)">${r.up_n||0}</span>/<span style="color:var(--down)">${r.down_n||0}</span></div>
+          <div class="num" style="color:${r.limit_up_n?'var(--up)':'var(--muted)'}">${r.limit_up_n||0}</div>
+          <div class="small">${esc(r.leader_name||'—')} ${r.leader_name?secPct(r.leader_chg):''}</div>
+        </div>`;}).join('');
+  }catch(e){ if(gen===secSeq) list.innerHTML='<div class="muted small" style="padding:14px">板块统计读取失败。</div>'; }
+}
+
+async function openSectorDetail(nameEnc){
+  const gen=++secSeq, box=document.getElementById('secDetail');
+  const name=decodeURIComponent(nameEnc);
+  box.innerHTML=`<div class="subh">${esc(name)}</div><div class="muted small">读取成分股…</div>`;
+  try{
+    const j=await (await fetch(`/api/sectors/${nameEnc}?days=30`)).json();
+    if(gen!==secSeq) return;
+    const hist=j.history||[];
+    const spark=hist.length>1?sparkline(hist.map(h=>h.avg_chg)):'';
+    box.innerHTML=`<div class="subh">${esc(name)} · 成分股 ${j.total||0} 只${j.total>40?'（显示流通市值前 40）':''}</div>`
+      + (spark?`<div class="small muted" style="margin-bottom:6px">近 ${hist.length} 日板块均涨跌</div>${spark}`:'')
+      + `<div class="sec-mem">${(j.members||[]).map(m=>
+          `<div onclick="closeSectors();openDetail('${m.code}')">
+             <span>${esc(m.name)} <span class="c">${m.code}</span></span>
+             <span>${secPct(m.chg_pct)}</span></div>`).join('')}</div>`;
+  }catch(e){ if(gen===secSeq) box.innerHTML=`<div class="subh">${esc(name)}</div><div class="muted small">读取失败。</div>`; }
+}
+
+/** 板块均涨跌迷你折线（零依赖内联 SVG，红涨绿跌） */
+function sparkline(vals){
+  if(!vals||vals.length<2) return '';
+  const W=560,H=54,pad=4, mn=Math.min(...vals,0), mx=Math.max(...vals,0), rng=(mx-mn)||1;
+  const x=i=>pad+i*(W-2*pad)/(vals.length-1), y=v=>H-pad-((v-mn)/rng)*(H-2*pad);
+  const pts=vals.map((v,i)=>`${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  const col=vals[vals.length-1]>=0?'var(--up)':'var(--down)';
+  const zero=y(0).toFixed(1);
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:${H}px">
+    <line x1="${pad}" y1="${zero}" x2="${W-pad}" y2="${zero}" stroke="var(--line2)" stroke-dasharray="3 3"/>
+    <polyline points="${pts}" fill="none" stroke="${col}" stroke-width="1.6"/></svg>`;
+}
 async function aiStructNote(){
   const content=document.getElementById('noteInput').value.trim(); if(!content){alert('先写点什么');return;}
   const d=document.getElementById('noteDraft'); d.innerHTML='<div class="paneempty small"><span class="spin"></span> '+MODEL+' 整理中…</div>';

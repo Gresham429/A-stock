@@ -22,6 +22,7 @@ from typing import Any
 import datasources as ds
 import store
 import universe
+import universe_store
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +167,7 @@ def _market_rows(limit: int = 40) -> list[dict[str, Any]]:
 
 def _stock_rows(code: str, page_size: int = 10) -> list[dict[str, Any]]:
     """单只自选股新闻 → 带一级/二级板块归属。"""
-    p, s = universe.sector_of(code)
+    p, s = universe_store.sector_of(code)
     rows = []
     for n in ds.stock_news(code, page_size=page_size):
         title = n.get("title", "")
@@ -180,7 +181,7 @@ def _stock_rows(code: str, page_size: int = 10) -> list[dict[str, Any]]:
 
 def _report_rows(code: str, page_size: int = 20) -> list[dict[str, Any]]:
     """单只自选股研报 → 基本面历史（kind=研报）。"""
-    p, s = universe.sector_of(code)
+    p, s = universe_store.sector_of(code)
     rows = []
     for r in ds.eastmoney_reports(code, page_size=page_size):
         title = r.get("title", "")

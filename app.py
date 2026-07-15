@@ -17,7 +17,9 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
@@ -36,6 +38,7 @@ import provenance
 import rules_store
 import store
 import universe
+import universe_store
 import websearch
 
 logging.basicConfig(level=logging.INFO,
@@ -83,7 +86,7 @@ def api_config():
                     "model": config.DEEPSEEK_MODEL if config.llm_enabled() else None,
                     "news_augment": True,
                     "web_search": config.bocha_enabled(),
-                    "taxonomy": universe.taxonomy()})
+                    "taxonomy": universe_store.taxonomy()})
 
 
 @app.route("/api/websearch/status")
@@ -866,13 +869,73 @@ def _vol_hist(kl: list[dict]) -> dict:
 
 
 _SCREEN_CAP_TOTAL = 36  # 喂给 LLM 的候选总量上限（控 token 与时延）
+_PRESCREEN = 600        # 全市场未指定板块时，均衡采样前先按流通市值预筛到这么多只
 
 
-def _balanced_pick(codes: list[str], cap_total: int, cap_per_sub: int) -> list[str]:
-    """跨一级板块均衡采样：按一级轮询取，每个二级细分最多 cap_per_sub 只，总量 ≤ cap_total。"""
+_PA_RANK_MAX = 200   # 板块内 ≤ 该只数时，对全部成分股算形态再排序（超过则退回市值预筛）
+_METRIC_TTL = 900    # 形态指标进程内缓存秒数（同板块反复选股不重复取数）
+_metric_cache: dict[str, tuple[float, dict]] = {}
+_EMPTY_METRICS = {"vol": None, "range_pos": None, "cum20": None,
+                  "net5": None, "net20": None, "series": []}
+
+
+def _safe_metrics(code: str) -> dict:
+    """sina_metrics 的兜底包装 + 进程内 TTL 缓存：单只异常不拖垮整批。
+
+    全市场池数据质量参差（0 收盘价、空字段、退市残留），executor.map 里任一只抛异常
+    都会让整个选股 500。指标缺失退化为 None，AI 侧本就按缺失处理。
+    """
+    hit = _metric_cache.get(code)
+    if hit and time.time() - hit[0] < _METRIC_TTL:
+        return hit[1]
+    try:
+        m = ds.sina_metrics(code)
+    except Exception as e:  # noqa: BLE001 兜底：宁可该股无指标，不可整批失败
+        logger.warning("指标计算失败 %s（跳过该股指标）: %s", code, e)
+        return dict(_EMPTY_METRICS)
+    _metric_cache[code] = (time.time(), m)
+    return m
+
+
+def _pa_score(m: dict) -> float | None:
+    """形态初筛打分（0–100）。None = 形态不可分析，该股出局。
+
+    这是**粗筛**，不是买卖判断——它只决定哪些股值得占用送进 AI 的 36 个名额，
+    真正的 PA 判断由 AI 依 rules_store 的规则库做。
+
+    权重是启发式先验（非回测得出），按「波段 + 波动型」取向设定，四项各 25 分：
+      可分析性  vol 为 None 直接出局 —— 数据不足 60 日者（次新、长期停牌）在此自然剔除
+      波动      年化波动率落在 30–90% 得满分，过低是死水、过高难控风险
+      资金      主力 20 日净流入为正者得分，按流入额饱和到 25 分
+      动量      20 日涨幅 0–30% 区间得分，已翻倍的追高股扣分
+      位置      20 日区间位置 30–70 居中得分，避免追顶与接刀
+    """
+    vol = m.get("vol")
+    if vol is None:  # 形态算不出来 -> 不进候选（次新/停牌/数据缺口）
+        return None
+    s = 25.0 if 30 <= vol <= 90 else (12.0 if 15 <= vol < 30 or 90 < vol <= 130 else 0.0)
+    net20 = m.get("net20") or 0
+    s += min(max(net20, 0) / 2.0, 1.0) * 25 if net20 > 0 else 0.0
+    cum20 = m.get("cum20")
+    if cum20 is not None:
+        s += 25.0 if 0 <= cum20 <= 30 else (12.0 if -15 <= cum20 < 0 else 0.0)
+    rp = m.get("range_pos")
+    if rp is not None:
+        s += 25.0 if 30 <= rp <= 70 else (12.0 if 15 <= rp < 30 or 70 < rp <= 85 else 0.0)
+    return round(s, 1)
+
+
+def _balanced_pick(codes: list[str], cap_total: int, cap_per_sub: int,
+                   smap: dict[str, tuple[str, str]] | None = None) -> list[str]:
+    """跨一级板块均衡采样：按一级轮询取，每个细分最多 cap_per_sub 只，总量 ≤ cap_total。
+
+    smap 为批量板块映射（全市场池 ~5000 只逐只查 DB 会退化，必须批量传入）；
+    不传则回退到手工池的内存查询，保持旧行为。
+    """
+    look = (lambda c: smap[c]) if smap else universe.sector_of
     by_primary: dict[str, list[str]] = {}
     for c in codes:
-        primary, _ = universe.sector_of(c)
+        primary, _ = look(c)
         by_primary.setdefault(primary, []).append(c)
     queues = list(by_primary.values())
     cursor = [0] * len(queues)
@@ -885,7 +948,7 @@ def _balanced_pick(codes: list[str], cap_total: int, cap_per_sub: int) -> list[s
             while cursor[qi] < len(q):
                 c = q[cursor[qi]]
                 cursor[qi] += 1
-                _, sub = universe.sector_of(c)
+                _, sub = look(c)
                 if per_sub.get(sub, 0) < cap_per_sub:
                     per_sub[sub] = per_sub.get(sub, 0) + 1
                     picked.append(c)
@@ -897,31 +960,64 @@ def _balanced_pick(codes: list[str], cap_total: int, cap_per_sub: int) -> list[s
 
 
 def _screen_rows(capital: float, focus: str = "") -> list[dict]:
-    """候选池行情 + 指标（按 focus 取数 + 负担得起优先 + 跨板块均衡采样）。"""
-    codes = universe.codes_of(focus)
-    quotes = ds.tencent_quote(codes)
+    """候选池行情 + 指标（按 focus 取数 + 负担得起优先 + 跨板块均衡采样）。
+
+    focus 为板块名（一级/细分/概念）时只在该板块内选；为空则全市场。
+    候选池来自 universe_store（全A ~4989 只 eligible），未回填时自动降级手工池。
+    """
+    codes = universe_store.codes_of(focus)
+    quotes = ds.tencent_quote(codes)  # 自动分批：全池 4989 只 ≈1.7s
     if not quotes:
         return []
     # 先按 1 手成本可负担过滤（资金太小买不起任何 1 手则退回全池给参考）
     affordable = [c for c in codes if quotes.get(c, {}).get("lot_cost", 9e9) <= capital]
     pool = affordable or codes
-    # 侧重某个二级细分时放宽单细分配额（否则跨一级/全市场按 3 只/细分均衡）
-    subs_all = {s for subs in universe.taxonomy().values() for s in subs}
-    cap_per_sub = 6 if focus in subs_all else 3
-    picked = _balanced_pick(pool, _SCREEN_CAP_TOTAL, cap_per_sub)
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        metrics_list = list(executor.map(ds.sina_metrics, picked))
+    smap = universe_store.sectors_map(pool)  # 批量查板块，避免逐只 DB 往返
+    subs_all = {s for subs in universe_store.taxonomy().values() for s in subs}
+    # 池子够小（关注某板块，主路径）-> 对全部成分股算形态再按分排序，形态真正参与筛选。
+    # 池子过大（全市场）-> 退回流通市值预筛 + 均衡采样：均衡采样按池内顺序取，
+    # 5000 只不预筛会取到各板块代码号最小的股而非龙头，扩池反成选垃圾。
+    if focus and len(pool) <= _PA_RANK_MAX:
+        metrics = _metrics_of(pool)
+        scored = [(c, metrics[c], _pa_score(metrics[c])) for c in pool]
+        keep = [(c, m, s) for c, m, s in scored if s is not None]
+        keep.sort(key=lambda x: x[2], reverse=True)
+        chosen = keep[:_SCREEN_CAP_TOTAL]
+        logger.info("形态初筛 focus=%s: 池 %d -> 可分析 %d -> 取前 %d",
+                    focus, len(pool), len(keep), len(chosen))
+        picked = [c for c, _, _ in chosen]
+        mmap = {c: m for c, m, _ in chosen}
+        score_map = {c: s for c, _, s in chosen}
+    else:
+        if not focus and len(pool) > _PRESCREEN:
+            pool = sorted(pool, key=lambda c: quotes.get(c, {}).get("float_mcap_yi", 0),
+                          reverse=True)[:_PRESCREEN]
+            smap = universe_store.sectors_map(pool)
+        cap_per_sub = 6 if focus and focus in subs_all else 3
+        picked = _balanced_pick(pool, _SCREEN_CAP_TOTAL, cap_per_sub, smap)
+        mmap = _metrics_of(picked)
+        score_map = {c: _pa_score(mmap[c]) for c in picked}
     rows = []
-    for c, m in zip(picked, metrics_list):
-        q = quotes.get(c, {})
-        primary, sub = universe.sector_of(c)
+    for c in picked:
+        q, m = quotes.get(c, {}), mmap.get(c, _EMPTY_METRICS)
+        primary, sub = smap.get(c) or universe_store.sector_of(c)
         rows.append({"code": c, "name": q.get("name", c),
                      "primary": primary, "sub": sub,
                      "price": q.get("price"), "pe_ttm": q.get("pe_ttm"), "pb": q.get("pb"),
                      "vol": m.get("vol"), "cum20": m.get("cum20"),
                      "range_pos": m.get("range_pos"), "net20": m.get("net20"),
+                     "pa_score": score_map.get(c),
+                     "turnover": q.get("turnover"),
                      "lot_cost": q.get("lot_cost")})
     return rows
+
+
+def _metrics_of(codes: list[str]) -> dict[str, dict]:
+    """并发拉一批股票的形态指标（带进程内 TTL 缓存）。"""
+    if not codes:
+        return {}
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        return dict(zip(codes, executor.map(_safe_metrics, codes)))
 
 
 def _ai_web_context(scope: str, code: str = "", name: str = "") -> str:
@@ -957,7 +1053,7 @@ def _ai_web_context(scope: str, code: str = "", name: str = "") -> str:
                          + "\n".join(lines[:12]))
     # L5：私域笔记（我本人的判断，带时间戳供按新鲜度加权；须与客观数据区分、勿当事实）
     if scope == "position" and code:
-        p, s = universe.sector_of(code)
+        p, s = universe_store.sector_of(code)
         my_notes = notes_store.for_ai(code=code, sectors=[p, s], limit=5)
     else:
         my_notes = notes_store.list_notes(limit=5)
@@ -987,9 +1083,81 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+# ── 全市场股票池 + 板块日变化（universe_store） ────────────────────────────
+@app.route("/api/universe/status")
+def api_universe_status():
+    """池子健康度：总数/eligible/板块回填进度/板块数/最近刷新。"""
+    return jsonify(universe_store.status())
+
+
+@app.route("/api/universe/refresh", methods=["POST"])
+def api_universe_refresh():
+    """刷新全A名单（新浪 hs_a，~12s）+ 后台续跑板块回填（断点续传）。"""
+    n = universe_store.refresh_roster()
+    threading.Thread(target=universe_store.backfill_sectors, daemon=True).start()
+    return jsonify({"refreshed": n, **universe_store.status()})
+
+
+@app.route("/api/sectors")
+def api_sectors():
+    """板块日排行。?kind=sw1|sub|concept（默认 sw1）&date=&limit=
+
+    数据来自 universe_store.sector_daily；无当日数据时惰性补算一次（~6s）。
+    """
+    kind = request.args.get("kind", "sw1")
+    date = request.args.get("date", "")
+    limit = max(1, min(int(request.args.get("limit", 30)), 100))
+    rows = universe_store.sector_ranking(date=date, kind=kind, limit=limit)
+    if not rows and not date:  # 当日尚未统计过 -> 惰性补算
+        universe_store.snapshot_daily()
+        rows = universe_store.sector_ranking(kind=kind, limit=limit)
+    return jsonify({"date": rows[0]["date"] if rows else "", "kind": kind,
+                    "rows": rows, "status": universe_store.status()})
+
+
+@app.route("/api/sectors/snapshot", methods=["POST"])
+def api_sectors_snapshot():
+    """手动重算当日板块统计（~6s）。"""
+    return jsonify({"sectors": universe_store.snapshot_daily()})
+
+
+@app.route("/api/sectors/<name>")
+def api_sector_detail(name: str):
+    """单板块：近 N 日变化历史 + 成分股行情（按流通市值降序，上限 40）。"""
+    days = max(2, min(int(request.args.get("days", 30)), 250))
+    codes = universe_store.codes_of(name)
+    quotes = ds.tencent_quote(codes[:40]) if codes else {}
+    members = [{"code": c, "name": quotes.get(c, {}).get("name", c),
+                "price": quotes.get(c, {}).get("price"),
+                "chg_pct": quotes.get(c, {}).get("chg_pct"),
+                "turnover": quotes.get(c, {}).get("turnover"),
+                "lot_cost": quotes.get(c, {}).get("lot_cost")}
+               for c in codes[:40] if c in quotes]
+    members.sort(key=lambda m: m.get("chg_pct") or -99, reverse=True)
+    return jsonify({"sector": name, "total": len(codes),
+                    "history": universe_store.sector_history(name, days),
+                    "members": members})
+
+
+def _universe_boot() -> None:
+    """启动时后台预热：名单刷新 + 板块回填续跑 + 当日统计。不阻塞启动。"""
+    try:
+        universe_store.init()
+        st = universe_store.status()
+        if not st.get("ready") or st.get("roster_at", "")[:10] != _now()[:10]:
+            universe_store.refresh_roster()
+        if universe_store.status().get("sectors_pending", 0) > 0:
+            logger.info("板块归属回填续跑…（断点续传，期间 sector_of 降级手工池）")
+            universe_store.backfill_sectors()
+        universe_store.snapshot_daily()
+    except (OSError, ValueError, sqlite3.Error) as e:
+        logger.warning("全市场池预热失败（不影响其余功能）: %s", e)
+
+
 if __name__ == "__main__":
     if news_store.stats()["total"] == 0:  # 首次运行：后台一次性回填新闻库(不阻塞启动)
         threading.Thread(target=news_store.backfill, daemon=True).start()
         logger.info("首次运行：后台回填新闻库…（1–2 季度，约几分钟）")
+    threading.Thread(target=_universe_boot, daemon=True).start()
     logger.info("A股观察台启动 -> http://127.0.0.1:5000")
     app.run(host="127.0.0.1", port=5000, debug=False)

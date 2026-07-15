@@ -16,7 +16,8 @@ import os
 import sqlite3
 import threading
 import time
-from datetime import datetime
+from datetime import date as date_cls
+from datetime import datetime, timedelta
 from typing import Any
 
 import datasources as ds
@@ -41,6 +42,7 @@ SW1_SET = frozenset({
 OTHER = "其他"
 _SUB_SCAN = 4          # 细分只在前 N 个标签里找（再往后是概念/地域/指数）
 _HEARTBEAT_STALE = 120  # 回填心跳超过该秒数视为进程已死、锁可抢占
+SECTOR_KEEP_DAYS = 365  # 板块日统计滚动保留天数（977 板块 ≈ 24 万行/年 ≈ 82MB，不清则无限涨）
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS stocks(
@@ -382,16 +384,22 @@ def status() -> dict[str, Any]:
                 "SELECT COUNT(DISTINCT sector) n FROM stock_sectors").fetchone()["n"]
             at = c.execute("SELECT v FROM meta WHERE k='roster_at'").fetchone()
             days = c.execute("SELECT COUNT(DISTINCT date) n FROM sector_daily").fetchone()["n"]
+            sd_rows = c.execute("SELECT COUNT(*) n FROM sector_daily").fetchone()["n"]
     except sqlite3.Error as e:
         logger.warning("status 查询失败: %s", e)
         return {"ready": False}
+    try:
+        db_mb = round(os.path.getsize(DB_PATH) / 1048576, 1)
+    except OSError:
+        db_mb = 0.0
     total = g["total"] or 0
     return {"ready": total > 0, "total": total, "eligible": g["elig"] or 0,
             "st": g["st"] or 0, "leaders": g["leaders"] or 0,
             "sectors_tagged": g["tagged"] or 0,
             "sectors_pending": (g["elig"] or 0) - (g["tagged"] or 0),
             "sector_count": sectors or 0, "sector_daily_days": days or 0,
-            "roster_at": at["v"] if at else ""}
+            "sector_daily_rows": sd_rows or 0, "keep_days": SECTOR_KEEP_DAYS,
+            "db_mb": db_mb, "roster_at": at["v"] if at else ""}
 
 
 # ── 板块日变化统计 ─────────────────────────────────────────────────────────
@@ -449,8 +457,24 @@ def snapshot_daily(date: str = "") -> int:
             "up_n=excluded.up_n, down_n=excluded.down_n, limit_up_n=excluded.limit_up_n, "
             "amount=excluded.amount, leader_code=excluded.leader_code, "
             "leader_name=excluded.leader_name, leader_chg=excluded.leader_chg", payload)
-    logger.info("板块日统计 %s: %d 个板块", date, len(payload))
+    dropped = purge()  # 滚动 1 年，否则 24 万行/年无限累积
+    logger.info("板块日统计 %s: %d 个板块%s", date, len(payload),
+                f"（清理 {dropped} 行过期）" if dropped else "")
     return len(payload)
+
+
+def purge(days: int = SECTOR_KEEP_DAYS) -> int:
+    """删除 > days 天的板块日统计。返回删除行数。
+
+    977 个板块 × 245 交易日 ≈ 24 万行/年（约 82MB），不清理则无限增长（10 年 ~820MB）。
+    与 `news_store.purge` 同为滚动 1 年策略。
+    注：SQLite 的 DELETE 不回收文件空间（页会复用），故文件稳态约等于 1 年峰值而非持续缩小。
+    """
+    cutoff = (date_cls.today() - timedelta(days=days)).isoformat()
+    with _LOCK, _conn() as c:
+        before = c.total_changes
+        c.execute("DELETE FROM sector_daily WHERE date < ?", (cutoff,))
+        return c.total_changes - before
 
 
 def sector_ranking(date: str = "", kind: str = "", limit: int = 30) -> list[dict[str, Any]]:

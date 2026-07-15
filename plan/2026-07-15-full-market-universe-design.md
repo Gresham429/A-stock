@@ -176,11 +176,52 @@ CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT);
 
 ## 分期
 
-- **一期**：`universe_store.py` — 名单 + 板块归属回填 + `sector_of`/`codes_of`/`taxonomy` 新实现（保持签名）。
-- **二期**：`sector_daily` 统计 + `/api/sectors` + 前端板块对比视图。
-- **三期**：选股层接入（关注板块 → 按需日K → PA 形态初筛）+ `_screen_rows` 改造。
+- **一期** ✅：`universe_store.py` — 名单 + 板块归属回填 + `sector_of`/`codes_of`/`taxonomy`（保持签名）。
+- **二期** ✅：`sector_daily` 统计 + `/api/sectors` + 前端「🧭 板块」modal。
+- **三期** ✅：选股层接入 + 形态初筛 + `_screen_rows` 改造。
 
-每期独立可用、可验证。
+## 实施记录（2026-07-15）
+
+### 与设计的偏差
+
+**板块日统计不走腾讯分批。** 新浪 hs_a 返回自带 `changepercent`/`amount`/`turnoverratio`/`mktcap`/`nmc`/`per`/`pb`，
+名单刷新与板块统计共用同一次拉取（~12s），比设计里的「腾讯 78 批」更省。
+
+**日K仓库整个没建，也不需要建。** 形态初筛落在 `ds.sina_metrics`（新浪 MoneyFlow，一份数据出
+波动率/区间位置/20日动量/资金流），板块内 ~100 只并发 ~10s，无需日K与复权校准。设计里
+"按需拉日K"这步实际被 sina_metrics 取代。
+
+**形态初筛只在「关注板块」路径生效。** 池 ≤ `_PA_RANK_MAX`(200) 时对全部成分股算形态再排序；
+全市场路径池太大，退回 `_PRESCREEN`(600) 流通市值预筛 + 均衡采样。
+
+### 扩池暴露的崩溃点（手工龙头池数据干净、永不触发）
+
+| 位置 | 症状 | 修法 |
+|------|------|------|
+| `ds.tencent_quote` | 全池 4989 只拼成 44KB URL → **HTTP 414**（实测 800 只可过、2000 只失败） | `QUOTE_CHUNK=400` 分批并发，全池 1.7s / 100% 覆盖 |
+| `ds._annualized_vol` | 收盘价含 0 → `math.log` **math domain error**，穿透 `executor.map` 打崩整个选股 | 窗口含非正值返回 None |
+| `ds.sina_metrics` | `closes[-21]==0` → `ZeroDivisionError`；`float(x['trade'])` 在 try 块外，空字段 `ValueError` 穿透 | 两处设防 |
+| `app._safe_metrics` | — | 兜底包装，单只异常不拖垮整批 |
+
+### 解析规则的坑
+
+东财 slist 同一板块会以 `银行Ⅱ` 与 `银行` 两种形态返回。若按**原始标签**分类却按**去后缀名字**去重，
+`银行Ⅱ` 会被判成 concept 并抢占去重位，真正的 `sw1` 标记永久丢失。表现隐蔽——`codes_of('银行')`
+照常能用（不筛 kind），只有 `sector_ranking(kind='sw1')` 静默漏板块。已改为去后缀后分类 + sw1/sub 判定优先，
+固化为 `tests/test_universe_store.py` 回归用例。
+
+### 跨进程互斥
+
+`ds.em_get` 的限流器是进程内全局（`_em_last_call`），app 与命令行同时回填会让东财实际请求速率翻倍。
+东财已因此封掉 clist；slist 再被封则功能全废。故加 db 心跳锁（`meta.backfill_hb = pid,ts`，
+超 120s 视为进程已死可抢占），与既有 `threading.Lock` 双重互斥。
+
+### `_pa_score` 权重说明
+
+四项各 25 分，权重是**启发式先验、非回测得出**，按「波段 + 波动型」取向设定：
+可分析性（`vol=None` 出局，次新/停牌在此自然剔除）、波动（年化 30–90% 满分）、
+资金（主力 20 日净流入为正，按额饱和）、动量（20 日涨幅 0–30% 满分）、位置（区间位置 30–70 满分，避免追顶接刀）。
+它只是**粗筛**——决定谁占用送进 AI 的 36 个名额；真正 PA 判断仍由 AI 依 `rules_store` 84 条规则做。
 
 ## 不做（YAGNI）
 

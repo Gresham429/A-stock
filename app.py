@@ -651,6 +651,26 @@ def _lesson_block() -> str:
         return ""
 
 
+def _agent_blocks(ag: dict, cash: float, total: float, n_pos: int) -> str:
+    """**每个 agent 自己的**注入块：档位按它自己的账户总资产、费率按它绑的画像。
+
+    此前 `blocks` 由 `_agent_boot` 算一次传给所有 agent —— `_tier_block()` 读的是
+    **active 画像 + 用户真实持仓**，于是 50 万的中型 agent 拿到的是用户 7000 块的
+    微型档玩法，`_fee_block()` 的保本涨幅也按用户现金算。**多档位实验会完全失效**。
+
+    拆法：**档位跟这个账户的钱走**（agent 的 paper 账户总资产），
+    **费率跟券商走**（agent 绑的画像——都是同一个券商，故共用合理）。
+    """
+    tier = profile_store.block_for_ai(cash, total, n_pos)
+    try:
+        sched = profile_store.fee_schedule(ag.get("profile_id"))
+        fee = fees.for_ai(sched, cash or 10000.0) + "\n\n"
+    except (sqlite3.Error, OSError, ValueError) as e:
+        logger.warning("agent 费率块失败: %s", e)
+        fee = ""
+    return tier + fee + _lesson_block() + rules_store.for_ai()
+
+
 def _fee_block() -> str:
     """【交易成本】注入块：给 AI 具体费率与保本涨幅，而非「注意手续费」这种空话。
 
@@ -1367,9 +1387,8 @@ def api_agents_delete(gid: int):
 def api_agents_run(gid: int):
     """跑一个 agent 的日循环。?dry=1 只决策不下单。"""
     b = request.get_json(silent=True) or {}
-    blocks = _tier_block() + _fee_block() + _lesson_block() + rules_store.for_ai()
     return jsonify(agent_loop.run_day(gid, focus=b.get("focus", ""),
-                                      dry_run=bool(b.get("dry")), blocks=blocks,
+                                      dry_run=bool(b.get("dry")),
                                       force=bool(b.get("force"))))
 
 
@@ -1377,9 +1396,8 @@ def api_agents_run(gid: int):
 def api_agents_run_all():
     """跑所有启用的 agent（多档位/同档多账户并行实验）。后台线程，不阻塞。"""
     b = request.get_json(silent=True) or {}
-    blocks = _tier_block() + _fee_block() + _lesson_block() + rules_store.for_ai()
     dry = bool(b.get("dry"))
-    threading.Thread(target=agent_loop.run_all, args=(dry, blocks), daemon=True).start()
+    threading.Thread(target=agent_loop.run_all, args=(dry,), daemon=True).start()
     return jsonify({"ok": True, "running": True,
                     "agents": len(agent_store.list_agents(active_only=True))})
 
@@ -1407,8 +1425,7 @@ def _agent_boot() -> None:
     """
     if not agent_store.list_agents(active_only=True):
         return
-    blocks = _tier_block() + _fee_block() + _lesson_block() + rules_store.for_ai()
-    for r in agent_loop.run_all(blocks=blocks):
+    for r in agent_loop.run_all():   # blocks 留空 → 每个 agent 各自按自己的档位/费率构建
         if r.get("skipped"):
             logger.info("agent %s: %s", r.get("agent", "-"), r["skipped"])
         elif r.get("ok"):

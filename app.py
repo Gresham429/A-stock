@@ -28,6 +28,7 @@ from flask import Flask, jsonify, render_template, request
 import ai_cache
 import config
 import datasources as ds
+import fees
 import llm
 import news_store
 import notes_store
@@ -129,7 +130,7 @@ def _market_overview_payload(force: bool = False, with_ai: bool = True) -> dict:
     ai = None
     if config.llm_enabled() and idx.get("indices"):
         try:
-            ai = llm.market_overview(idx["indices"], breadth, _tier_block() + _macro_block() + _ai_web_context("market"))
+            ai = llm.market_overview(idx["indices"], breadth, _tier_block() + _fee_block() + _macro_block() + _ai_web_context("market"))
         except llm.LLMError as e:
             logger.warning("大盘研判 AI 失败: %s", e)
     model = config.DEEPSEEK_MODEL if config.llm_enabled() else None
@@ -547,7 +548,7 @@ def recommend_daily():
     rows = _overview_rows(watchlist)
     quotes = ds.tencent_quote(portfolio.codes()) if portfolio.codes() else {}
     holdings = portfolio.with_pnl(quotes)
-    web_ctx = _tier_block() + _macro_block() + _ai_web_context("market")
+    web_ctx = _tier_block() + _fee_block() + _macro_block() + _ai_web_context("market")
     news_map = {c: [n.get("title", "") for n in news_store.query(code=c, days=30, limit=3)]
                 for c in watchlist}   # 每股本地库近期标题 → 一句话叙事(0 额外 LLM)
     try:
@@ -581,6 +582,23 @@ def _tier_block() -> str:
         return ""
     total, hn = _total_assets()
     return profile_store.block_for_ai(prof.get("cash") or 0, total, hn)
+
+
+def _fee_block() -> str:
+    """【交易成本】注入块：给 AI 具体费率与保本涨幅，而非「注意手续费」这种空话。
+
+    此前 5 个 AI 提示词 0 处提及手续费——AI 在给买卖建议时并不知道交易要花钱，
+    会建议博取小于保本涨幅的价差（对万9费率，往返 0.232%，即涨不到 0.232% 就是亏）。
+    费率取 active 画像（因券商/账户而异，见 fees.py）。
+    """
+    try:
+        sched = profile_store.fee_schedule()
+        prof = profile_store.get_active()
+        capital = float((prof or {}).get("cash") or 0) or 10000.0
+        return fees.for_ai(sched, capital) + "\n\n"
+    except (sqlite3.Error, OSError, ValueError) as e:
+        logger.warning("交易成本块生成失败: %s", e)
+        return ""
 
 
 def _macro_block() -> str:
@@ -660,6 +678,17 @@ def profiles_update(pid: int):
             fields["cash"] = float(fields["cash"])
         except (TypeError, ValueError):
             fields.pop("cash")
+    # 费率（因券商/账户而异，必须可改；佣金率填小数，如 万9 = 0.0009）
+    for k in ("commission_rate", "min_commission", "stamp_rate", "transfer_rate"):
+        if k in b:
+            try:
+                v = float(b[k])
+            except (TypeError, ValueError):
+                continue
+            if 0 <= v <= (100.0 if k == "min_commission" else 0.01):  # 挡住把 9 当成万9 填进来
+                fields[k] = v
+            else:
+                logger.warning("画像 %s 费率 %s=%s 超出合理范围，忽略", pid, k, b[k])
     profile_store.update(pid, **fields)
     _sync_scenario()
     return jsonify({"ok": True})
@@ -739,7 +768,7 @@ def recommend_position(code: str):
                                          f_news.result(), f_kline.result())
     vol_hist = _vol_hist(kl)
     prof = _company_profile(code, q.get("name", ""), news, financials)
-    web_ctx = _tier_block() + _macro_block() + _profile_block(prof) + _ai_web_context("position", code, q.get("name", ""))
+    web_ctx = _tier_block() + _fee_block() + _macro_block() + _profile_block(prof) + _ai_web_context("position", code, q.get("name", ""))
     scen = rules_store.get_scenario()
     rule_map = rules_store.active_rule_map(scen)
     try:
@@ -794,7 +823,7 @@ def recommend_entry(code: str):
     vol_hist = _vol_hist(kl)
     market_ctx = _market_overview_payload().get("ai")
     prof = _company_profile(code, q.get("name", ""), news, financials)
-    web_ctx = _tier_block() + _macro_block() + _profile_block(prof) + _ai_web_context("position", code, q.get("name", ""))
+    web_ctx = _tier_block() + _fee_block() + _macro_block() + _profile_block(prof) + _ai_web_context("position", code, q.get("name", ""))
     scen = rules_store.get_scenario()
     rule_map = rules_store.active_rule_map(scen)
     try:
@@ -840,7 +869,7 @@ def recommend_screen():
     if not rows:
         return jsonify({"ok": False, "msg": "候选池行情拉取失败，请重试"}), 502
     market_ctx = _market_overview_payload().get("ai")  # 复用缓存的大盘研判结论
-    web_ctx = _tier_block() + _macro_block() + _ai_web_context("market")
+    web_ctx = _tier_block() + _fee_block() + _macro_block() + _ai_web_context("market")
     try:
         result = llm.market_screen(rows, capital, focus, market_ctx, web_ctx)
     except llm.LLMError as e:

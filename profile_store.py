@@ -16,6 +16,8 @@ import threading
 from datetime import datetime
 from typing import Any
 
+import fees
+
 logger = logging.getLogger(__name__)
 
 _DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
@@ -52,7 +54,8 @@ TIERS: list[dict[str, Any]] = [
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS profiles(
   id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, created_at TEXT,
-  cash REAL, risk_pref TEXT DEFAULT '均衡');
+  cash REAL, risk_pref TEXT DEFAULT '均衡',
+  commission_rate REAL, min_commission REAL, stamp_rate REAL, transfer_rate REAL);
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
 """
 
@@ -68,6 +71,11 @@ def init() -> None:
     """建表；首次无档时建一个「默认」1 万档并设为 active（贴合用户画像）。"""
     with _LOCK, _conn() as c:
         c.executescript(_SCHEMA)
+        # 旧库迁移：费率列是后加的（2026-07-15），补列后取默认值
+        have = {r["name"] for r in c.execute("PRAGMA table_info(profiles)")}
+        for col in ("commission_rate", "min_commission", "stamp_rate", "transfer_rate"):
+            if col not in have:
+                c.execute(f"ALTER TABLE profiles ADD COLUMN {col} REAL")
         n = c.execute("SELECT COUNT(*) FROM profiles").fetchone()[0]
         if n == 0:
             now = datetime.now().isoformat(timespec="seconds")
@@ -77,8 +85,29 @@ def init() -> None:
 
 
 def _row(r: sqlite3.Row) -> dict[str, Any]:
+    sched = fees.from_row(r)
     return {"id": r["id"], "name": r["name"], "cash": r["cash"],
-            "risk_pref": r["risk_pref"], "created_at": r["created_at"]}
+            "risk_pref": r["risk_pref"], "created_at": r["created_at"],
+            "commission_rate": sched.commission_rate,
+            "min_commission": sched.min_commission,
+            "stamp_rate": sched.stamp_rate, "transfer_rate": sched.transfer_rate,
+            "fee_desc": sched.describe(),
+            "min_amount_for_rate": sched.min_amount_for_rate}
+
+
+def fee_schedule(pid: int | None = None) -> fees.FeeSchedule:
+    """某画像（默认 active）的费率表。费率随券商账户走，故是画像属性。
+
+    定义在 `get_active` 之前，故用 meta 直读 active 而非调用它（避免前向引用）。
+    """
+    with _conn() as c:
+        if pid is None:
+            m = c.execute("SELECT v FROM meta WHERE k='active'").fetchone()
+            if not m:
+                return fees.FeeSchedule()
+            pid = int(m["v"])
+        r = c.execute("SELECT * FROM profiles WHERE id=?", (pid,)).fetchone()
+    return fees.from_row(r)
 
 
 def list_profiles() -> list[dict[str, Any]]:
@@ -102,7 +131,8 @@ def create(name: str, cash: float, risk_pref: str = "均衡") -> int:
 
 
 def update(pid: int, **fields: Any) -> None:
-    allowed = ("name", "cash", "risk_pref")
+    allowed = ("name", "cash", "risk_pref",
+               "commission_rate", "min_commission", "stamp_rate", "transfer_rate")
     sets, args = [], []
     for k, v in fields.items():
         if k in allowed:

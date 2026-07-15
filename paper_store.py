@@ -9,6 +9,9 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+
+import fees as fee_model
+import profile_store
 import threading
 from datetime import date, datetime
 from typing import Any
@@ -99,11 +102,17 @@ def orders_of(aid: int, limit: int = 50) -> list[dict[str, Any]]:
 
 # ── 手续费 ────────────────────────────────────────────────────────────────
 def fees(side: str, amount: float) -> float:
-    """佣金(万2.5,最低5元) + 过户费(万0.1双向) + 印花税(卖出千0.5)。"""
-    commission = max(amount * 0.00025, 5.0)
-    transfer = amount * 0.00001
-    stamp = amount * 0.0005 if side == "sell" else 0.0
-    return round(commission + transfer + stamp, 2)
+    """单笔交易成本（元）。费率取 **active 投资画像**的费率表，不再写死。
+
+    费率因券商/账户而异（同为国信，议价前万9、议价后万2.5，差 3.6 倍），
+    写死会让模拟盘系统性低估成本、给出假的正收益。见 `fees.py`。
+    """
+    try:
+        sched = profile_store.fee_schedule()
+    except (sqlite3.Error, OSError) as e:
+        logger.warning("读取画像费率失败，退回默认档: %s", e)
+        sched = fee_model.FeeSchedule()
+    return fee_model.total(side, amount, sched)
 
 
 def _log_order(c, aid, code, name, side, otype, price, shares, amount, fee, status, note):

@@ -15,6 +15,8 @@ from typing import Any
 import config
 import provenance
 
+import template_store
+
 logger = logging.getLogger(__name__)
 
 _DISCLAIMER = (
@@ -30,6 +32,20 @@ _DISCLAIMER = (
 
 class LLMError(RuntimeError):
     """DeepSeek 调用失败。"""
+
+
+def _system_prompt() -> tuple[str, int]:
+    """8 个 agent 共用的 system prompt，走模板库（可版本化、可回滚、可 A/B）。
+
+    返回 (body, version)；version=0 表示模板库不可用、用的是代码内置的 _DISCLAIMER 兜底。
+    改它会影响全部 agent，故它是版本化的第一个目标。
+    """
+    try:
+        template_store.seed("system_disclaimer", _DISCLAIMER)
+        return template_store.get("system_disclaimer", _DISCLAIMER)
+    except Exception as e:  # noqa: BLE001 模板库故障绝不能拖垮 AI 主流程
+        logger.warning("模板库不可用，用代码内置 system prompt: %s", e)
+        return _DISCLAIMER, 0
 
 
 def _chat(messages: list[dict[str, str]], *, json_mode: bool = True,
@@ -172,7 +188,7 @@ def market_overview(indices: list[dict[str, Any]], breadth: dict[str, Any] | Non
   "guidance": "对选股的指导:进攻/均衡/防守 + 仓位与选股方向建议(40字内)",
   "one_liner": "一句话大盘研判(顶部条展示,含关键数字,30字内)"
 }}"""
-    content = _chat([{"role": "system", "content": _DISCLAIMER},
+    content = _chat([{"role": "system", "content": _system_prompt()[0]},
                      {"role": "user", "content": prompt}], max_tokens=6000)
     return _parse_json(content)
 
@@ -244,7 +260,7 @@ def daily_recommendation(rows: list[dict[str, Any]],
   "holdings_note": "针对持仓的一句话提醒(无持仓则填 无)"
 }}
 picks 覆盖全部自选股，按关注优先级排序。**持仓股 action 默认 hold/watch，除非规则明确触发。**"""
-    content = _chat([{"role": "system", "content": _DISCLAIMER},
+    content = _chat([{"role": "system", "content": _system_prompt()[0]},
                      {"role": "user", "content": prompt}], max_tokens=8000)
     return _parse_json(content)
 
@@ -286,7 +302,7 @@ def company_profile(name: str, code: str,
   "will":"要做什么：规划/在建/题材催化(一句,30字内；无明确公开信息写『暂无明确公开规划』)",
   "tags":["方向/题材标签,3~6个,来自所属板块或新闻"]
 }}"""
-    content = _chat([{"role": "system", "content": _DISCLAIMER},
+    content = _chat([{"role": "system", "content": _system_prompt()[0]},
                      {"role": "user", "content": prompt}],
                     model=FLASH_MODEL, max_tokens=2500)
     return _parse_json(content)
@@ -310,7 +326,7 @@ def macro_digest(news: list[dict[str, Any]] | None = None,
   "sector_map": ["每条:某因素→利好/利空 哪些A股板块(如『油价涨→利好油气开采/油运，利空航空/化工下游』)"],
   "bias": "综合外围对A股当前偏多/偏空/中性(一句,含理由)"
 }}"""
-    content = _chat([{"role": "system", "content": _DISCLAIMER},
+    content = _chat([{"role": "system", "content": _system_prompt()[0]},
                      {"role": "user", "content": prompt}],
                     model=FLASH_MODEL, max_tokens=3000)
     return _parse_json(content)
@@ -360,7 +376,7 @@ def position_advice(holding: dict[str, Any], quote: dict[str, Any],
   "policy_news":"新闻/政策面一句话(若新闻不足则说明)",
   "reason":"综合结论(80字内)"
 }}"""
-    content = _chat([{"role": "system", "content": _DISCLAIMER},
+    content = _chat([{"role": "system", "content": _system_prompt()[0]},
                      {"role": "user", "content": prompt}], max_tokens=6000)
     return _parse_json(content)
 
@@ -407,7 +423,7 @@ def entry_advice(code: str, name: str, quote: dict[str, Any], metrics: dict[str,
   "reason":"综合结论(100字内)"
 }}
 若 verdict 非『值得入场』，entry_* 写触发条件而非具体价。"""
-    content = _chat([{"role": "system", "content": _DISCLAIMER},
+    content = _chat([{"role": "system", "content": _system_prompt()[0]},
                      {"role": "user", "content": prompt}], max_tokens=7000)
     return _parse_json(content)
 
@@ -470,7 +486,7 @@ def market_screen(rows: list[dict[str, Any]], capital: float,
   "sector_view":"按二级细分点评哪些方向强/弱、当前更该配哪类(结合大盘风格)"
 }}
 picks 给 6~10 只，按吸引力排序，覆盖至少 3 个不同一级板块。"""
-    content = _chat([{"role": "system", "content": _DISCLAIMER},
+    content = _chat([{"role": "system", "content": _system_prompt()[0]},
                      {"role": "user", "content": prompt}], max_tokens=9000)
     return _parse_json(content)
 

@@ -812,15 +812,16 @@ def recommend_entry(code: str):
 
 @app.route("/api/recommend/screen", methods=["POST"])
 def recommend_screen():
-    """全市场科技股筛选：跨板块 + 按资金规模。body: {capital?, focus_sector?}。"""
+    """全市场筛选：跨板块 + 按资金规模。资金默认取 active 投资画像的现金本金（body.capital 可覆盖）。"""
     if not config.llm_enabled():
         return jsonify({"ok": False, "msg": "未配置 DeepSeek key"}), 400
     body = request.get_json(silent=True) or {}
     force = bool(body.get("force"))
+    _act = profile_store.get_active() or {}
     try:
-        capital = float(body.get("capital", 10000))
+        capital = float(body.get("capital") or _act.get("cash") or 10000)
     except (TypeError, ValueError):
-        capital = 10000.0
+        capital = float(_act.get("cash") or 10000)
     focus = body.get("focus_sector", "") or ""
     inputs = {"capital": capital, "focus": focus, "rules": rules_store.signature()}
     if not force:

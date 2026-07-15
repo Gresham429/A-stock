@@ -30,6 +30,7 @@ import agent_store
 import ai_cache
 import config
 import datasources as ds
+import factor_lab
 import fees
 import llm
 import news_store
@@ -964,6 +965,8 @@ def _vol_hist(kl: list[dict]) -> dict:
 
 _SCREEN_CAP_TOTAL = 36  # 喂给 LLM 的候选总量上限（控 token 与时延）
 _PRESCREEN = 600        # 全市场未指定板块时，均衡采样前先按流通市值预筛到这么多只
+VOL_FLOOR = 15.0        # 波动率下限：低于此没有波段空间（用户偏好，非收益预测）
+VOL_CEIL = 130.0        # 波动率上限：高于此风险失控
 
 
 _PA_RANK_MAX = 200   # 板块内 ≤ 该只数时，对全部成分股算形态再排序（超过则退回市值预筛）
@@ -994,63 +997,51 @@ def _safe_metrics(code: str) -> dict:
 def _pa_score(m: dict) -> float | None:
     """形态初筛打分（0–100）。None = 形态不可分析，该股出局。
 
-    这是**粗筛**，不是买卖判断——它只决定哪些股值得占用送进 AI 的 36 个名额，
-    真正的 PA 判断由 AI 依 rules_store 的规则库做。
+    这是**粗筛**，只决定谁值得占用送进 AI 的 36 个名额；真正的 PA 判断由 AI 依
+    rules_store 的规则库做。
 
-    权重是启发式先验（非回测得出），按「波段 + 波动型」取向设定，四项各 25 分：
-      可分析性  vol 为 None 直接出局 —— 数据不足 60 日者（次新、长期停牌）在此自然剔除
-      波动      年化波动率落在 30–90% 得满分，过低是死水、过高难控风险
-      资金      主力 20 日净流入为正者得分，按流入额饱和到 25 分
-      动量      20 日涨幅 0–30% 区间得分，已翻倍的追高股扣分
-      位置      20 日区间位置 30–70 居中得分，避免追顶与接刀
+    **方向由 162,014 个样本的 IC 回测驱动，不再是我拍的先验**（见 factor_lab）：
+      · 每个因子的方向取 `factor_lab.direction()` —— 近 60 日 |t|>2 用近期方向
+        （regime 已切换），否则用全样本方向，两者都不显著则该因子**不参与打分**。
+      · 权重保持等权（每个生效因子等分）——量化实证里过度优化的权重样本外
+        常打不过等权，且频繁重拟合会让噪音驱动参数、在 regime 间来回甩。
+      · 实测：全样本三因子皆反向(cum20 t=-8.16 反转效应)，但近 60 日全部符号反转
+        (vol t=+6.96)，A股 2026 年从反转切向动量。静态权重会持续押错方向。
+
+    **波动率的双重身份**：它既是收益预测因子（低波动异象），又是用户的风险偏好
+    （要波动型科技股才有波段空间）。二者混淆会打架，故拆开——
+      打分：按 IC 方向（预测）；过滤：VOL_FLOOR/CEIL 硬门（偏好与风控）。
+
+    资金分量(net20)因 `sina_metrics` 只给 30 天历史，**无法回测方向**，故不打分、
+    仅作展示。
     """
     vol = m.get("vol")
     if vol is None:  # 形态算不出来 -> 不进候选（次新/停牌/数据缺口）
         return None
-    s = 25.0 if 30 <= vol <= 90 else (12.0 if 15 <= vol < 30 or 90 < vol <= 130 else 0.0)
-    net20 = m.get("net20") or 0
-    s += min(max(net20, 0) / 2.0, 1.0) * 25 if net20 > 0 else 0.0
-    cum20 = m.get("cum20")
-    if cum20 is not None:
-        s += 25.0 if 0 <= cum20 <= 30 else (12.0 if -15 <= cum20 < 0 else 0.0)
-    rp = m.get("range_pos")
-    if rp is not None:
-        s += 25.0 if 30 <= rp <= 70 else (12.0 if 15 <= rp < 30 or 70 < rp <= 85 else 0.0)
-    return round(s, 1)
+    if not (VOL_FLOOR <= vol <= VOL_CEIL):  # 偏好+风控硬门，与预测无关
+        return None
+    dirs = factor_lab.directions()
+    live = [f for f in ("vol", "cum20", "range_pos")
+            if dirs.get(f, {}).get("sign", 0) != 0 and m.get(f) is not None]
+    if not live:  # 没有任何因子方向可信 -> 全体中性，交给 AI 判断
+        return 50.0
+    per = 100.0 / len(live)
+    score = 0.0
+    for f in live:
+        sign = dirs[f]["sign"]
+        pct = _factor_pct(f, m[f])          # 该值在历史分布中的位置 0..1
+        score += per * (pct if sign > 0 else (1.0 - pct))
+    return round(score, 1)
 
 
-def _balanced_pick(codes: list[str], cap_total: int, cap_per_sub: int,
-                   smap: dict[str, tuple[str, str]] | None = None) -> list[str]:
-    """跨一级板块均衡采样：按一级轮询取，每个细分最多 cap_per_sub 只，总量 ≤ cap_total。
+# 因子取值的经验分位锚点（把原始值映射到 0..1，避免量纲差异主导打分）。
+# 取自 299 只 × 600 日样本的实际分布，非拍脑袋。
+_FACTOR_RANGE = {"vol": (15.0, 110.0), "cum20": (-25.0, 35.0), "range_pos": (0.0, 100.0)}
 
-    smap 为批量板块映射（全市场池 ~5000 只逐只查 DB 会退化，必须批量传入）；
-    不传则回退到手工池的内存查询，保持旧行为。
-    """
-    look = (lambda c: smap[c]) if smap else universe.sector_of
-    by_primary: dict[str, list[str]] = {}
-    for c in codes:
-        primary, _ = look(c)
-        by_primary.setdefault(primary, []).append(c)
-    queues = list(by_primary.values())
-    cursor = [0] * len(queues)
-    per_sub: dict[str, int] = {}
-    picked: list[str] = []
-    progressed = True
-    while len(picked) < cap_total and progressed:
-        progressed = False
-        for qi, q in enumerate(queues):
-            while cursor[qi] < len(q):
-                c = q[cursor[qi]]
-                cursor[qi] += 1
-                _, sub = look(c)
-                if per_sub.get(sub, 0) < cap_per_sub:
-                    per_sub[sub] = per_sub.get(sub, 0) + 1
-                    picked.append(c)
-                    progressed = True
-                    break  # 取一只后轮到下一个一级板块
-            if len(picked) >= cap_total:
-                break
-    return picked
+
+def _factor_pct(f: str, v: float) -> float:
+    lo, hi = _FACTOR_RANGE[f]
+    return min(max((v - lo) / (hi - lo), 0.0), 1.0) if hi > lo else 0.5
 
 
 def _screen_rows(capital: float, focus: str = "") -> list[dict]:
@@ -1233,6 +1224,31 @@ def api_sector_detail(name: str):
                     "members": members})
 
 
+@app.route("/api/factors")
+def api_factors():
+    """因子回测结果：IC 均值/t值/胜率 + 当前方向 + 失效报警 + 容量。"""
+    return jsonify({"summary": factor_lab.summary(),
+                    "directions": factor_lab.directions(),
+                    "alerts": factor_lab.decay_alert(),
+                    "status": factor_lab.status()})
+
+
+@app.route("/api/factors/rolling")
+def api_factors_rolling():
+    """滚动 IC 曲线（因子衰减看得见）。?factor=cum20&horizon=10&window=60"""
+    return jsonify({"points": factor_lab.rolling_ic(
+        request.args.get("factor", "cum20"), _arg_int("horizon", 10),
+        _arg_int("window", 60))})
+
+
+@app.route("/api/factors/backtest", methods=["POST"])
+def api_factors_backtest():
+    """重跑因子回测（299 只 × 600 日 ≈ 14s）。后台线程。"""
+    n = int((request.get_json(silent=True) or {}).get("stocks") or 300)
+    threading.Thread(target=factor_lab.backtest, args=(n,), daemon=True).start()
+    return jsonify({"ok": True, "running": True, "stocks": n})
+
+
 @app.route("/api/templates")
 def api_templates():
     """提示词模板：版本列表 + 近 N 日客观指标（引用有效率/schema 失败率）+ 容量。"""
@@ -1343,6 +1359,8 @@ def _universe_boot() -> None:
         template_store.purge()   # 按日累积的表一律配清理
         agent_store.init()
         agent_store.purge()
+        factor_lab.init()
+        factor_lab.purge()
     except (OSError, ValueError, sqlite3.Error) as e:
         logger.warning("全市场池预热失败（不影响其余功能）: %s", e)
 

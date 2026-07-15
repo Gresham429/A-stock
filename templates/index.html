@@ -315,6 +315,8 @@
   .prof-tiers{display:flex;flex-direction:column;gap:4px}
   .tier-row{font-size:11.5px;color:var(--txt);padding:5px 8px;border-radius:6px;border:1px solid transparent}
   .tier-row.on{border-color:var(--gold);background:rgba(224,169,46,.08)}
+  .scr-cap{color:var(--gold);font-weight:600;font-family:var(--mono)}
+  .scr-cap-hint{color:var(--muted);font-size:10.5px;margin-left:6px}
   /* 对比表是总览的说明条 */
   .ov-note{font-size:11.5px;color:var(--muted);margin:2px 0 8px;padding:6px 10px;background:var(--bg2);border-left:2px solid var(--gold-dim);border-radius:4px}
   /* 模拟盘 */
@@ -379,11 +381,8 @@
     <div class="recHead"><div class="t" id="recTitle">🤖 AI 推荐</div><button class="del" style="font-size:18px" onclick="closeRec()">✕</button></div>
     <div class="recControls" id="recControls" style="display:none">
       <label>资金规模
-        <select id="scr_capital">
-          <option value="10000">1 万</option><option value="20000">2 万</option>
-          <option value="30000">3 万</option><option value="50000">5 万</option>
-          <option value="100000">10 万</option>
-        </select>
+        <span id="scr_capital_lbl" class="scr-cap">—</span>
+        <span class="scr-cap-hint">跟随画像 · 改本金去 💼 画像</span>
       </label>
       <label>侧重板块
         <select id="scr_focus">

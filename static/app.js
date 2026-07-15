@@ -617,17 +617,20 @@ function openScreen(){
   document.getElementById('recTitle').textContent='🔍 全市场选股（结合大盘 · 跨板块 · 可下钻二级）';
   document.getElementById('recControls').style.display='flex';
   document.getElementById('recPanel').classList.add('open');
-  document.getElementById('recBody').innerHTML='<div class="paneempty">选资金规模与侧重板块（可选整个一级或某个二级细分）→ 点「开始筛选」。DeepSeek 会先看当前大盘，再从全市场候选里跨板块为你选股。</div>';
+  document.getElementById('recBody').innerHTML='<div class="paneempty">资金规模跟随你的<b>投资画像</b>（现金本金），选侧重板块（可选整个一级或某个二级细分）→ 点「开始筛选」。DeepSeek 会先看当前大盘 + 你的本金玩法档，再从全市场候选里跨板块为你选股。</div>';
+  fetch('/api/profiles').then(r=>r.json()).then(j=>{   // 资金规模跟随 active 画像
+    const a=j.active||{}, el=document.getElementById('scr_capital_lbl');
+    if(el) el.textContent=_yiCash(a.cash)+(a.name?`（${a.name}）`:'');
+  }).catch(()=>{});
 }
 async function runScreen(force){
   const gen=++recSeq;
-  const cap=+document.getElementById('scr_capital').value;
-  const focus=document.getElementById('scr_focus').value;
+  const focus=document.getElementById('scr_focus').value;   // 资金不再手选：后端取 active 画像现金
   const box=document.getElementById('recBody');
   box.innerHTML='<div class="paneempty"><span class="spin"></span> '+MODEL+(force?' 重新筛选':' 正在拉取候选池行情并跨板块筛选')+'…（命中缓存则秒回，否则约 40~90 秒）</div>';
   let j;
   try{ j=await (await fetch('/api/recommend/screen',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({capital:cap,focus_sector:focus,force:!!force})})).json(); }
+    body:JSON.stringify({focus_sector:focus,force:!!force})})).json(); }
   catch(e){ if(gen!==recSeq)return; box.innerHTML='<div class="paneempty">请求失败：'+e+'</div>'; return; }
   if(gen!==recSeq) return;   // 已切到别的请求，丢弃这次过期响应
   if(!j.ok){ box.innerHTML='<div class="paneempty">筛选失败：'+(j.msg||'')+'</div>'; return; }

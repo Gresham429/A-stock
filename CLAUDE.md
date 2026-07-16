@@ -18,7 +18,11 @@ python app.py                        # http://127.0.0.1:5000
 
 ## 文件地图
 
-**入口**：`app.py`(Flask 路由) · `templates/index.html`(UI+CSS) · `static/app.js`(全部前端逻辑)
+**入口**：`app.py`(Flask 路由，62 个) · `templates/index.html`(UI+CSS) · `static/app.js`(全部前端逻辑)
+**app.py 的共享辅助已抽出**(2026-07-16，消除 agent_loop 的 `import app` 循环依赖)：
+`screening.py`(选股/形态初筛：`_screen_rows`/`_pa_score`/`_safe_kline`/`_safe_metrics`…) ·
+`ai_blocks.py`(AI 注入块：`_tier_block`/`_fee_block`/`_lesson_block`/`_agent_blocks`…)。
+app.py 用显式 import 带回名字，路由调用点与 `app._X` 可达性不变；agent_loop 直接 `import screening/ai_blocks`。
 
 ### 数据与池子
 | 文件 | 职责 |

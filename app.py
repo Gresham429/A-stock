@@ -46,6 +46,20 @@ import template_store
 import universe
 import universe_store
 import websearch
+# 选股与形态初筛（2026-07-16 抽出 screening.py）。显式带回名字，路由调用点不用改；
+# `app._pa_score` / `app._FACTOR_RANGE` 等仍可达（测试与 agent 依赖）。
+from screening import (  # noqa: E402,F401
+    _safe_metrics, _safe_kline, _pa_score, _factor_pct, _balanced_pick,
+    _screen_rows, _metrics_of, _FACTOR_RANGE, _EMPTY_METRICS,
+    _SCREEN_CAP_TOTAL, _PRESCREEN, VOL_FLOOR, VOL_CEIL, _PA_RANK_MAX,
+)
+# AI 提示词注入块（2026-07-16 抽出 ai_blocks.py）。同样显式带回，路由调用点不改。
+from ai_blocks import (  # noqa: E402,F401
+    _total_assets, _tier_block, _record_basis_stats, _lesson_block, _agent_blocks,
+    _fee_block, _macro_block, _profile_block, _ai_web_context,
+)
+# 交易时段判定移到 agent_loop（与 current_slot 同源）；带回以保持路由调用点不变。
+from agent_loop import _market_open  # noqa: E402,F401
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -306,18 +320,6 @@ def rules_scenario():
 
 
 # ── 模拟委托交易（多存档，按真实行情+A股规则撮合） ────────────────────────
-def _market_open() -> bool:
-    """A股是否在交易时段（9:30–11:30 / 13:00–15:00，北京时间）。
-
-    **必须用 Asia/Shanghai，不能用本地时区** —— 前端 `_cnTradingNow` 早就这么做了，
-    后端此前用 `datetime.now()`（本地），机器不在北京时区就会错判整个交易时段
-    （本机恰好是 CST 故未暴露）。撮合门控依赖它，判错 = agent 在错的时间下单/不下单。
-    """
-    now = datetime.now(ZoneInfo("Asia/Shanghai"))
-    if not news_store.is_trading_day(now.date()):
-        return False
-    t = now.hour * 60 + now.minute
-    return (9 * 60 + 30) <= t <= (11 * 60 + 30) or (13 * 60) <= t <= (15 * 60)
 
 
 def _account_summary(acct: dict, quotes: dict) -> dict:
@@ -627,121 +629,18 @@ def recommend_daily():
                     "analyzed_at": ts, "age_min": 0})
 
 
-def _total_assets() -> tuple[float, int]:
-    """(总资产, 持仓只数) = active 画像现金 + 全局真实持仓市值（腾讯实时价）。"""
-    prof = profile_store.get_active() or {}
-    cash = float(prof.get("cash") or 0)
-    holds = portfolio.load()
-    val = 0.0
-    if holds:
-        quotes = ds.tencent_quote([h["code"] for h in holds])
-        for h in holds:
-            price = (quotes.get(h["code"], {}) or {}).get("price") or 0
-            val += float(price) * float(h.get("shares") or 0)
-    return cash + val, len(holds)
 
 
-def _tier_block() -> str:
-    """当前画像的【本金玩法档】注入块（据总资产落档）。无画像返回空串。"""
-    prof = profile_store.get_active()
-    if not prof:
-        return ""
-    total, hn = _total_assets()
-    return profile_store.block_for_ai(prof.get("cash") or 0, total, hn,
-                                      prof.get("risk_pref", "均衡"))
 
 
-def _record_basis_stats(basis: list[dict] | None) -> None:
-    """把引用校验结果（✓/⚠）计入当前 system prompt 版本的统计。
-
-    这是**唯一可信的提示词优化信号**：每次调用一个样本、后端权威校验(AI 编不了)、
-    即时反馈、不受市场影响。收益率则相反——样本太少且被大盘 beta 污染，故不统计。
-    """
-    if not basis:
-        return
-    ok = sum(1 for b in basis for r in (b.get("refs") or []) if r.get("status") == "ok")
-    bad = sum(1 for b in basis for r in (b.get("refs") or []) if r.get("status") == "bad")
-    if ok or bad:
-        template_store.record("system_disclaimer", llm._system_prompt()[1],
-                              basis_ok=ok, basis_bad=bad)
 
 
-def _lesson_block(agent_id: int | None = None) -> str:
-    """【历史教训】注入块：把模拟盘上犯过的**真实错误**喂给 AI（四期闭环）。
-
-    喂的是**事实统计**（「追高 4 次」），不是让 AI 改写提示词——与「用 5 个样本优化提示词」
-    有本质区别：这里数事实，那里拟合参数。故不受 784 笔样本量死局限制。
-
-    `agent_id=None`（用户面 5 个 AI）→ 全体舰队汇总；给定 → 只该 agent 自己的（个体记忆）。
-    """
-    try:
-        txt = agent_store.for_ai(agent_id=agent_id)
-        return txt + "\n\n" if txt else ""
-    except (sqlite3.Error, OSError) as e:
-        logger.warning("教训块生成失败: %s", e)
-        return ""
 
 
-def _agent_blocks(ag: dict, cash: float, total: float, n_pos: int) -> str:
-    """**每个 agent 自己的**注入块：档位按它自己的账户总资产、费率按它绑的画像。
-
-    此前 `blocks` 由 `_agent_boot` 算一次传给所有 agent —— `_tier_block()` 读的是
-    **active 画像 + 用户真实持仓**，于是 50 万的中型 agent 拿到的是用户 7000 块的
-    微型档玩法，`_fee_block()` 的保本涨幅也按用户现金算。**多档位实验会完全失效**。
-
-    拆法：**档位跟这个账户的钱走**（agent 的 paper 账户总资产），
-    **费率跟券商走**（agent 绑的画像——都是同一个券商，故共用合理）。
-    """
-    prof = profile_store.get(ag.get("profile_id")) or {}
-    tier = profile_store.block_for_ai(cash, total, n_pos, prof.get("risk_pref", "均衡"))
-    try:
-        sched = profile_store.fee_schedule(ag.get("profile_id"))
-        fee = fees.for_ai(sched, cash or 10000.0) + "\n\n"
-    except (sqlite3.Error, OSError, ValueError) as e:
-        logger.warning("agent 费率块失败: %s", e)
-        fee = ""
-    # 教训用**这个 agent 自己的**（个体记忆，非全体池）——多-agent 对照实验才干净。
-    return tier + fee + _lesson_block(agent_id=ag.get("id")) + rules_store.for_ai()
 
 
-def _fee_block() -> str:
-    """【交易成本】注入块：给 AI 具体费率与保本涨幅，而非「注意手续费」这种空话。
-
-    此前 5 个 AI 提示词 0 处提及手续费——AI 在给买卖建议时并不知道交易要花钱，
-    会建议博取小于保本涨幅的价差（对万9费率，往返 0.232%，即涨不到 0.232% 就是亏）。
-    费率取 active 画像（因券商/账户而异，见 fees.py）。
-    """
-    try:
-        sched = profile_store.fee_schedule()
-        prof = profile_store.get_active()
-        capital = float((prof or {}).get("cash") or 0) or 10000.0
-        return fees.for_ai(sched, capital) + "\n\n"
-    except (sqlite3.Error, OSError, ValueError) as e:
-        logger.warning("交易成本块生成失败: %s", e)
-        return ""
 
 
-def _macro_block() -> str:
-    """全球宏观/地缘 digest 注入块（据全球快讯 flash 合成「要点+板块指向」，ai_cache kind=macro 当日缓存）。"""
-    if not config.llm_enabled():
-        return ""
-    hit = ai_cache.get("macro", {})
-    if hit:
-        d = hit["result"].get("digest") or {}
-    else:
-        news = ds.eastmoney_global_news(30) + ds.cls_telegraph(30)
-        markets = ds.global_markets()      # 外围数值：油价/黄金/铜/美股三大指数
-        try:
-            d = llm.macro_digest(news, markets)
-        except llm.LLMError:
-            return ""
-        ai_cache.put("macro", {}, {"digest": d}, llm.FLASH_MODEL)
-    pts = "；".join(d.get("points") or [])
-    smap = "；".join(d.get("sector_map") or [])
-    if not (pts or smap):
-        return ""
-    return (f"\n【全球宏观/地缘·对A股板块指向(每日更新)】\n"
-            f"要点：{pts}\n板块指向：{smap}\n外围倾向：{d.get('bias', '')}\n")
 
 
 def _sync_scenario() -> None:
@@ -827,13 +726,6 @@ def profiles_activate(pid: int):
     return jsonify({"ok": True})
 
 
-def _profile_block(prof: dict | None) -> str:
-    """公司叙事拼成注入 AI 主分析的文本块。"""
-    if not prof:
-        return ""
-    tags = "、".join(prof.get("tags") or [])
-    return (f"\n【公司叙事·据公开数据】做过：{prof.get('did', '')}；在做：{prof.get('doing', '')}；"
-            f"要做：{prof.get('will', '')}" + (f"；题材：{tags}" if tags else "") + "\n")
 
 
 def _company_profile(code: str, name: str, news: list[dict],
@@ -1019,266 +911,8 @@ def _vol_hist(kl: list[dict]) -> dict:
     }
 
 
-_SCREEN_CAP_TOTAL = 36  # 喂给 LLM 的候选总量上限（控 token 与时延）
-_PRESCREEN = 600        # 全市场未指定板块时，均衡采样前先按流通市值预筛到这么多只
-VOL_FLOOR = 15.0        # 波动率下限：低于此没有波段空间（用户偏好，非收益预测）
-VOL_CEIL = 130.0        # 波动率上限：高于此风险失控
 
 
-_PA_RANK_MAX = 200   # 板块内 ≤ 该只数时，对全部成分股算形态再排序（超过则退回市值预筛）
-_METRIC_TTL = 900    # 形态指标进程内缓存秒数（同板块反复选股不重复取数）
-_metric_cache: dict[str, tuple[float, dict]] = {}
-_EMPTY_METRICS = {"vol": None, "range_pos": None, "cum20": None,
-                  "net5": None, "net20": None, "series": []}
-
-
-def _safe_metrics(code: str) -> dict:
-    """sina_metrics 的兜底包装 + 进程内 TTL 缓存：单只异常不拖垮整批。
-
-    全市场池数据质量参差（0 收盘价、空字段、退市残留），executor.map 里任一只抛异常
-    都会让整个选股 500。指标缺失退化为 None，AI 侧本就按缺失处理。
-    """
-    hit = _metric_cache.get(code)
-    if hit and time.time() - hit[0] < _METRIC_TTL:
-        return hit[1]
-    try:
-        m = ds.sina_metrics(code)
-    except Exception as e:  # noqa: BLE001 兜底：宁可该股无指标，不可整批失败
-        logger.warning("指标计算失败 %s（跳过该股指标）: %s", code, e)
-        return dict(_EMPTY_METRICS)
-    _metric_cache[code] = (time.time(), m)
-    return m
-
-
-_KLINE_TTL = 900     # 日K进程内缓存秒数（12 个 agent 候选高度重叠，不缓存要打 240 次请求）
-_kline_cache: dict[str, tuple[float, list]] = {}
-
-
-def _safe_kline(code: str, num: int = 70) -> list[dict]:
-    """sina_kline 的兜底包装 + 进程内 TTL 缓存（mirror `_safe_metrics`）。
-
-    num=70：MA60 要 60 根，留 10 根余量给停牌/缺口。
-    全市场池数据质量参差，单只异常不得拖垮整批（PITFALLS#11）。
-    """
-    hit = _kline_cache.get(code)
-    if hit and time.time() - hit[0] < _KLINE_TTL:
-        return hit[1]
-    try:
-        k = ds.sina_kline(code, num=num)
-    except Exception as e:  # noqa: BLE001 兜底：宁可该股无K线，不可整批失败
-        logger.warning("K线获取失败 %s（该股按无结构处理）: %s", code, e)
-        return []
-    _kline_cache[code] = (time.time(), k)
-    return k
-
-
-def _pa_score(m: dict) -> float | None:
-    """形态初筛打分（0–100）。None = 形态不可分析，该股出局。
-
-    这是**粗筛**，只决定谁值得占用送进 AI 的 36 个名额；真正的 PA 判断由 AI 依
-    rules_store 的规则库做。
-
-    **方向由 162,014 个样本的 IC 回测驱动，不再是我拍的先验**（见 factor_lab）：
-      · 每个因子的方向取 `factor_lab.direction()` —— 近 60 日 |t|>2 用近期方向
-        （regime 已切换），否则用全样本方向，两者都不显著则该因子**不参与打分**。
-      · 权重保持等权（每个生效因子等分）——量化实证里过度优化的权重样本外
-        常打不过等权，且频繁重拟合会让噪音驱动参数、在 regime 间来回甩。
-      · 实测：全样本三因子皆反向(cum20 t=-8.16 反转效应)，但近 60 日全部符号反转
-        (vol t=+6.96)，A股 2026 年从反转切向动量。静态权重会持续押错方向。
-
-    **波动率的双重身份**：它既是收益预测因子（低波动异象），又是用户的风险偏好
-    （要波动型科技股才有波段空间）。二者混淆会打架，故拆开——
-      打分：按 IC 方向（预测）；过滤：VOL_FLOOR/CEIL 硬门（偏好与风控）。
-
-    资金分量(net20)因 `sina_metrics` 只给 30 天历史，**无法回测方向**，故不打分、
-    仅作展示。
-    """
-    vol = m.get("vol")
-    if vol is None:  # 形态算不出来 -> 不进候选（次新/停牌/数据缺口）
-        return None
-    if not (VOL_FLOOR <= vol <= VOL_CEIL):  # 偏好+风控硬门，与预测无关
-        return None
-    dirs = factor_lab.directions()
-    live = [f for f in ("vol", "cum20", "range_pos")
-            if dirs.get(f, {}).get("sign", 0) != 0 and m.get(f) is not None]
-    if not live:  # 没有任何因子方向可信 -> 全体中性，交给 AI 判断
-        return 50.0
-    per = 100.0 / len(live)
-    score = 0.0
-    for f in live:
-        sign = dirs[f]["sign"]
-        pct = _factor_pct(f, m[f])          # 该值在历史分布中的位置 0..1
-        score += per * (pct if sign > 0 else (1.0 - pct))
-    return round(score, 1)
-
-
-# 因子取值的分位锚点（把原始值映射到 0..1，避免量纲差异主导打分）。
-# 最初是拍的；2026-07-16 用 150 只 × 600 日 = 16,753 个观测事后核对 p5~p95：
-#   vol (16.9, 88.9) / cum20 (-17.3, 27.7) / range_pos (0, 100) —— 与下方取值大致吻合。
-# 若换市场环境或换抽样，应重跑核对（factor_lab.sample_codes + factors_at 逐日算即可）。
-_FACTOR_RANGE = {"vol": (15.0, 110.0), "cum20": (-25.0, 35.0), "range_pos": (0.0, 100.0)}
-
-
-def _factor_pct(f: str, v: float) -> float:
-    lo, hi = _FACTOR_RANGE[f]
-    return min(max((v - lo) / (hi - lo), 0.0), 1.0) if hi > lo else 0.5
-
-
-def _balanced_pick(codes: list[str], cap_total: int, cap_per_sub: int,
-                   smap: dict[str, tuple[str, str]] | None = None) -> list[str]:
-    """跨一级板块均衡采样：按一级轮询取，每个细分最多 cap_per_sub 只，总量 ≤ cap_total。
-
-    smap 为批量板块映射（全市场池 ~5000 只逐只查 DB 会退化，必须批量传入）；
-    不传则回退到手工池的内存查询，保持旧行为。
-
-    **只在全市场路径用**（focus 为空、或板块池 >_PA_RANK_MAX）；关注板块时走
-    形态排序分支，不经过这里。两条分支必须分别测——本函数曾因只测了形态分支
-    而被误删都没发现（NameError 直到 agent 跑全市场才炸）。
-    """
-    look = (lambda c: smap[c]) if smap else universe.sector_of
-    by_primary: dict[str, list[str]] = {}
-    for c in codes:
-        primary, _ = look(c)
-        by_primary.setdefault(primary, []).append(c)
-    queues = list(by_primary.values())
-    cursor = [0] * len(queues)
-    per_sub: dict[str, int] = {}
-    picked: list[str] = []
-    progressed = True
-    while len(picked) < cap_total and progressed:
-        progressed = False
-        for qi, q in enumerate(queues):
-            while cursor[qi] < len(q):
-                c = q[cursor[qi]]
-                cursor[qi] += 1
-                _, sub = look(c)
-                if per_sub.get(sub, 0) < cap_per_sub:
-                    per_sub[sub] = per_sub.get(sub, 0) + 1
-                    picked.append(c)
-                    progressed = True
-                    break  # 取一只后轮到下一个一级板块
-            if len(picked) >= cap_total:
-                break
-    return picked
-
-
-def _screen_rows(capital: float, focus: str = "") -> list[dict]:
-    """候选池行情 + 指标（按 focus 取数 + 负担得起优先 + 跨板块均衡采样）。
-
-    focus 为板块名（一级/细分/概念）时只在该板块内选；为空则全市场。
-    候选池来自 universe_store（全A ~4989 只 eligible），未回填时自动降级手工池。
-    """
-    codes = universe_store.codes_of(focus)
-    quotes = ds.tencent_quote(codes)  # 自动分批：全池 4989 只 ≈1.7s
-    if not quotes:
-        return []
-    # 先按 1 手成本可负担过滤（资金太小买不起任何 1 手则退回全池给参考）
-    affordable = [c for c in codes if quotes.get(c, {}).get("lot_cost", 9e9) <= capital]
-    pool = affordable or codes
-    smap = universe_store.sectors_map(pool)  # 批量查板块，避免逐只 DB 往返
-    subs_all = {s for subs in universe_store.taxonomy().values() for s in subs}
-    # 池子够小（关注某板块，主路径）-> 对全部成分股算形态再按分排序，形态真正参与筛选。
-    # 池子过大（全市场）-> 退回流通市值预筛 + 均衡采样：均衡采样按池内顺序取，
-    # 5000 只不预筛会取到各板块代码号最小的股而非龙头，扩池反成选垃圾。
-    if focus and len(pool) <= _PA_RANK_MAX:
-        metrics = _metrics_of(pool)
-        scored = [(c, metrics[c], _pa_score(metrics[c])) for c in pool]
-        keep = [(c, m, s) for c, m, s in scored if s is not None]
-        keep.sort(key=lambda x: x[2], reverse=True)
-        chosen = keep[:_SCREEN_CAP_TOTAL]
-        logger.info("形态初筛 focus=%s: 池 %d -> 可分析 %d -> 取前 %d",
-                    focus, len(pool), len(keep), len(chosen))
-        picked = [c for c, _, _ in chosen]
-        mmap = {c: m for c, m, _ in chosen}
-        score_map = {c: s for c, _, s in chosen}
-    else:
-        if not focus and len(pool) > _PRESCREEN:
-            pool = sorted(pool, key=lambda c: quotes.get(c, {}).get("float_mcap_yi", 0),
-                          reverse=True)[:_PRESCREEN]
-            smap = universe_store.sectors_map(pool)
-        cap_per_sub = 6 if focus and focus in subs_all else 3
-        picked = _balanced_pick(pool, _SCREEN_CAP_TOTAL, cap_per_sub, smap)
-        mmap = _metrics_of(picked)
-        score_map = {c: _pa_score(mmap[c]) for c in picked}
-    rows = []
-    for c in picked:
-        q, m = quotes.get(c, {}), mmap.get(c, _EMPTY_METRICS)
-        primary, sub = smap.get(c) or universe_store.sector_of(c)
-        rows.append({"code": c, "name": q.get("name", c),
-                     "primary": primary, "sub": sub,
-                     "price": q.get("price"), "pe_ttm": q.get("pe_ttm"), "pb": q.get("pb"),
-                     "vol": m.get("vol"), "cum20": m.get("cum20"),
-                     "range_pos": m.get("range_pos"), "net20": m.get("net20"),
-                     "pa_score": score_map.get(c),
-                     "turnover": q.get("turnover"),
-                     "lot_cost": q.get("lot_cost")})
-    return rows
-
-
-def _metrics_of(codes: list[str]) -> dict[str, dict]:
-    """并发拉一批股票的形态指标（带进程内 TTL 缓存）。"""
-    if not codes:
-        return {}
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        return dict(zip(codes, executor.map(_safe_metrics, codes)))
-
-
-def _ai_web_context(scope: str, code: str = "", name: str = "") -> str:
-    """构建喂给 AI 的「联网知识」上下文：交易规则 + L2 本地资讯库 + A 实时快讯 + B 博查(可选)。"""
-    parts = []
-    # 交易分析框架规则（启用中的规则库，蒸馏自 PA_Agent）——置顶，AI 按此推理
-    rules_txt = rules_store.for_ai()
-    if rules_txt:
-        parts.append("【交易分析框架规则（价格行为体系，分析时严格按此推理）】\n" + rules_txt)
-    # L4：本地新闻库（带日期，让 AI 按新鲜度加权；个股取该股近期，大盘取市场级+政策）
-    if scope == "position" and code:
-        local = news_store.query(code=code, days=120, limit=8)
-        if len(local) < 5:  # L3：本地稀疏 → 按需深抓更久历史再取
-            try:
-                news_store.deepen(code)
-            except Exception as e:  # noqa: BLE001 兜底，不阻断 AI
-                logger.warning("news 深抓 %s 失败: %s", code, e)
-            local = news_store.query(code=code, days=365, limit=10)
-    else:
-        local = (news_store.query(sector="市场", days=30, limit=8)
-                 + news_store.query(kind="政策", days=60, limit=6))
-    if local:
-        seen: set[str] = set()
-        lines = []
-        for n in local:
-            t = n.get("title", "")
-            if not t or t in seen:
-                continue
-            seen.add(t)
-            lines.append(f"- {n.get('date','')} [{n.get('kind','')}] {t}")
-        if lines:
-            parts.append("本地资讯库（近期新闻/政策，越近权重越高；仅供判断勿编造）：\n"
-                         + "\n".join(lines[:12]))
-    # L5：私域笔记（我本人的判断，带时间戳供按新鲜度加权；须与客观数据区分、勿当事实）
-    if scope == "position" and code:
-        p, s = universe_store.sector_of(code)
-        my_notes = notes_store.for_ai(code=code, sectors=[p, s], limit=5)
-    else:
-        my_notes = notes_store.list_notes(limit=5)
-    if my_notes:
-        nlines = [f"- {n.get('created_at','')[:10]} [{n.get('kind','')}] "
-                  f"{n.get('ai_summary') or (n.get('content','') or '')[:60]}" for n in my_notes]
-        parts.append("【我的私域笔记（我本人的判断，仅供参考、需与客观数据区分，勿当事实）】\n"
-                     + "\n".join(nlines))
-    # A：实时快讯
-    news = ds.market_news_digest(12)
-    if news:
-        parts.append("最新财经/政策快讯：\n"
-                     + "\n".join(f"- {n['time']} {n['title']}" for n in news))
-    if config.bocha_enabled():
-        if scope == "position" and name:
-            query = f"{name} {code} 最新消息 政策 业绩 利好 利空"
-        else:
-            query = "A股 科技板块 半导体 AI 芯片 最新政策 行业动态"
-        dig = websearch.search_digest(query, count=6)
-        if dig:
-            parts.append("联网搜索（博查）：\n" + dig)
-    return "\n\n".join(parts)
 
 
 def _now() -> str:

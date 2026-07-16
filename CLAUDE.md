@@ -164,12 +164,13 @@ python3 tests/test_structure.py          # K线结构摘要 12 例（改 structu
 python3 -c "import ast; [ast.parse(open(f).read()) for f in ['app.py','agent_loop.py']]"
 node --check static/app.js
 
-python app.py &                          # ⚠️ 5000 被 AirPlay 占，测试用 5001
-curl -s localhost:5000/api/config
-curl -s localhost:5000/api/universe/status      # 池子：总数/eligible/板块回填进度
-curl -s "localhost:5000/api/sectors?kind=sw1&limit=5"
-curl -s localhost:5000/api/factors              # 因子 IC/方向/翻转/新鲜度
-curl -s localhost:5000/api/agents               # agent 存档 + 教训汇总
+python app.py &                          # ⚠️ 一律用 127.0.0.1 别用 localhost：
+                                         #    localhost→::1→AirPlay 403（见 PITFALLS#18）
+curl -s 127.0.0.1:5000/api/config
+curl -s 127.0.0.1:5000/api/universe/status      # 池子：总数/eligible/板块回填进度
+curl -s "127.0.0.1:5000/api/sectors?kind=sw1&limit=5"
+curl -s 127.0.0.1:5000/api/factors              # 因子 IC/方向/翻转/新鲜度
+curl -s 127.0.0.1:5000/api/agents               # agent 存档 + 教训汇总
 # AI 类接口 30~90s → --max-time 200；有代理 → --noproxy '*'
 ```
 

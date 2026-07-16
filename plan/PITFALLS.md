@@ -217,7 +217,14 @@ _pa_score 按 vol 正向 IC 选出高波动股 → AI 听话买入
 
 ### 18. 其他
 
-- **端口 5000 被 macOS AirPlay 占**：关「隔空播放接收器」，或测试用 5001。
+- **端口 5000 与 macOS AirPlay：用 `127.0.0.1` 别用 `localhost`**（2026-07-16 查清）。
+  AirPlay(ControlCenter) 监听 `*:5000` 的 v4+v6，Flask 只绑 `127.0.0.1:5000`(仅 v4)
+  —— **两者可以共存，不必关 AirPlay、也不必换 5001**。但 `localhost` 优先解析到
+  `::1`(v6) → 落进 AirPlay 拿 `403 Server: AirTunes`。故浏览器/curl 一律用
+  **`http://127.0.0.1:5000`**。
+  ⚠️ **别用 `curl -s URL >/dev/null && echo running` 判断 app 活着**：curl 连上就退 0，
+  **403 也算成功** → AirPlay 的 403 会被误判成「app 在跑」（本会话踩过：据此得出
+  「app running(旧代码)」，实际 app 根本没启动）。要判活，**看响应体或 `-i` 看状态码**。
 - **涉及用户数据的测试必须用临时副本**（`portfolio.json` / `data/*.db`）。
 - **AI 接口 30~90s**：`curl --max-time 200`；有代理时 `--noproxy '*'`（python 要 `os.environ.pop` 掉 `*_proxy`）。
 - **按日累积的表一律要有 `purge()`**：`sector_daily` 曾无清理 → 977 板块 × 245 日 = **24 万行/年 ≈ 82MB**，10 年 820MB。SQLite `DELETE` 不回收文件空间（页复用），稳态≈1年峰值。

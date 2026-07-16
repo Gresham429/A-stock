@@ -645,14 +645,16 @@ def _record_basis_stats(basis: list[dict] | None) -> None:
                               basis_ok=ok, basis_bad=bad)
 
 
-def _lesson_block() -> str:
-    """【历史教训】注入块：把模拟盘上 agent 犯过的**真实错误**喂给 5 个已有 AI（四期闭环）。
+def _lesson_block(agent_id: int | None = None) -> str:
+    """【历史教训】注入块：把模拟盘上犯过的**真实错误**喂给 AI（四期闭环）。
 
     喂的是**事实统计**（「追高 4 次」），不是让 AI 改写提示词——与「用 5 个样本优化提示词」
     有本质区别：这里数事实，那里拟合参数。故不受 784 笔样本量死局限制。
+
+    `agent_id=None`（用户面 5 个 AI）→ 全体舰队汇总；给定 → 只该 agent 自己的（个体记忆）。
     """
     try:
-        txt = agent_store.for_ai()
+        txt = agent_store.for_ai(agent_id=agent_id)
         return txt + "\n\n" if txt else ""
     except (sqlite3.Error, OSError) as e:
         logger.warning("教训块生成失败: %s", e)
@@ -677,7 +679,8 @@ def _agent_blocks(ag: dict, cash: float, total: float, n_pos: int) -> str:
     except (sqlite3.Error, OSError, ValueError) as e:
         logger.warning("agent 费率块失败: %s", e)
         fee = ""
-    return tier + fee + _lesson_block() + rules_store.for_ai()
+    # 教训用**这个 agent 自己的**（个体记忆，非全体池）——多-agent 对照实验才干净。
+    return tier + fee + _lesson_block(agent_id=ag.get("id")) + rules_store.for_ai()
 
 
 def _fee_block() -> str:

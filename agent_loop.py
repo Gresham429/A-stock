@@ -177,6 +177,44 @@ _BENCH_SYM = factor_lab.BENCH_SYM  # 超额基准=上证。**引用**不复制�
 #                                   的超额分布)与被判的数必须同口径，否则不报错地错。
 
 
+def _agent_history_block(agent_id: int, account_id: int) -> str:
+    """【你的近期战绩】：把这个 agent **自己**的历史建仓+结果喂进决策提示词。
+
+    这是「个体情节记忆」——agent 要知道自己过去买了什么、结果怎样，才谈得上从
+    自己的经历里学。**只喂事实**（你 X@Y 建仓、20 日超额 −9%），不让 agent 写反思：
+    让它自我总结就回到「5 个样本拟合噪音」的老路（设计文档红线），且反思无法客观校验。
+
+    每个 agent 只看自己那个仓（account 隔离）——对多-agent 对照实验，这是干净的前提。
+    """
+    try:
+        ents = agent_store.entries(agent_id, limit=12)
+    except Exception as e:  # noqa: BLE001 记忆缺失不该让决策崩
+        logger.warning("战绩块读取失败 %s: %s", agent_id, e)
+        return ""
+    settled, holding = [], []
+    for e in ents:
+        if e.get("settled_at"):
+            x = e.get("x20")
+            if x is None:
+                continue
+            rank = factor_lab.rank_of(JUDGE_H, x)
+            tail = f"（历史第 {rank} 百分位）" if rank is not None else ""
+            settled.append(f"- {e['entry_date']} 买 {e['code']} {e.get('name','')} @{e['entry_price']} "
+                           f"→ {JUDGE_H}日超额 {x:+.2f}%{tail}")
+        else:
+            holding.append(f"- {e['entry_date']} 买 {e['code']} {e.get('name','')} @{e['entry_price']} → 持有中")
+    if not settled and not holding:
+        return ""     # 空仓起步、无历史 → 不注入空块
+    lines = ["【你的近期战绩（本账户过去建仓与结果，事实统计、不构成规律；结果用 20 日超额收益扣大盘 beta 判定）】"]
+    if settled:
+        lines.append("已结算：")
+        lines += settled[:6]
+    if holding:
+        lines.append("持有中（未满 20 日，结果未定）：")
+        lines += holding[:6]
+    return "\n".join(lines)
+
+
 def _market_block() -> str:
     """【今日大盘】块：指数点位+结构 / 涨停跌停 / 板块强弱。
 
@@ -742,6 +780,10 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
     # 每个 agent 用**自己的**档位/费率块（档位按本账户总资产，非用户真实持仓）
     if not blocks:
         ctx["blocks"] = app._agent_blocks(ag, ctx["cash"], total, len(positions))
+    # 个体情节记忆：把这个 agent 自己的历史建仓+结果拼进 blocks（教训已在 _agent_blocks 里按 agent 过滤）
+    hist = _agent_history_block(agent_id, ag["account_id"])
+    if hist:
+        ctx["blocks"] = (ctx["blocks"] or "") + "\n\n" + hist
     # ③ 决策（可插拔）
     decider = DECIDERS.get(ag.get("decider") or "single", _single_decider)
     try:

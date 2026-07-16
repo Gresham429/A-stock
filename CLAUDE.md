@@ -52,11 +52,13 @@ python app.py                        # http://127.0.0.1:5000
 |------|------|
 | `factor_lab.py` | **因子回测与失效监控**(`data/factors.db`)：`backtest`(299只×600日=162,014样本/14s) + `summary`(IC/t值) + **`direction()`动态定方向** + `rolling_ic`/`decay_alert`/`flip_rate` + `refresh_if_stale` + `backtest_stops`(止损网格) |
 | `agent_store.py` | **Agent 持久层**(`data/agents.db`)：`agents`/`runs`(原文90天·结论365天) / **`lessons`(闭集9类)** / `pending`(限价挂单) / `conditions`(止损) / `claims`(时段原子占位) / `equity` |
-| `agent_loop.py` | **日循环**：研判→选股→**决策(可插拔 single/debate)**→风控(确定性硬门)→**挂单**→复盘(确定性失败检测)。`sweep_orders`/`sweep_conditions`/`current_slot` |
+| `agent_loop.py` | **日循环**：研判(`_market_block` 指数+K线结构+涨停跌停+板块强弱)→选股→**决策(可插拔 single/debate)**→风控(确定性硬门)→**挂单**→复盘(确定性失败检测)。`sweep_orders`/`sweep_conditions`/`current_slot` |
+| `structure.py` | **K线结构摘要**(纯函数零网络)：`digest()` 出 MA5/20/60 + 近20日高低 + 最近3根 OHLC(带日期)；`fmt_stock`/`fmt_market` 成行喂 AI。**只给原料不下判断**——趋势由 AI 读均线自己判 |
 
 ### 测试（零依赖离线，`python3 tests/xxx.py` 直接跑；项目无 pytest）
 `test_universe_store.py`(9) 板块解析 · `test_screen_branches.py`(5) 选股三分支 ·
-`test_agent_gates.py`(10) agent 门+挂单 · `test_factor_lab.py`(6) 因子方向 —— **共 30 例**
+`test_agent_gates.py`(10) agent 门+挂单 · `test_factor_lab.py`(6) 因子方向 ·
+`test_structure.py`(12) K线结构摘要 —— **共 42 例**
 
 ## 数据源 & 坑（改代码前必读）
 
@@ -152,7 +154,12 @@ python3 tests/test_universe_store.py     # 板块解析 9 例（改 parse_tags �
 python3 tests/test_screen_branches.py    # 选股三分支 5 例（改 _screen_rows 一带必跑）
 python3 tests/test_agent_gates.py        # agent 门+挂单 10 例（改 run_day/幂等必跑）
 python3 tests/test_factor_lab.py         # 因子方向 6 例（改 direction/打分必跑）
-# 全部零依赖、离线、不打网络。共 30 例。
+python3 tests/test_structure.py          # K线结构摘要 12 例（改 structure/决策提示词必跑）
+# 全部零依赖、离线、不打网络。共 42 例。
+
+# ⚠️ 改**决策提示词/数据面**后，必须实跑一个 debate 档（single 跑通≠debate 跑通，
+#    辩论是 token 预算最短板；实测踩过两次）：
+#    python3 -c "import agent_loop as al; print(al.run_day(18, dry_run=True, force=True))"
 
 python3 -c "import ast; [ast.parse(open(f).read()) for f in ['app.py','agent_loop.py']]"
 node --check static/app.js
@@ -188,9 +195,18 @@ curl -s localhost:5000/api/agents               # agent 存档 + 教训汇总
 
 ### 🔴 下一步该做的（按价值排序）
 
-1. **让 agent 跑起来攒数据** —— 12 个存档已建好、机制全通，但**教训库是空的**。
-   所有「学失败→反哺提示词」的机制**一次都没被真实数据验证过**。
-   开 app 就会自动跑（交易时段·每桶一次）。
+0. **✅ 已解决(2026-07-16 下午)：决策数据面** —— 原第 1 项「让 agent 跑起来攒数据」
+   卡在这：agent 一直在跑，但 12 个里 11 个产出 0 意向，理由清一色「数据不足：
+   缺少K线、趋势、均线」。**规则库要 K线、提示词只给静态标量**，AI 只能援引 R6
+   「看不懂就等」——在正确地服从规则。已补 `structure.py` + 真·大盘块，
+   skip_reason 已变成实质判断（「大盘下跌趋势，空头 Always In」）。
+   见 `plan/2026-07-16-decision-data-plane-design.md`、`PITFALLS.md#0`。
+
+1. **让 agent 攒数据（现在才真的可以开始）** —— 教训库**仍是空的**，
+   「学失败→反哺提示词」一次都没被真实数据验证过。开 app 自动跑（交易时段·每桶一次）。
+   ⚠️ **注意**：数据面修好 ≠ 一定会成交。实测 07-16 下午大盘在跌（上证-0.82%/
+   创业板-1.73%），AI **正确地**拒绝逆势做多 → 仍 0 成交。**要攒到失败样本，
+   得等一个 AI 真的愿意出手的行情**——这是对的行为，不要为了攒数据去松风控。
 2. **结果导向的教训**（用户明确要过，挂单制已是其前置）：现在教训判的是「买入时长得像错」，
    不是「事后证明错」。应改为：买入时只记候选(属性快照+建仓价) → N 天后用日K结算实际收益
    → 够样本才成教训。**这能根治「教训与因子矛盾」，那个 `direction` 门控只是补丁。**

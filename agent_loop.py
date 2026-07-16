@@ -81,7 +81,8 @@ class Intent:
     side: str          # buy | sell
     shares: int
     reason: str
-    ref_price: float = 0.0
+    ref_price: float = 0.0     # 决策时的现价（供风控算金额）
+    limit_price: float = 0.0   # **限价**：挂单价，不到不成交
 
 
 # ── ③ 决策：可插拔 ─────────────────────────────────────────────────────────
@@ -157,8 +158,14 @@ def _decide_prompt(ctx: dict[str, Any]) -> str:
 硬性约束：A股 T+1（当日买入当日不可卖）；买入必须整百股；单标的仓位不超过总资产 {MAX_POS_PCT:.0f}%；
 现金不低于总资产 {MIN_CASH_PCT:.0f}%；**收益低于保本涨幅的价差不要做**。
 
+你的委托是**限价单**：给出 `limit_price`（买入=你愿意的最高价，卖出=最低价）。
+- **当日有效**：收盘未触及即作废，明天要重新决策。挂太低=大概率不成交（错过），
+  挂太高=立刻成交但价格差。这个权衡由你判断。
+- 可以**一次挂多笔**（不同标的、或同标的分批不同价位）；受仓位与现金上限约束。
+- 不写 limit_price 则按现价挂（等同市价，立刻成交）。
+
 只输出 JSON：
-{{"intents":[{{"code":"600760","side":"buy","shares":100,"reason":"简短理由"}}],
+{{"intents":[{{"code":"600760","side":"buy","shares":100,"limit_price":39.50,"reason":"简短理由"}}],
   "skip_reason":"若不操作，说明原因"}}"""
 
 
@@ -179,8 +186,15 @@ def _intents_from(data: dict, ctx: dict) -> list[Intent]:
             continue
         if shares <= 0:
             continue
+        ref = float(prices.get(code) or 0)
+        try:
+            lp = float(it.get("limit_price") or 0)
+        except (TypeError, ValueError):
+            lp = 0.0
+        if lp <= 0:
+            lp = ref              # AI 没给限价 → 按现价挂（等价于市价单）
         out.append(Intent(code, names.get(code, code), side, shares,
-                          str(it.get("reason") or "")[:200], float(prices.get(code) or 0)))
+                          str(it.get("reason") or "")[:200], ref, lp))
     return out
 
 
@@ -194,7 +208,7 @@ def risk_check(it: Intent, ctx: dict[str, Any]) -> tuple[bool, str]:
         if it.shares > (held.get("sellable") or 0):
             return False, f"可卖仅 {held.get('sellable')} 股（T+1 锁定）"
         return True, ""
-    amount = it.shares * (it.ref_price or 0)
+    amount = it.shares * (it.limit_price or it.ref_price or 0)   # 挂单占用按限价算
     if amount <= 0:
         return False, "无有效价格"
     fee = fees.total("buy", amount, ctx["sched"])
@@ -349,6 +363,81 @@ def sweep_conditions(agent_id: int) -> list[dict[str, Any]]:
     return fired
 
 
+# ── 限价委托的成交判定 ─────────────────────────────────────────────────────
+def _touched(code: str, side: str, limit: float, since_t: str, same_day: bool) -> tuple[bool, str, float]:
+    """挂单后价格是否**真的触及过**限价。返回 (触及?, 时刻, 成交价)。
+
+    **当日**走分时（精确到分钟，只看 since_t 之后的点）；**隔夜**走日K 的 low/high。
+    两者都是**既成事实**——跟条件单日K补判同一个道理，不需要重建当时的信息环境，
+    故零未来函数。
+
+    **成交价一律用 limit_price，不用当时的更优价**：分时只有每分钟收盘、无分钟内高低，
+    乐观假设会系统性高估表现。宁可少成交、宁可成交价差，也不能自欺。
+    """
+    try:
+        if same_day:
+            pts = [p for p in ds.tencent_minute(code) if p.get("t", "") >= since_t]
+            if not pts:
+                return False, "", 0.0
+            if side == "buy":
+                hit = next((p for p in pts if float(p["price"]) <= limit), None)
+            else:
+                hit = next((p for p in pts if float(p["price"]) >= limit), None)
+            return (True, hit["t"], limit) if hit else (False, "", 0.0)
+        kl = ds.sina_kline(code, num=3, scale=240)
+        if not kl:
+            return False, "", 0.0
+        bar = kl[-1]
+        ok = (float(bar["low"]) <= limit) if side == "buy" else (float(bar["high"]) >= limit)
+        return (True, "收盘前", limit) if ok else (False, "", 0.0)
+    except Exception as e:  # noqa: BLE001 单只失败不拖垮整批
+        logger.warning("挂单成交判定失败 %s: %s", code, e)
+        return False, "", 0.0
+
+
+def sweep_orders(agent_id: int) -> dict[str, list]:
+    """判定该 agent 所有在挂委托：触及则成交，隔日未成交则作废（A股当日有效）。
+
+    **必须在决策之前跑** —— 否则 AI 会基于「还没结算的持仓」重复下单。
+    """
+    ag = agent_store.get_agent(agent_id)
+    if not ag:
+        return {"filled": [], "expired": []}
+    today = date_cls.today().isoformat()
+    sched = profile_store.fee_schedule(ag["profile_id"])
+    filled, expired = [], []
+    for o in agent_store.live_pending(agent_id):
+        same_day = o["placed_date"] == today
+        hit, at, px = _touched(o["code"], o["side"], o["limit_price"], o["placed_t"], same_day)
+        if not hit:
+            if not same_day:   # A股委托当日有效，隔日未成交即作废
+                agent_store.close_pending(o["id"], "expired", note="当日有效，未触及限价")
+                expired.append({"code": o["code"], "side": o["side"],
+                                "limit": o["limit_price"]})
+            continue
+        q = ds.tencent_quote([o["code"]]).get(o["code"], {}) or {}
+        r = paper_store.order(ag["account_id"], o["code"], o["name"] or o["code"],
+                              o["side"], "limit", px, o["shares"],
+                              {**q, "price": px}, True, sched=sched)
+        if r.get("ok"):
+            agent_store.close_pending(o["id"], "filled", o["placed_date"], at, px)
+            filled.append({"code": o["code"], "side": o["side"], "shares": o["shares"],
+                           "price": px, "t": at, "date": o["placed_date"]})
+            if o["side"] == "buy":   # 买入成交即挂止损（纪律）
+                agent_store.add_condition(agent_id, o["code"], o["name"], "stop_loss",
+                                          round(px * (1 + STOP_LOSS_PCT / 100), 3),
+                                          o["shares"], note=f"建仓价 {px} 的 {STOP_LOSS_PCT}%")
+            else:
+                agent_store.cancel_conditions(agent_id, o["code"])
+        else:
+            agent_store.close_pending(o["id"], "cancelled", note=str(r.get("msg"))[:80])
+    if filled or expired:
+        agent_store.log_run(agent_id, today, "委托结算",
+                            f"成交 {len(filled)} / 过期 {len(expired)}",
+                            detail={"filled": filled, "expired": expired})
+    return {"filled": filled, "expired": expired}
+
+
 # ── 日循环 ─────────────────────────────────────────────────────────────────
 def already_ran(agent_id: int, date: str = "", slot: str = "") -> bool:
     """该 agent 今日该时段是否已跑过（只读检查，供 UI/日志用）。
@@ -392,7 +481,9 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
     if not focus:
         rank = universe_store.sector_ranking(kind="sw1", limit=1)
         focus = rank[0]["sector"] if rank else ""
-    swept = sweep_conditions(agent_id)   # 先补判：app 关闭期间条件单可能已触发
+    swept = sweep_conditions(agent_id)          # 先补判条件单（app 关闭期间可能已触发）
+    settled = sweep_orders(agent_id)            # 再结算在挂委托 —— **必须在决策之前**，
+    #                                             否则 AI 会基于未结算的持仓重复下单
     if swept:
         acct = paper_store.get_account(ag["account_id"]) or acct
     agent_store.log_run(agent_id, today, _ph("研判"),
@@ -448,7 +539,7 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
                         ms=int((time.time() - t0) * 1000))
 
     # ④ 风控 + ⑤ 下单
-    filled, rejected = [], []
+    placed, rejected = [], []
     market_open = app._market_open()   # 交易时段门控（app 已有实现，复用）
     for it in intents:
         ok, why = risk_check(it, ctx)
@@ -456,31 +547,27 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
             rejected.append({"code": it.code, "side": it.side, "msg": why})
             continue
         if dry_run:
-            filled.append({"code": it.code, "side": it.side, "shares": it.shares,
-                           "price": it.ref_price, "dry": True})
+            placed.append({"code": it.code, "side": it.side, "shares": it.shares,
+                           "limit": it.limit_price, "dry": True})
             continue
-        r = paper_store.order(ag["account_id"], it.code, it.name, it.side, "market",
-                              it.ref_price, it.shares, quotes.get(it.code, {}) or {},
-                              market_open, sched=sched)
-        (filled if r.get("ok") else rejected).append(
-            {"code": it.code, "side": it.side, "shares": it.shares,
-             "price": r.get("fill") or it.ref_price, "msg": r.get("msg", "")})
-        if r.get("ok"):
-            ctx["cash"] = float(paper_store.get_account(ag["account_id"])["cash"])
-            if it.side == "buy":   # 买入即挂止损 —— 纪律，不依赖 app 常驻
-                fill = float(r.get("fill") or it.ref_price)
-                agent_store.add_condition(
-                    agent_id, it.code, it.name, "stop_loss",
-                    round(fill * (1 + STOP_LOSS_PCT / 100), 3), it.shares,
-                    note=f"建仓价 {fill} 的 {STOP_LOSS_PCT}%")
-            else:
-                agent_store.cancel_conditions(agent_id, it.code)
-    agent_store.log_run(agent_id, today, _ph("下单"),
-                        f"成交 {len(filled)} / 否决 {len(rejected)}",
-                        detail={"filled": filled, "rejected": rejected})
+        # **挂单，不即时成交** —— 下个 slot / 次日开 app 时用分时或日K判定是否触及
+        now_t = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%H:%M")
+        agent_store.place(agent_id, it.code, it.name, it.side, it.limit_price,
+                          it.shares, now_t, it.reason)
+        placed.append({"code": it.code, "side": it.side, "shares": it.shares,
+                       "limit": it.limit_price, "t": now_t})
+        # 挂单即冻结资金（按限价），避免同一轮里多笔委托超额占用
+        if it.side == "buy":
+            amt = it.shares * it.limit_price
+            ctx["cash"] -= amt + fees.total("buy", amt, sched)
+    agent_store.log_run(agent_id, today, _ph("挂单"),
+                        f"挂出 {len(placed)} / 否决 {len(rejected)}"
+                        + (f"；本轮结算成交 {len(settled['filled'])}" if settled["filled"] else ""),
+                        detail={"placed": placed, "rejected": rejected, "settled": settled})
 
     # ⑥ 复盘：确定性失败检测
-    lessons = detect_failures(agent_id, ctx, [f for f in filled if not f.get("dry")])
+    # 教训基于**真正成交**的（来自本轮结算），不是刚挂出的委托——挂单未必成交
+    lessons = detect_failures(agent_id, ctx, settled["filled"])
     agent_store.log_run(agent_id, today, _ph("复盘"),
                         f"教训 {len(lessons)} 条: {', '.join(lessons) or '无'}")
     acct2 = paper_store.get_account(ag["account_id"]) or acct
@@ -490,7 +577,8 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
     return {"ok": True, "agent": ag["name"], "date": today, "slot": slot, "focus": focus,
             "swept": swept,
             "candidates": len(cands), "intents": len(intents),
-            "filled": filled, "rejected": rejected, "lessons": lessons,
+            "placed": placed, "filled": settled["filled"], "expired": settled["expired"],
+            "rejected": rejected, "lessons": lessons,
             "cash": float(acct2["cash"]), "market_value": round(mv, 2),
             "ms": int((time.time() - t0) * 1000)}
 

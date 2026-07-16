@@ -103,6 +103,7 @@ python app.py                        # http://127.0.0.1:5000
   - **已知限制**：`sina_metrics` 只给 30 天历史 → **资金分量 net20 无法回测**，故不打分、仅展示。
   - **样本量对比**：交易结果验证策略 784 笔≈31年（死局）vs 因子 IC 每日一个横截面观测、600 日 = 565 个 IC 点。
 - **Agent 模拟交易 + 失败归因（agent_store/agent_loop，2026-07-16）**：`POST /api/agents` 建 agent（自动配套 paper 账户）、`POST /api/agents/<id>/run`(`{dry:true}` 只决策不下单)、`POST /api/agents/run_all`(后台线程，多档位/同档多账户并行实验)、`GET /api/agents`、`GET /api/agents/<id>/runs`。
+  - **⚠️ 教训方向必须与 `factor_lab.direction()` 一致，否则会惩罚 AI 服从数据**。踩过：`_pa_score` 按 vol 的正向 IC(近60日 t=+6.96) 选出高波动股 → AI 买入 → `detect_failures` 立刻记「波动失控」(阈值 vol>96 是**拍的先验**) → `_lesson_block()` 注入 **5 个 AI（含用户自己用的 daily/screen/position/entry/market）** → 教它们避开数据证明有效的行为。**系统在惩罚 AI 服从自己的数据**。已修：有因子的属性只在 `sign<0`（数据判定不利）时才记；`sign>=0`（有利 **或 不显著**）不记——同 `_pa_score`「方向未知不参与打分」原则：不猜。风险由 `MAX_VOL` 硬门管（风控），教训不重复管、**更不该用比风控更严的线**（原 96 < 风控 120，风控放行复盘却判罪，是双标）。
   - **教训只记失败、由确定性检测器产出、kind 是闭集**（9 类：追高/赚不抵费/逆势/超仓/满仓/波动失控/僵持/违规/止损迟滞）。`range_pos=92→追高` 是**核对事实**，LLM 说「我觉得有点追高」不是——客观才可统计、才可反哺。LLM 只用在决策步。
   - **风控是确定性硬门**（现金/仓位上限/现金下限/T+1可卖/波动上限），LLM 说了不算。
   - **⚠️ 每个 agent 必须用自己的档位/费率块**（`app._agent_blocks(ag, cash, total, n_pos)`）：**档位跟这个账户的钱走**（agent 的 paper 账户总资产）、**费率跟券商走**（agent 绑的画像）。曾有缺陷：`blocks` 由 `_agent_boot` 算一次传给所有 agent，而 `_tier_block()` 读的是 **active 画像 + 用户真实持仓** → 50 万的中型 agent 拿到用户 7000 块的**微型档**玩法，**多档位实验完全失效**。`run_all()` 的 `blocks` 留空即每 agent 各自构建（推荐）。

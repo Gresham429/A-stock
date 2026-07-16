@@ -276,11 +276,23 @@ function flowChart(series){
 const WAVE_PERIODS=[['day','分时'],['5d','5日'],['1m','近1月'],['3m','近3月'],['6m','近半年'],['1y','近1年']];
 const WAVE_WINDOW={'1m':30,'3m':90,'6m':180,'1y':365};   // 日K各档=自然日窗口（各不相同，修掉旧版 60日/90天 重叠）
 function _daysAgo(n){ const d=new Date(); d.setDate(d.getDate()-n); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
-// 在完整日K序列上预计算 MA5/MA20 再截窗，保证窗口内均线也画满（否则窗口前 N 根缺头）
+// 均线定义（周期→颜色→标签）。颜色避开红/绿（那是涨跌蜡烛色），6 条各自可辨。
+const MA_DEFS=[[5,'var(--gold)','MA5'],[10,'#e05fd0','MA10'],[20,'#4aa3ff','MA20'],
+               [60,'#2ec4c4','MA60'],[120,'#a06cff','MA120'],[240,'#9aa0aa','MA240']];
+// 默认开：短(5)/中(20)/中长(60)。其余按需勾。选择跨周期切换保留。
+let MA_ON={5:true,10:false,20:true,60:true,120:false,240:false};
+// 在**完整**日K序列(600根)上预计算全部 MA 再截窗——保证窗口内均线画满、MA240 也有打底。
 function _dailyWithMA(){
   const d=(WAVE&&WAVE.daily)||[];
   const ma=(i,m)=>{ if(i<m-1) return null; let s=0; for(let k=i-m+1;k<=i;k++) s+=d[k].close; return s/m; };
-  return d.map((b,i)=>({...b, ma5:ma(i,5), ma20:ma(i,20)}));
+  return d.map((b,i)=>{ const o={...b}; MA_DEFS.forEach(([m])=>{o['ma'+m]=ma(i,m);}); return o; });
+}
+function toggleMA(m){ MA_ON[m]=!MA_ON[m]; renderWavePeriod(); }
+function maChips(){
+  return '<div class="ma-chips">'+MA_DEFS.map(([m,col,lab])=>
+    `<button class="ma-chip${MA_ON[m]?' on':''}" style="--mac:${col}" onclick="toggleMA(${m})">`
+    +`<i style="background:${col}"></i>${lab}</button>`).join('')
+    +'<span class="ma-hint">短期看 5/10、中期 20/60、长期 120/240</span></div>';
 }
 function waveSeries(period){
   const W=WAVE||{};
@@ -319,7 +331,7 @@ function waveCap(period){
     return '当日分时：逐分钟成交价，横向虚线=昨收基准。红涨绿跌，鼠标移上去看该分钟价与涨跌%。交易时段每30s自动刷新'+ts+'。';
   }
   if(period==='5d') return '近 5 交易日 5 分钟线。鼠标移到线上看每根具体价。';
-  return '日K蜡烛：实体=开盘↔收盘（红阳/绿阴），影线=最高/最低价；橙线 MA5、蓝线 MA20，下方为成交量柱。鼠标移上去看当日 OHLC / 成交量(手) / 换手率(近似，成交量÷流通股本)；年化波动由区间内日收益率折算。';
+  return '日K蜡烛：实体=开盘↔收盘（红阳/绿阴），影线=最高/最低价；上方勾选 MA5/10/20/60/120/240（短中长期均线，颜色对应线），下方为成交量柱。鼠标移上去看当日 OHLC / 成交量(手) / 换手率(近似，成交量÷流通股本)；年化波动由区间内日收益率折算。';
 }
 function renderWave(){
   const pane=document.getElementById('pane_wave'); if(!pane) return;
@@ -347,7 +359,8 @@ function renderWavePeriod(){
   } else {
     chart=waveChart(series);
   }
-  body.innerHTML='<div class="wavewrap">'+chart+'</div>'
+  body.innerHTML=(series.kind==='daily'?maChips():'')
+    +'<div class="wavewrap">'+chart+'</div>'
     +`<div class="wave-stats">${waveStats(series,WAVE_PERIOD)}</div>`
     +`<div class="chartcap">${waveCap(WAVE_PERIOD)}</div>`
     +extra;
@@ -429,6 +442,7 @@ function candlestick(kl){
   const n=kl.length,cw=(w-padL-padR)/n,bw=Math.max(1.5,cw*0.62);
   const yP=p=>padT+(hi-p)/rng*cH;
   const maLine=(key,col)=>{let pts=[];for(let i=0;i<n;i++){const v=kl[i][key];if(v!=null)pts.push(`${(padL+i*cw+cw/2).toFixed(1)},${yP(v).toFixed(1)}`);}return pts.length>1?`<polyline points="${pts.join(' ')}" fill="none" stroke="${col}" stroke-width="1.1" opacity=".9"/>`:'';};
+  const maSvg=MA_DEFS.filter(([m])=>MA_ON[m]).map(([m,col])=>maLine('ma'+m,col)).join('');
   let candles='';
   for(let i=0;i<n;i++){const k=kl[i],x=padL+i*cw+cw/2,up=k.close>=k.open,col=up?'var(--up)':'var(--down)';
     const yO=yP(k.open),yC=yP(k.close),top=Math.min(yO,yC),bh=Math.max(1,Math.abs(yC-yO));
@@ -444,7 +458,7 @@ function candlestick(kl){
       +`<text x="4" y="${(y+3).toFixed(1)}" fill="var(--muted)" font-size="9" font-family="monospace">${p.toFixed(2)}</text>`;}
   KL_CTX={bars:kl, W:w, padL, cw, n, vY, padT};
   return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;min-width:520px;height:${h}px" onmousemove="klHover(event)" onmouseleave="waveHoverEnd()">
-    ${grid}${maLine('ma5','var(--gold)')}${maLine('ma20','#4aa3ff')}${candles}${vols}
+    ${grid}${maSvg}${candles}${vols}
     <line id="kl_cross" x1="0" y1="${padT}" x2="0" y2="${vY.toFixed(1)}" stroke="var(--gold)" stroke-width="1" stroke-dasharray="3 3" style="display:none"/>
     <text x="${padL}" y="${h-4}" fill="var(--muted)" font-size="9" font-family="monospace">${kl[0].date.slice(5)}</text>
     <text x="${w-padR-28}" y="${h-4}" fill="var(--muted)" font-size="9" font-family="monospace">${kl[n-1].date.slice(5)}</text></svg>`;
@@ -461,9 +475,13 @@ function klHover(e){
   const tip=document.getElementById('tip');
   const fs=WAVE&&WAVE.float_shares, hsv=fs?(k.volume/fs*100):null, lots=k.volume/100;
   const volTxt=lots>=10000?(lots/10000).toFixed(1)+'万手':Math.round(lots)+'手';
+  // 勾选的均线值（辅助读短中长期），每条按自己颜色
+  const maTxt=MA_DEFS.filter(([m])=>MA_ON[m]&&k['ma'+m]!=null)
+    .map(([m,col,lab])=>`<span style="color:${col}">${lab} ${k['ma'+m].toFixed(2)}</span>`).join(' ');
   tip.innerHTML=`${k.date}　开<b>${k.open.toFixed(2)}</b> 高<b>${k.high.toFixed(2)}</b> 低<b>${k.low.toFixed(2)}</b> 收<b>${k.close.toFixed(2)}</b>`
     +`　<span style="color:${chg>=0?'#ff4d5e':'#22c98b'}">${sgn(chg)}${chg.toFixed(2)}%</span>`
-    +`　量<b>${volTxt}</b>`+(hsv!=null?` 换<b>${hsv.toFixed(1)}%</b>`:'');
+    +`　量<b>${volTxt}</b>`+(hsv!=null?` 换<b>${hsv.toFixed(1)}%</b>`:'')
+    +(maTxt?`<br>${maTxt}`:'');
   tip.style.display='block';
   tip.style.left=Math.min(e.clientX+14, window.innerWidth-tip.offsetWidth-14)+'px';
   tip.style.top=(e.clientY+16)+'px';

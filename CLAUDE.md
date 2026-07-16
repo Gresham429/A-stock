@@ -124,7 +124,7 @@ app.py 用显式 import 带回名字，路由调用点与 `app._X` 可达性不�
 
 ### 🔴 改代码前必读：`plan/PITFALLS.md`
 
-18 条**真踩过并付出代价**的坑，按「会不会让你写出错的东西」排序。最要命的三类：
+24 条**真踩过并付出代价**的坑（本会话新增 5 条：#0/#0a/#0a-2/#0a-3/#0b），按「会不会让你写出错的东西」排序。最要命的三类：
 
 1. **凡是拍脑袋定的阈值，方向大概率是错的** —— 已被数据打脸 5 次（`_pa_score` 两个
    分量方向全反、止损线、教训阈值、"要加迟滞"的判断）。能验必验，验不了要明确
@@ -137,8 +137,11 @@ app.py 用显式 import 带回名字，路由调用点与 `app._X` 可达性不�
 
 | 特性 | 文档 |
 |------|------|
+| **索引：plan/ 全部文档** | `plan/README.md`（本会话加，按主题分组） |
 | 全市场股票池 + 板块日变化 | `plan/2026-07-15-full-market-universe-design.md` |
-| multi-agent + 失败归因 + 提示词进化 | `plan/2026-07-16-agent-evolution-design.md` |
+| multi-agent + 失败归因 + 提示词进化（含**个体记忆**两层） | `plan/2026-07-16-agent-evolution-design.md` |
+| **决策数据面**（K线结构 + 真·大盘块） | `plan/2026-07-16-decision-data-plane-design.md` |
+| **结果导向教训**（超额结算 + 判罪线来自分布） | `plan/2026-07-16-outcome-driven-lessons-design.md` |
 | AI 溯源与依据校验 | `plan/2026-07-14-ai-provenance-attribution-design.md` |
 | 投资画像 · 本金分级 | `plan/2026-07-14-capital-profiles-templates-design.md` |
 | 公司叙事 | `plan/2026-07-14-company-narrative-design.md` |
@@ -192,7 +195,7 @@ python3 tests/test_agent_memory.py       # 个体记忆 6 例（改 for_ai/战�
 #    辩论是 token 预算最短板；实测踩过两次）：
 #    python3 -c "import agent_loop as al; print(al.run_day(18, dry_run=True, force=True))"
 
-python3 -c "import ast; [ast.parse(open(f).read()) for f in ['app.py','agent_loop.py']]"
+python3 -c "import ast; [ast.parse(open(f).read()) for f in ['app.py','agent_loop.py','screening.py','ai_blocks.py','outcome.py','structure.py']]"
 node --check static/app.js
 
 python app.py &                          # ⚠️ 一律用 127.0.0.1 别用 localhost：
@@ -223,50 +226,49 @@ curl -s 127.0.0.1:5000/api/agents               # agent 存档 + 教训汇总
 
 ## 当前状态 / 待办
 
-**代码全部已推 GitHub(main)，工作区干净。** 本轮(2026-07-15/16)新增 10 个模块、49 个 commit。
+**代码全部已推 GitHub(main)，工作区干净。74 例离线测试全过。app 单进程在跑。**
+本会话(2026-07-16→17)约 21 个 commit，抽出 4 个新模块（`structure`/`outcome`/`screening`/`ai_blocks`）。
+
+### 本会话做了什么（给下个会话的时间线）
+
+1. **决策数据面**：补 `structure.py`(K线结构) + 真·大盘块 → agent 从「数据不足」变实质判断。
+2. **结果导向教训 Phase 1+2**：`entries` 留痕 + `settle_entries` 超额结算；判罪线来自
+   `factor_lab.excess_dist`(16万样本)，非拍脑袋。
+3. **持仓口径**：主盈亏改「持仓盈亏=毛−已付买入费」(对齐券商)，卖出费按股单列「今日离场费」；
+   逐笔展开 `lots_view`。
+4. **agent 个体记忆**：每 agent 只召回自己的教训(`for_ai(agent_id)`) + 自己的战绩(`_agent_history_block`)。
+5. **费率校正**：查实用户是**万2.5+5元最低**(非「免最低」，曾误记)；画像 6 已改。
+6. **行情图**：日K 六条可选均线(MA5/10/20/60/120/240，芯片显当日值) + 分时/5日均价线(VWAP)。
+7. **app.py 拆分**：1552→1187 行，抽 `screening.py`/`ai_blocks.py`，**消除 agent_loop 的 `import app` 循环依赖**。
+8. **agent 舰队 12→20**：补齐 5 档 × 3 风险；画像选择器隐藏 agent 系列(不删)。
 
 ### 🔴 下一步该做的（按价值排序）
 
-0. **✅ 已解决(2026-07-16 下午)：决策数据面** —— 原第 1 项「让 agent 跑起来攒数据」
-   卡在这：agent 一直在跑，但 12 个里 11 个产出 0 意向，理由清一色「数据不足：
-   缺少K线、趋势、均线」。**规则库要 K线、提示词只给静态标量**，AI 只能援引 R6
-   「看不懂就等」——在正确地服从规则。已补 `structure.py` + 真·大盘块，
-   skip_reason 已变成实质判断（「大盘下跌趋势，空头 Always In」）。
-   见 `plan/2026-07-16-decision-data-plane-design.md`、`PITFALLS.md#0`。
+1. **让 20 个 agent 攒数据（唯一的主线待办，不卡代码、卡时间）** —— 教训库**仍是空的**，
+   「学失败→反哺提示词」+ 个体记忆 + 结果导向判罪 **全部机制就位但零真实数据验证**。
+   开 app 自动跑（交易时段·每桶一次）。
+   - **第一批 20 日结算约 2026-08-13 落地**（今日建的仓满 20 交易日）；教训要「跑输历史 90%」才产生，稀疏。
+   - ⚠️ 数据面修好 ≠ 一定成交：实测 07-16 大盘跌，AI **正确**拒绝逆势做多 → 0 成交。
+     **要失败样本得等 AI 真愿出手的行情，别为攒数据松风控。**
+   - ⚠️ 20 agent × 2 桶/天 × v4-pro，token 成本比 12 个时翻倍。
 
-1. **让 agent 攒数据（现在才真的可以开始）** —— 教训库**仍是空的**，
-   「学失败→反哺提示词」一次都没被真实数据验证过。开 app 自动跑（交易时段·每桶一次）。
-   ⚠️ **注意**：数据面修好 ≠ 一定会成交。实测 07-16 下午大盘在跌（上证-0.82%/
-   创业板-1.73%），AI **正确地**拒绝逆势做多 → 仍 0 成交。**要攒到失败样本，
-   得等一个 AI 真的愿意出手的行情**——这是对的行为，不要为了攒数据去松风控。
-   - **Agent 舰队 = 20 个**（2026-07-16 从 12 扩到 20，补齐 **5 档 × 3 风险** 网格）：
-     微型/小型/中型/大型/超大 各有 稳健/均衡/激进（single）；微型另有 均衡×4(方差) + 辩A/B(decider)。
-     档位由 paper 账户资金定（微型1万/小型10万/中型50万/大型500万/超大3000万），风险跟画像(8稳/9均/10激)。
-     三档大资金 dry-run 全 ok=True（超大档首次跑通）。⚠️ 20 agent × 2 桶/天 × v4-pro，token 成本翻倍，留意。
-0b. **✅ 已解决(2026-07-16)：结果导向的教训（Phase 1+2 全上线）**
-   见 `plan/2026-07-16-outcome-driven-lessons-design.md`。
-   - `entries` 表建仓留痕(**挂单时**抓快照) + `settle_entries()` 按 5/10/20 交易日
-     结算**超额**收益(扣大盘 beta，基准按**个股停牌后的实际日历窗口**对齐)。
-   - 判罪线来自 `factor_lab.excess_dist`（**161,994 样本**的超额分位分布），
-     `rank_of()` 把这一笔映射到历史百分位；底部十分位才记 `bad_outcome`。
-   - **拒判三红线**（已测试钉死）：无分布拒判 / 超额算不出拒判 / 只看 20 日档。
-   - **`LESSON_PCT=10` 是纪律参数**（选择性取舍，非数据结论），已在
-     `/api/factors` 的 `lesson_gate` 暴露。**用户 2026-07-16 已认可**——
-     按 20–30 笔/年，约 **2–3 条教训/年**，稀疏是预期内的。
-     改动前需重新征得同意：松(p25)→教训多但噪，紧(p5)→一年可能一条都没有。
-   - **实测依据**：5 日 vs 20 日判罪 **33.1% 判反**（6240 个建仓点，相关系数 0.452）；
-     `超额<0` 那条线会判 **53%** 失败（p50(20日)=**-0.90%**，个股跑输上证是常态）。
-3. **浏览器验证**：🤖 Agent modal / 净盈亏显示 / 💼 画像 modal / 公司叙事卡+溯源条。
-   字段对齐都验了，**DOM 交互一次没验**。
+2. **舰队→提示词提炼（D，用户最终目标，等 #1 有数据再做）** —— 读全舰队教训+结算 →
+   AI 提一版新提示词 → 用户审核 → `template_store` 入库 A/B。机制可建，但现在教训库=0、
+   留痕=1，提炼无输入。见 `plan/2026-07-16-agent-evolution-design.md` 末尾。
+
+3. **浏览器 DOM 交互验证** —— 本会话所有前端(MA六线/VWAP/持仓逐笔展开/画像隐藏/Agent modal/
+   净盈亏)都只做了 **node 渲染测**(HTML 无 NaN/标签闭合)，**真实浏览器点击/展开一次没验**。
 
 ### ⚠️ 已知未验证 / 未做
 
 - **未验证的阈值**（能验但没验）：`CHASE_HIGH_POS=85`、`STALE_DAYS=20`、`LOSS_CUT_PCT=-12`、
   `_PRESCREEN=600`。用 `factor_lab` 那套方法论可验。见 `plan/PITFALLS.md#1`。
 - **纪律参数**（不需数据验证，但需用户认可）：`MAX_VOL=120`、`MAX_POS_PCT=30`、
-  `MIN_CASH_PCT=10`、`VOL_FLOOR/CEIL=15/130`、`STOP_LOSS_PCT=-10`(已回测)。
+  `MIN_CASH_PCT=10`、`VOL_FLOOR/CEIL=15/130`、`STOP_LOSS_PCT=-10`(已回测)、
+  `LESSON_PCT=10`(教训判罪线=超额底部十分位，**用户 2026-07-16 已认可**，改前需重新征询；
+  分布是 16 万样本的事实，「取底部 10%」是选择性取舍)。
 - **测试盲区**：`fees` / `portfolio`(现金扣减) / `template_store` / `paper_store` 撮合 /
-  `provenance` **均无单测**。
+  `provenance` **均无单测**（本会话新增的 `structure`/`outcome`/`excess_dist`/`agent_memory` 已有测）。
 - **`DebateDecider` 默认不启用**（UI 可选）：先用 single 拿基线，用数据证明需要再切。
 - **launchd 定时全不挂**（用户决定）：agent「不开 app 就意味着那天不炒股」；
   板块统计「每交易日都开 app，`_universe_boot` 已覆盖」。

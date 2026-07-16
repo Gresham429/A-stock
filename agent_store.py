@@ -85,6 +85,10 @@ CREATE TABLE IF NOT EXISTS conditions(
   triggered_date TEXT DEFAULT '', fill_price REAL DEFAULT 0, note TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_cond_agent ON conditions(agent_id, status);
+CREATE TABLE IF NOT EXISTS claims(
+  agent_id INTEGER NOT NULL, date TEXT NOT NULL, slot TEXT NOT NULL, ts TEXT,
+  PRIMARY KEY (agent_id, date, slot)
+);
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
 """
 
@@ -270,6 +274,7 @@ def purge() -> dict[str, int]:
         b = c.total_changes
         c.execute("DELETE FROM equity WHERE date < ?", (d730,))
         out["equity_deleted"] = c.total_changes - b
+        c.execute("DELETE FROM claims WHERE date < ?", (d365,))
     return out
 
 
@@ -343,3 +348,34 @@ def cancel_conditions(agent_id: int, code: str) -> int:
         c.execute("UPDATE conditions SET status='cancelled' "
                   "WHERE agent_id=? AND code=? AND status='live'", (agent_id, code))
         return c.total_changes - b
+
+
+# ── 时段占位（原子幂等） ───────────────────────────────────────────────────
+def claim_slot(agent_id: int, date: str, slot: str) -> bool:
+    """原子抢占「某 agent 某日某时段」。已被占则返回 False。
+
+    **为什么不能用「查有没有复盘记录」当幂等门**：那是「开头查、180 秒后才写」，
+    两个并发的 run_all 会双双从门缝挤过去——实测 10:19:58 与 10:20:08 各起一轮，
+    两轮都跑完了(179s/177s)，微型-均衡单A/B 各跑了 2 次。
+    改用 PRIMARY KEY 冲突做原子占位：抢不到就立刻退出，不存在窗口。
+    """
+    try:
+        with _LOCK, _conn() as c:
+            c.execute("INSERT INTO claims(agent_id,date,slot,ts) VALUES(?,?,?,?)",
+                      (agent_id, date, slot, datetime.now().isoformat(timespec="seconds")))
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+
+def release_slot(agent_id: int, date: str, slot: str) -> None:
+    """跑失败时释放占位，让下次开 app 能重试（成功则保留，形成幂等）。"""
+    with _LOCK, _conn() as c:
+        c.execute("DELETE FROM claims WHERE agent_id=? AND date=? AND slot=?",
+                  (agent_id, date, slot))
+
+
+def slots_done(agent_id: int, date: str) -> list[str]:
+    with _conn() as c:
+        return [r["slot"] for r in c.execute(
+            "SELECT slot FROM claims WHERE agent_id=? AND date=?", (agent_id, date))]

@@ -48,6 +48,28 @@ LOSS_CUT_PCT = -12.0       # 浮亏超过此值仍未止损 = 止损迟滞
 # -5% 太紧(60% 被扫出)；-15%/-20% 被支配(少赚更多、尾部还不比自然分布好)。
 STOP_LOSS_PCT = -10.0
 
+# 交易时段分桶（北京时间）。**错过的桶不补**——补跑必然引入未来函数：
+# 要在 14:00 重建 10:00 的决策，得重建整个信息环境（全市场快照/板块统计/资金流），
+# 而 `ds.sina_all_stocks()` 只有当前快照、无 as-of 参数。任何一处泄漏，AI 就是拿
+# 14:00 的答案做 10:00 的题，结论系统性偏乐观且无法自查。真实交易者也补不了。
+# （对比：条件单能用日K补判，是因为「low 跌破止损价」是既成事实，不需要重建上下文。）
+SLOTS: tuple[tuple[str, int, int], ...] = (
+    ("早盘", 9 * 60 + 30, 11 * 60 + 30),
+    ("尾盘", 13 * 60, 15 * 60),
+)
+
+
+def current_slot() -> str:
+    """当前所处的交易时段桶；非交易时段返回空串。用北京时间（同 app._market_open）。"""
+    from zoneinfo import ZoneInfo
+    from datetime import datetime as _dt
+    now = _dt.now(ZoneInfo("Asia/Shanghai"))
+    t = now.hour * 60 + now.minute
+    for name, lo, hi in SLOTS:
+        if lo <= t <= hi:
+            return name
+    return ""
+
 
 @dataclass(frozen=True)
 class Intent:
@@ -309,30 +331,39 @@ def sweep_conditions(agent_id: int) -> list[dict[str, Any]]:
 
 
 # ── 日循环 ─────────────────────────────────────────────────────────────────
-def already_ran(agent_id: int, date: str = "") -> bool:
-    """今天是否**真跑**过 —— 幂等门。一天开三次 app 不能跑三次（多花三份 API 钱，
-    且同日三份互相矛盾的决策会污染归因数据）。
+def already_ran(agent_id: int, date: str = "", slot: str = "") -> bool:
+    """该 agent 今日该时段是否已跑过（只读检查，供 UI/日志用）。
 
-    **只认真跑**：试跑(dry_run)的阶段名带「试跑-」前缀，不计入。否则试跑会把当天锁死，
-    开盘后的真跑反被自己挡掉——试跑必须是无副作用的。
+    **真正的幂等靠 `agent_store.claim_slot()` 原子占位**——本函数是「开头查、
+    180 秒后才写」的模式，两个并发 run_all 会双双挤过去（实测发生过）。
     """
     date = date or date_cls.today().isoformat()
-    return any(r["phase"] == "复盘" for r in agent_store.runs_of(agent_id, date, limit=30))
+    slot = slot or current_slot() or "手动"
+    return slot in agent_store.slots_done(agent_id, date)
 
 
 def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
-            blocks: str = "", force: bool = False) -> dict[str, Any]:
-    """跑一个 agent 的完整一天。dry_run=True 只决策不下单；force=True 跳过幂等门。"""
+            blocks: str = "", force: bool = False, slot: str = "") -> dict[str, Any]:
+    """跑一个 agent 的一个**时段桶**。dry_run 只决策不下单；force 跳过幂等门。
+
+    slot 留空则取当前时段桶（非交易时段为「手动」）。同一 (agent, 日, 桶) 只跑一次
+    —— 靠 `claim_slot()` 原子占位，不是靠查记录。
+    """
     t0 = time.time()
     ag = agent_store.get_agent(agent_id)
     if not ag:
         return {"ok": False, "msg": "agent 不存在"}
     today = date_cls.today().isoformat()
-    if not force and not dry_run and already_ran(agent_id, today):
-        return {"ok": True, "skipped": "今日已跑过（幂等）", "agent": ag["name"], "date": today}
+    slot = slot or current_slot() or "手动"
+    claimed = False
+    if not force and not dry_run:
+        if not agent_store.claim_slot(agent_id, today, slot):
+            return {"ok": True, "skipped": f"今日「{slot}」已跑过（幂等）",
+                    "agent": ag["name"], "date": today, "slot": slot}
+        claimed = True
     # 试跑的日志加前缀 —— 不污染幂等门、不与真跑记录混淆
     def _ph(p: str) -> str:
-        return ("试跑-" + p) if dry_run else p
+        return ("试跑-" + p) if dry_run else f"{p}@{slot}"
     acct = paper_store.get_account(ag["account_id"])
     if not acct:
         return {"ok": False, "msg": "模拟盘账户不存在"}
@@ -390,7 +421,9 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
         intents, raw = decider(ctx)
     except (llm.LLMError, ValueError) as e:
         agent_store.log_run(agent_id, today, _ph("决策"), f"失败: {e}", ok=False)
-        return {"ok": False, "msg": f"决策失败: {e}"}
+        if claimed:   # 跑失败则释放占位，下次开 app 可重试
+            agent_store.release_slot(agent_id, today, slot)
+        return {"ok": False, "msg": f"决策失败: {e}", "slot": slot}
     agent_store.log_run(agent_id, today, _ph("决策"),
                         f"{ag.get('decider')} → {len(intents)} 条意向", detail=raw,
                         ms=int((time.time() - t0) * 1000))
@@ -435,7 +468,7 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
     agent_store.log_equity(agent_id, today, float(acct2["cash"]), mv,
                            float(acct["init_capital"] or 0))
     agent_store.purge()  # 按日累积的表一律清理
-    return {"ok": True, "agent": ag["name"], "date": today, "focus": focus,
+    return {"ok": True, "agent": ag["name"], "date": today, "slot": slot, "focus": focus,
             "swept": swept,
             "candidates": len(cands), "intents": len(intents),
             "filled": filled, "rejected": rejected, "lessons": lessons,
@@ -467,9 +500,10 @@ def run_all(dry_run: bool = False, blocks: str = "", force: bool = False,
     agents = agent_store.list_agents(active_only=True)
     if not agents:
         return []
+    slot = current_slot()
     if require_open and not dry_run and not force:
         import app
-        if not app._market_open():
+        if not app._market_open() or not slot:
             fired = []
             for ag in agents:      # 非交易时段仍补判条件单：补的是**历史**已发生的触发
                 try:
@@ -480,10 +514,12 @@ def run_all(dry_run: bool = False, blocks: str = "", force: bool = False,
                         len(agents), len(fired))
             return [{"ok": True, "skipped": "非交易时段（决策已跳过，条件单已补判）",
                      "swept": len(fired)}]
+        logger.info("当前时段桶：%s", slot)
 
     def one(ag: dict[str, Any]) -> dict[str, Any]:
         try:
-            return run_day(ag["id"], dry_run=dry_run, blocks=blocks, force=force)
+            return run_day(ag["id"], dry_run=dry_run, blocks=blocks, force=force,
+                           slot=slot or "手动")
         except Exception as e:  # noqa: BLE001 单个 agent 崩了不该拖垮整批
             logger.exception("agent %s 日循环失败", ag["name"])
             return {"ok": False, "agent": ag["name"], "msg": str(e)}

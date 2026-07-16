@@ -1439,7 +1439,7 @@ def _agent_boot() -> None:
         if r.get("skipped"):
             logger.info("agent %s: %s", r.get("agent", "-"), r["skipped"])
         elif r.get("ok"):
-            logger.info("agent %s 日循环: 成交 %d / 教训 %d", r.get("agent"),
+            logger.info("agent %s [%s]: 成交 %d / 教训 %d", r.get("agent"), r.get("slot", "-"),
                         len(r.get("filled") or []), len(r.get("lessons") or []))
 
 

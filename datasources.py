@@ -422,14 +422,33 @@ def sina_kline(code: str, num: int = 120, scale: int = 240) -> list[dict[str, An
     """新浪K线（前复权口径）。scale=240 日K / 5 五分钟 / 15 十五分钟 …。
 
     返回时间正序 [{date, open, high, low, close, volume}]；分钟级时 date 含 'HH:MM:SS'。
+    **指数请用 `index_kline()`** —— market_prefix 对 000xxx 会误判为 sz。
     """
-    sym = market_prefix(code) + code
+    return _sina_kline_sym(market_prefix(code) + code, num, scale)
+
+
+def index_kline(sym: str, num: int = 70) -> list[dict[str, Any]]:
+    """指数日K。sym 须**带前缀且硬编码**（如 sh000001 / sz399006）。
+
+    指数前缀不能过 `market_prefix()`：上证/沪深300/科创50 均在 sh，但它对
+    000xxx 一律判 sz（同 `index_quotes()` 的注释）。故这里只收调用方给的完整符号。
+    """
+    return _sina_kline_sym(sym, num, 240)
+
+
+def _sina_kline_sym(sym: str, num: int, scale: int) -> list[dict[str, Any]]:
+    """新浪K线取数内核（收完整符号，个股/指数共用）。"""
     url = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
            f"CN_MarketData.getKLineData?symbol={sym}&scale={scale}&ma=no&datalen={num}")
     try:
         arr = json.loads(_http_get(url, ref="https://finance.sina.com.cn/"))
     except (OSError, ValueError) as e:
-        logger.warning("新浪K线请求失败 %s: %s", code, e)
+        logger.warning("新浪K线请求失败 %s: %s", sym, e)
+        return []
+    if not isinstance(arr, list):
+        # 未知/退市代码新浪回 `null` -> json.loads 得 None -> 迭代抛 TypeError。
+        # TypeError 不在上面的捕获里，会穿透调用方（全市场池必踩，见 PITFALLS#11）。
+        logger.warning("新浪K线返回非列表 %s: %r", sym, arr)
         return []
     out = []
     for x in arr:

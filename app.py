@@ -1026,6 +1026,28 @@ def _safe_metrics(code: str) -> dict:
     return m
 
 
+_KLINE_TTL = 900     # 日K进程内缓存秒数（12 个 agent 候选高度重叠，不缓存要打 240 次请求）
+_kline_cache: dict[str, tuple[float, list]] = {}
+
+
+def _safe_kline(code: str, num: int = 70) -> list[dict]:
+    """sina_kline 的兜底包装 + 进程内 TTL 缓存（mirror `_safe_metrics`）。
+
+    num=70：MA60 要 60 根，留 10 根余量给停牌/缺口。
+    全市场池数据质量参差，单只异常不得拖垮整批（PITFALLS#11）。
+    """
+    hit = _kline_cache.get(code)
+    if hit and time.time() - hit[0] < _KLINE_TTL:
+        return hit[1]
+    try:
+        k = ds.sina_kline(code, num=num)
+    except Exception as e:  # noqa: BLE001 兜底：宁可该股无K线，不可整批失败
+        logger.warning("K线获取失败 %s（该股按无结构处理）: %s", code, e)
+        return []
+    _kline_cache[code] = (time.time(), k)
+    return k
+
+
 def _pa_score(m: dict) -> float | None:
     """形态初筛打分（0–100）。None = 形态不可分析，该股出局。
 

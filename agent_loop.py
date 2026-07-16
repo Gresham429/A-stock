@@ -23,7 +23,9 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import date as date_cls
+from datetime import datetime
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 import agent_store
 import datasources as ds
@@ -62,9 +64,7 @@ SLOTS: tuple[tuple[str, int, int], ...] = (
 
 def current_slot() -> str:
     """当前所处的交易时段桶；非交易时段返回空串。用北京时间（同 app._market_open）。"""
-    from zoneinfo import ZoneInfo
-    from datetime import datetime as _dt
-    now = _dt.now(ZoneInfo("Asia/Shanghai"))
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
     t = now.hour * 60 + now.minute
     for name, lo, hi in SLOTS:
         if lo <= t <= hi:
@@ -89,8 +89,10 @@ class Intent:
 def _single_decider(ctx: dict[str, Any]) -> tuple[list[Intent], str]:
     """一次 v4-pro：给候选 + 持仓 + 现金 + 教训，让它输出买卖意向。"""
     prompt = _decide_prompt(ctx)
+    # DeepSeek 是**推理模型**：max_tokens 同时覆盖「思考+正文」，太小会思考耗尽、
+    # 正文返回空(finish_reason=length)。决策提示词含 规则库+教训+档位+成本块 ≈8000 字。
     raw = llm._chat([{"role": "system", "content": llm._system_prompt()[0]},
-                     {"role": "user", "content": prompt}], max_tokens=5000)
+                     {"role": "user", "content": prompt}], max_tokens=8000)
     data = llm._parse_json(raw)
     return _intents_from(data, ctx), raw
 
@@ -110,7 +112,7 @@ def _debate_decider(ctx: dict[str, Any]) -> tuple[list[Intent], str]:
                   "默认怀疑；宁可错过不可做错。")
         return llm._chat([{"role": "system", "content": llm._system_prompt()[0] + stance},
                           {"role": "user", "content": base + "\n\n只输出你的论点，不下结论。"}],
-                         json_mode=False, max_tokens=2500)
+                         json_mode=False, max_tokens=4000)
 
     with ThreadPoolExecutor(max_workers=2) as ex:
         bull, bear = list(ex.map(side, ["bull", "bear"]))
@@ -118,7 +120,9 @@ def _debate_decider(ctx: dict[str, Any]) -> tuple[list[Intent], str]:
         [{"role": "system", "content": llm._system_prompt()[0]},
          {"role": "user", "content": base + f"\n\n【多头论点】\n{bull}\n\n【空头论点】\n{bear}\n\n"
                                             "你是裁判。权衡双方，输出最终买卖意向。"}],
-        max_tokens=5000)
+        # 裁判的上下文最长（决策提示词 + 多空双方论点），故给得最多。
+        # 曾设 5000 → finish_reason=length（思考耗尽、正文空）。
+        max_tokens=12000)
     data = llm._parse_json(judge)
     return _intents_from(data, ctx), json.dumps(
         {"bull": bull, "bear": bear, "judge": judge}, ensure_ascii=False)

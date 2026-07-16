@@ -272,6 +272,13 @@
   .wave-chips{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0 12px}
   .wave-chip{background:var(--panel);border:1px solid var(--line2);color:var(--muted);border-radius:16px;padding:5px 13px;font-size:12px;cursor:pointer;font-family:var(--sans)}
   .wave-chip.on{border-color:var(--gold);color:var(--gold);background:rgba(224,169,46,.08)}
+  /* 均线开关（点选显示哪几条 MA） */
+  .ma-chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:2px 0 8px}
+  .ma-chip{display:inline-flex;align-items:center;gap:5px;background:var(--panel);border:1px solid var(--line2);color:var(--muted);border-radius:14px;padding:3px 10px;font-size:11px;cursor:pointer;font-family:var(--sans)}
+  .ma-chip i{width:12px;height:2.5px;border-radius:2px;opacity:.45}
+  .ma-chip.on{color:var(--fg);border-color:var(--mac)}
+  .ma-chip.on i{opacity:1}
+  .ma-hint{color:var(--muted);font-size:11px;margin-left:4px}
   .wavewrap{position:relative;width:100%;overflow-x:auto}
   .wavewrap svg{width:100%;min-width:340px;display:block;cursor:crosshair}
   .wave-stats{display:flex;gap:18px;flex-wrap:wrap;font-size:12px;color:var(--muted);font-family:var(--mono);margin-top:10px}

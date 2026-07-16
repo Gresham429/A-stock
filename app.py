@@ -443,7 +443,8 @@ def wave(code: str):
     with ThreadPoolExecutor(max_workers=4) as pool:
         f_intra = pool.submit(ds.tencent_minute, code)
         f_min5 = pool.submit(ds.sina_kline, code, 240, 5)     # num=240 ≈ 近5交易日
-        f_daily = pool.submit(ds.sina_kline, code, 260, 240)  # num=260 覆盖当年/当季
+        # num=600：近1年窗口(~245交易日) + MA240 打底(240) ≈ 485，600 留足余量。
+        f_daily = pool.submit(ds.sina_kline, code, 600, 240)
         f_quote = pool.submit(ds.tencent_quote, [code])
         intraday, min5, daily, quotes = (f_intra.result(), f_min5.result(),
                                          f_daily.result(), f_quote.result())

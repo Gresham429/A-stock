@@ -289,10 +289,15 @@ function _dailyWithMA(){
 }
 function toggleMA(m){ MA_ON[m]=!MA_ON[m]; renderWavePeriod(); }
 function maChips(){
-  return '<div class="ma-chips">'+MA_DEFS.map(([m,col,lab])=>
-    `<button class="ma-chip${MA_ON[m]?' on':''}" style="--mac:${col}" onclick="toggleMA(${m})">`
-    +`<i style="background:${col}"></i>${lab}</button>`).join('')
-    +'<span class="ma-hint">短期看 5/10、中期 20/60、长期 120/240</span></div>';
+  // 当日(最新交易日)各 MA 值：直接印在芯片上，不用 hover 也能读短中长期
+  const last=_dailyWithMA().slice(-1)[0]||{};
+  const day=last.date?last.date.slice(5):'';
+  return '<div class="ma-chips">'+MA_DEFS.map(([m,col,lab])=>{
+    const v=last['ma'+m]; const val=(v!=null)?v.toFixed(2):'—';
+    return `<button class="ma-chip${MA_ON[m]?' on':''}" style="--mac:${col}" onclick="toggleMA(${m})">`
+      +`<i style="background:${col}"></i>${lab} <b>${val}</b></button>`;
+  }).join('')
+    +`<span class="ma-hint">当日 ${day} · 短期看 5/10、中期 20/60、长期 120/240</span></div>`;
 }
 function waveSeries(period){
   const W=WAVE||{};

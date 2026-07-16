@@ -2,7 +2,7 @@
 
 设计见 `plan/2026-07-16-agent-evolution-design.md`。
 
-    盘前 ① 研判(复用 llm.market_overview 的缓存结论) → 关注板块
+    盘前 ① 研判(指数点位+K线结构+涨停跌停+板块强弱) → 大盘块 + 关注板块
     盘中 ② 选股(复用 app._screen_rows + _pa_score) → 候选
          ③ 决策(**可插拔**: SingleDecider / DebateDecider) → 买卖意向
          ④ 风控(确定性检查，可否决) → 放行的单
@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from datetime import date as date_cls
@@ -34,6 +35,7 @@ import fees
 import llm
 import paper_store
 import profile_store
+import structure
 import universe_store
 
 logger = logging.getLogger(__name__)
@@ -110,10 +112,28 @@ def _debate_decider(ctx: dict[str, Any]) -> tuple[list[Intent], str]:
                   if role == "bull" else
                   "你是**空头**分析师。只论证「为什么现在不该买、或该卖出」，主动挑刺，"
                   "默认怀疑；宁可错过不可做错。")
+        # **8000 不是拍的，是量出来的**（2026-07-16，补入K线结构后提示词 8.9k→11.6k 字符）：
+        #   多头 max_tokens=4000  → completion 3578（reasoning 3480）= 预算的 89%
+        #   多头 max_tokens=16000 → completion 3823（reasoning 3700）← 模型自己收敛在 ~3800
+        # 4000 踩在 89~96% 线上 = **掷硬币**：实测同一提示词一次 3578 通过、一次返回空正文
+        # (finish_reason=length) 直接让整个辩论档 ok=False。
+        #
+        # **空头市里多头最费思考**：跌势中论证「为什么该买」难，reasoning 3480；
+        # 空头论证「别买」轻松，reasoning 2080。故预算要按**多头在逆境下**的用量定，
+        # 不能按空头的看着够用就行。
+        #
+        # max_tokens 是**上限不是配额**（按实际 completion 计费），故 4000→8000
+        # 在正常情况下不多花钱，只是把掷硬币换成 2.1 倍余量。
         return llm._chat([{"role": "system", "content": llm._system_prompt()[0] + stance},
                           {"role": "user", "content": base + "\n\n只输出你的论点，不下结论。"}],
-                         json_mode=False, max_tokens=4000)
+                         json_mode=False, max_tokens=8000)
 
+    # **单边失败必须炸掉整个辩论，不许降级成一面之词。**
+    # `llm._chat` 空正文即抛，`list(ex.map())` 让异常向外传播 → run_day 记 ok=False。
+    # 别「好心」改成 try/except 把失败的一边吞成 ""：那样裁判只听另一边，仍会产出一个
+    # 看着合理的结论，而**没人会发现多头根本没上场**——token 耗尽被伪装成市场判断，
+    # 且在跌势里系统性偏空（多头恰恰是逆境下最容易耗尽的那个）。属 PITFALLS 第一类
+    # 「不报错、只让你相信一个错结论」。宁可这一轮不交易。
     with ThreadPoolExecutor(max_workers=2) as ex:
         bull, bear = list(ex.map(side, ["bull", "bear"]))
     judge = llm._chat(
@@ -134,20 +154,79 @@ DECIDERS: dict[str, Callable[[dict], tuple[list[Intent], str]]] = {
 }
 
 
+_MKT_TTL = 300       # 大盘快照进程内缓存秒数：12 个 agent 看的是**同一个**大盘
+_mkt_cache: tuple[float, str] = (0.0, "")
+_MKT_LOCK = threading.Lock()
+
+# 指数前缀**必须硬编码**：market_prefix 对 000xxx 一律判 sz，而上证在 sh（见 ds.index_quotes 注释）。
+# 只取两条：上证=权重/大盘状态，创业板=成长股情绪。全取 5 条是无谓的 token。
+_IDX_KLINE = {"上证指数": "sh000001", "创业板指": "sz399006"}
+
+
+def _market_block() -> str:
+    """【今日大盘】块：指数点位+结构 / 涨停跌停 / 板块强弱。
+
+    **这里原先传的是一个板块名**（`sector_ranking()[0]["sector"]`），AI 看到的
+    「大盘」字面上就是「传媒」两个字，故 2026-07-16 早盘 8/12 个 agent 报
+    「无法判断市场状态」而拒绝出手——规则库里「市场状态识别」有 8 条规则要读它。
+
+    容错：任一子项失败都降级为缺项，绝不抛异常——大盘取不到不该让整个决策崩掉。
+
+    锁跨网络 I/O：正常 ~4s，最坏 ~65s（各源 timeout 15–20s 之和）。宁可让并行的
+    另外 2 个 worker 等这一次，也好过 3 个 agent 各打一遍同一份大盘数据。
+    """
+    global _mkt_cache
+    with _MKT_LOCK:
+        ts, cached = _mkt_cache
+        if cached and time.time() - ts < _MKT_TTL:
+            return cached
+        try:
+            iq = ds.index_quotes()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("指数行情失败: %s", e)
+            iq = {"indices": [], "amount_liang_yi": None}
+        struct: dict[str, dict | None] = {}
+        for name, sym in _IDX_KLINE.items():
+            try:
+                struct[name] = structure.digest(ds.index_kline(sym))
+            except Exception as e:  # noqa: BLE001
+                logger.warning("指数K线失败 %s: %s", sym, e)
+        try:
+            # 注：涨跌家数子项已因东财 clist 封 IP 恒为 None，仅涨停/跌停(push2ex)可用。
+            mb = ds.market_breadth()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("市场情绪失败: %s", e)
+            mb = {}
+        try:
+            sectors = universe_store.sector_ranking(kind="sw1", limit=5)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("板块排行失败: %s", e)
+            sectors = []
+        out = structure.fmt_market(iq.get("indices") or [], iq.get("amount_liang_yi"),
+                                   struct, mb.get("limit_up"), mb.get("limit_down"), sectors)
+        _mkt_cache = (time.time(), out)
+        return out
+
+
 def _decide_prompt(ctx: dict[str, Any]) -> str:
     cand = "\n".join(
         f"- {r['code']} {r['name']} 现价{r.get('price')} 形态分{r.get('pa_score')} "
         f"波动{r.get('vol')} 区间位置{r.get('range_pos')} 20日涨{r.get('cum20')}% "
-        f"1手{r.get('lot_cost')}元 [{r.get('primary')}/{r.get('sub')}]"
+        f"1手{r.get('lot_cost')}元 [{r.get('primary')}/{r.get('sub')}]\n"
+        f"    {ctx.get('struct', {}).get(r['code'], '无K线数据')}"
         for r in ctx.get("candidates", [])[:20]) or "（无候选）"
     pos = "\n".join(
         f"- {p['code']} {p['name']} {p['shares']}股 可卖{p['sellable']} 成本{p['avg_cost']} 现价{p.get('price')}"
-        f" 浮盈亏{p.get('pnl_pct')}%"
+        f" 浮盈亏{p.get('pnl_pct')}%\n"
+        f"    {ctx.get('struct', {}).get(p['code'], '无K线数据')}"
         for p in ctx.get("positions", [])) or "（空仓）"
     return f"""你在模拟盘上自主交易，今天必须给出买卖意向（可以是「不操作」）。
 
 【账户】可用现金 {ctx['cash']:.2f} 元；总资产 {ctx['total']:.2f} 元
-【今日大盘】{ctx.get('market', '（无）')}
+
+【今日大盘】
+{ctx.get('market') or '（大盘数据缺失）'}
+
 【关注板块】{ctx.get('focus') or '全市场'}
 
 【当前持仓】
@@ -155,6 +234,11 @@ def _decide_prompt(ctx: dict[str, Any]) -> str:
 
 【候选股（已按形态分排序，形态分含波动/资金/动量/区间位置四项）】
 {cand}
+
+> 每只第二行是日K结构：均线 / 近20日高低 / 最近3根K线（`MMDD:开-高-低-收`）。
+> **注意日期**：日K只到**上一交易日**（今日未收盘），而「现价」是当前实时价——
+> 最后一根不是今天。两者要分开看。
+> 趋势、市场状态、信号棒由**你**据这些数据判断——上面不做方向结论。
 
 {ctx.get('blocks', '')}
 
@@ -490,8 +574,9 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
     #                                             否则 AI 会基于未结算的持仓重复下单
     if swept:
         acct = paper_store.get_account(ag["account_id"]) or acct
+    market = _market_block()          # 指数点位+K线结构+涨停跌停+板块强弱（12 个 agent 共享缓存）
     agent_store.log_run(agent_id, today, _ph("研判"),
-                        f"关注板块={focus or '全市场'}"
+                        f"关注板块={focus or '全市场'}；大盘 {len(market)} 字"
                         + (f"；条件单补判触发 {len(swept)} 笔" if swept else ""))
 
     # ② 选股（复用既有 _screen_rows；延迟导入避免循环依赖）
@@ -513,13 +598,20 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
         mv += p["market_value"]
     total = float(acct["cash"]) + mv
 
+    # 候选股 + 持仓的日K结构（规则库 84 条里 37 条要 K线/均线/趋势，原先一条都没给）。
+    # 走 app._safe_kline 的 TTL 缓存：12 个 agent 候选高度重叠，不缓存要打 240 次请求。
+    struct: dict[str, str] = {}
+    for code in codes:
+        struct[code] = structure.fmt_stock(structure.digest(app._safe_kline(code)))
+
     ctx: dict[str, Any] = {
         "cash": float(acct["cash"]), "total": total, "focus": focus,
         "candidates": cands, "positions": positions, "sched": sched,
         "metrics": {c["code"]: c for c in cands},
         "cost_before": {p["code"]: p.get("avg_cost") for p in positions},
         "sector_chg": {}, "blocks": blocks,
-        "market": (universe_store.sector_ranking(kind="sw1", limit=3) or [{}])[0].get("sector", ""),
+        "struct": struct,
+        "market": market,
     }
     # 各候选所属一级板块的当日涨跌（供「逆势」检测）
     day_rank = {r["sector"]: r["avg_chg"] for r in universe_store.sector_ranking(kind="sw1", limit=40)}

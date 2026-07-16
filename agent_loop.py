@@ -27,6 +27,7 @@ from typing import Any, Callable
 
 import agent_store
 import datasources as ds
+import factor_lab
 import fees
 import llm
 import paper_store
@@ -214,8 +215,26 @@ def detect_failures(agent_id: int, ctx: dict[str, Any], filled: list[dict]) -> l
     """扫**客观**失败信号 → 教训库。只记失败，不记成功（成功多为 beta）。
 
     每条都由确定性规则判定，不问 LLM——`range_pos=92 → 追高`是核对事实。
+
+    **有因子数据的属性，教训必须与 `factor_lab.direction()` 一致**（见下）。
     """
     found: list[str] = []
+    # 教训方向必须跟数据走，不跟拍脑袋的阈值走。
+    # 踩过的坑：_pa_score 按 vol 的正向 IC(近60日 t=+6.96) 选出高波动股 → AI 买入
+    # → 这里立刻记「波动失控」→ _lesson_block() 注入 5 个 AI → 教它们避开数据证明
+    # 有效的行为。**系统在惩罚 AI 服从我自己的数据**，且污染用户自己用的 5 个分析。
+    # 故：只有当数据说「该属性不利」(sign<0) 时才记；sign>=0（有利 或 不显著）不记——
+    # 与 _pa_score「方向未知则不参与打分」同一原则：不猜。
+    # 风险由 MAX_VOL 硬门管（风控），教训不重复管、更不该用比风控更严的线。
+    try:
+        dirs = factor_lab.directions()
+    except Exception as e:  # noqa: BLE001 因子库不可用时退化为「不记有因子的那几条」
+        logger.warning("因子方向读取失败，跳过因子类教训: %s", e)
+        dirs = {}
+
+    def bad(factor: str) -> bool:
+        """数据是否判定该属性不利（方向为负）。不显著/无数据 → False（不记）。"""
+        return (dirs.get(factor) or {}).get("sign", 0) < 0
 
     def note(kind: str, ev: Any, code: str = "") -> None:
         if agent_store.add_lesson(agent_id, kind, str(ev), code):
@@ -226,13 +245,13 @@ def detect_failures(agent_id: int, ctx: dict[str, Any], filled: list[dict]) -> l
             continue
         m = ctx["metrics"].get(f["code"]) or {}
         rp = m.get("range_pos")
-        if rp is not None and rp > CHASE_HIGH_POS:
+        if rp is not None and rp > CHASE_HIGH_POS and bad("range_pos"):
             note("chase_high", rp, f["code"])
         vol = m.get("vol")
-        if vol is not None and vol > MAX_VOL * 0.8:
+        if vol is not None and vol > MAX_VOL * 0.8 and bad("vol"):
             note("high_vol_entry", vol, f["code"])
         sec = ctx.get("sector_chg", {}).get(f["code"])
-        if sec is not None and sec < -1.0:
+        if sec is not None and sec < -1.0:   # 板块当日涨跌无因子回测，按硬规则记
             note("against_sector", round(abs(sec), 2), f["code"])
     # 卖出赚不抵费
     for f in filled:

@@ -92,6 +92,26 @@ def test_lesson_kinds_closed_set():
         assert "{v}" in agent_store.LESSON_KINDS[k][1], f"{k} 的模板缺 {{v}} 占位"
 
 
+def test_lesson_must_not_contradict_factor_data():
+    """教训方向必须与因子回测一致 —— 否则会惩罚 AI 服从数据。
+
+    实测踩过：`_pa_score` 按 vol 的正向 IC(t=+6.96) 选出高波动股 → AI 买入 →
+    `detect_failures` 立刻记「波动失控」→ `_lesson_block()` 注入 5 个 AI →
+    教它们避开数据证明有效的行为。**系统在惩罚 AI 服从我自己的数据。**
+    根因：教训阈值(vol>96)是拍的先验，与 162,014 样本的回测结论相反。
+    """
+    import inspect
+    src = inspect.getsource(agent_loop.detect_failures)
+    assert "factor_lab" in src and "directions()" in src, (
+        "detect_failures 未读因子方向 → 教训可能与数据矛盾")
+    assert 'get("sign", 0) < 0' in src, "未按「数据判定该属性不利」门控（sign<0）"
+    # 有因子数据的属性，其 note() 必须挂在方向门后面
+    for kind, factor in (("chase_high", "range_pos"), ("high_vol_entry", "vol")):
+        idx = src.index(f'note("{kind}"')
+        seg = src[max(0, idx - 200):idx]
+        assert f'bad("{factor}")' in seg, f"{kind} 的记录未按 {factor} 的因子方向门控"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

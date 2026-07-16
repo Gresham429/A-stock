@@ -667,7 +667,13 @@ def _safe_tier(t: dict) -> dict:
 def profiles_list():
     prof = profile_store.get_active() or {}
     total, hn = _total_assets()
-    return jsonify({"profiles": profile_store.list_profiles(), "active_id": prof.get("id"),
+    # 画像选择器只列**用户自己的**档；agent 系列（agent-稳健/均衡/激进）是 20 个 agent 的
+    # 风险偏好+费率来源，按 ID 直接取用（不走此列表），故从用户选择器隐藏但**绝不删**。
+    # ?all=1 显示全部（调试/管理 agent 画像用）。
+    show_all = request.args.get("all") == "1"
+    profiles = [p for p in profile_store.list_profiles()
+                if show_all or not str(p.get("name", "")).startswith("agent-")]
+    return jsonify({"profiles": profiles, "active_id": prof.get("id"),
                     "active": prof, "total_assets": round(total, 2), "holdings_n": hn,
                     "tier": _safe_tier(profile_store.tier_of(total)),
                     "tiers": [_safe_tier(t) for t in profile_store.TIERS],

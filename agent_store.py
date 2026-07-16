@@ -322,22 +322,36 @@ def lesson_rollup(limit: int = 8) -> list[dict[str, Any]]:
     return rows
 
 
-def for_ai(limit: int = 6) -> str:
-    """【历史教训】注入块：喂**事实统计**（你犯过 N 次），不是让 AI 改写提示词。
+def for_ai(limit: int = 6, agent_id: int | None = None) -> str:
+    """【历史教训】注入块：喂**事实统计**（犯过 N 次），不是让 AI 改写提示词。
 
     与「用 5 个样本优化提示词」有本质区别——这里是数事实，不是拟合参数。
+
+    **两种作用域**（2026-07-16 用户明确区分）：
+    - `agent_id` 给定 → **只召回该 agent 自己的**教训（个体记忆）。多-agent 对照实验
+      要干净：A 不该被 B 的错误惩罚，否则 12 个 agent 的记忆会收敛到一起。
+    - `agent_id=None` → 跨全体账户汇总（用户面 5 个 AI 用——它们本就该学舰队的集体教训）。
     """
-    rows = lesson_rollup(limit)
+    if agent_id is not None:
+        with _conn() as c:
+            rows = [dict(r) for r in c.execute(
+                "SELECT kind, SUM(hits) hits FROM lessons WHERE agent_id=? "
+                "GROUP BY kind ORDER BY hits DESC LIMIT ?", (agent_id, limit))]
+        scope = "你（本账户）过去"
+    else:
+        rows = lesson_rollup(limit)
+        scope = "模拟盘上全体账户"
     if not rows:
         return ""
-    lines = ["【历史教训（模拟盘上你的真实错误，按发生次数排序；这些是事实统计，不是推测）】"]
+    lines = [f"【历史教训（{scope}的真实错误，按发生次数排序；这些是事实统计，不是推测）】"]
     for r in rows:
-        one = None
+        label = r.get("label") or LESSON_KINDS.get(r["kind"], (r["kind"], ""))[0]
         with _conn() as c:
-            hit = c.execute("SELECT lesson FROM lessons WHERE kind=? ORDER BY hits DESC LIMIT 1",
-                            (r["kind"],)).fetchone()
-            one = hit["lesson"] if hit else ""
-        lines.append(f"- [{r['label']}] 累计 {r['hits']} 次：{one}")
+            # 代表性文案：优先取本 agent 的；跨 agent 时取 hits 最高的那条
+            q = "SELECT lesson FROM lessons WHERE kind=?" + (" AND agent_id=?" if agent_id else "")
+            args = (r["kind"], agent_id) if agent_id else (r["kind"],)
+            hit = c.execute(q + " ORDER BY hits DESC LIMIT 1", args).fetchone()
+        lines.append(f"- [{label}] 累计 {r['hits']} 次：{hit['lesson'] if hit else ''}")
     lines.append("- 以上错误请在本次判断中主动规避；若本次建议可能重蹈其中某条，必须说明为何这次不同。")
     return "\n".join(lines)
 

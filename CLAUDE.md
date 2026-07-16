@@ -60,7 +60,7 @@ python app.py                        # http://127.0.0.1:5000
 `test_universe_store.py`(9) 板块解析 · `test_screen_branches.py`(5) 选股三分支 ·
 `test_agent_gates.py`(10) agent 门+挂单 · `test_factor_lab.py`(6) 因子方向 ·
 `test_structure.py`(12) K线结构摘要 · `test_outcome.py`(12) 结果结算 ·
-`test_excess_dist.py`(14) 超额分布+判罪线 —— **共 68 例**
+`test_excess_dist.py`(14) 超额分布+判罪线 · `test_agent_memory.py`(6) 个体记忆 —— **共 74 例**
 
 ## 数据源 & 坑（改代码前必读）
 
@@ -166,6 +166,11 @@ python app.py                        # http://127.0.0.1:5000
   时段桶=早盘/尾盘，**错过不补**。
 - **限价挂单**：AI 给 `limit_price`，`place()` 挂单不即时成交；`sweep_orders()` 用
   分时(当日)/日K(隔夜)判定触及，**成交价锁 limit 不取更优**。当日有效。
+- **agent 记忆分两层**（2026-07-16）：**个体**——每 agent 决策只召回**自己的**教训
+  (`for_ai(agent_id)`) + **自己的**战绩(`_agent_history_block`：历史建仓+20日超额结果)
+  + 自己持仓；多-agent 对照才干净。**舰队**——用户面 5 个 AI 读**全体**汇总(`for_ai()` 无
+  agent_id)。战绩块**只喂事实不让 agent 写反思**(反思=拟合噪音)。
+  ⏳ **未做**：舰队→提示词提炼(D)，用户最终目标，等教训库有数据再落地。
 
 ## 冒烟测试（改完自测）
 
@@ -177,7 +182,8 @@ python3 tests/test_factor_lab.py         # 因子方向 6 例（改 direction/�
 python3 tests/test_structure.py          # K线结构摘要 12 例（改 structure/决策提示词必跑）
 python3 tests/test_outcome.py            # 结果结算 12 例（改 outcome/地平线/超额必跑）
 python3 tests/test_excess_dist.py        # 超额分布+判罪线 14 例（改判罪/分布必跑）
-# 全部零依赖、离线、不打网络。共 68 例。
+python3 tests/test_agent_memory.py       # 个体记忆 6 例（改 for_ai/战绩块必跑）
+# 全部零依赖、离线、不打网络。共 74 例。
 
 # ⚠️ 改**决策提示词/数据面**后，必须实跑一个 debate 档（single 跑通≠debate 跑通，
 #    辩论是 token 预算最短板；实测踩过两次）：

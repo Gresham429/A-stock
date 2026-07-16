@@ -768,6 +768,36 @@ function adviceHTML(a,model,prov,profile){
 }
 
 /* ── 持仓 ── */
+/* 逐笔明细表：外层一条合并行，展开看每一笔买入 + 对账脚注。
+   每笔的买入费单独算（每笔是独立委托，「不足5元补5元」逐笔叠加），
+   故合并行的「券商持仓盈亏」= Σ每笔(毛 − 本笔买入费) —— 对齐交易软件。 */
+function lotsTable(h){
+  const lv=h.lots_view||[]; if(lv.length<2) return '';
+  const rows=lv.map((l,i)=>`<tr>
+    <td>#${i+1} ${l.date||'—'}${l.is_today?' <span class="td-tag">今日</span>':''}</td>
+    <td>${fmtInt(l.shares)}</td><td>${fmt(l.cost)}</td>
+    <td>${fmtInt(l.amount)}</td>
+    <td title="本笔单独触发最低佣金">${fmt(l.buy_fee)}</td>
+    <td>${fmtInt(l.market_value)}</td>
+    <td class="${clr(l.pnl)}">${sgn(l.pnl)}${fmtInt(l.pnl)}</td>
+    <td class="${clr(l.pnl_broker)}">${sgn(l.pnl_broker)}${fmtInt(l.pnl_broker)}</td></tr>`).join('');
+  return `<div class="lotwrap"><table class="lottab">
+    <thead><tr><th>第几笔·买入日</th><th>股数</th><th>成本价</th><th>买入额</th>
+      <th title="每笔独立收，不足5元补5元">买入费</th><th>现市值</th><th>本笔毛盈亏</th><th>含已付费</th></tr></thead>
+    <tbody>${rows}</tbody></table>
+    <div class="lotfoot">对账：毛盈亏 <b class="${clr(h.pnl_amount)}">${sgn(h.pnl_amount)}${fmtInt(h.pnl_amount)}</b>
+      − 已付买入费 <b>${fmt(h.buy_fee)}</b>（${lv.length} 笔各收最低佣金）
+      = 券商「持仓盈亏」<b class="${clr(h.pnl_broker)}">${sgn(h.pnl_broker)}${fmtInt(h.pnl_broker)} 元</b>
+      · 若现在全部卖出再扣 ${fmt(h.sell_fee_if_now)} 元 → 到手净 <b class="${clr(h.pnl_net)}">${sgn(h.pnl_net)}${fmtInt(h.pnl_net)} 元</b></div></div>`;
+}
+function toggleLots(code){
+  const row=document.getElementById('lots_'+code); if(!row) return;
+  const open=row.classList.toggle('open');
+  const exp=document.querySelector(`.lotexp[onclick*="'${code}'"]`);
+  if(exp) exp.textContent=open?'▾':'▸';
+  LOT_OPEN[code]=open;   // 记住展开态，自动刷新后恢复
+}
+let LOT_OPEN={};
 async function loadPortfolio(){
   let j; try{ j=await (await fetch('/api/portfolio')).json(); }catch(e){return;}
   const s=j.summary||{}, hs=j.holdings||[];
@@ -781,15 +811,18 @@ async function loadPortfolio(){
      +card('持仓', s.count+' 只','','分散度');
   }else ag.innerHTML='<div class="assetCard" style="grid-column:1/-1"><div class="lab">暂无持仓</div><div class="sub muted" style="margin-top:8px">在下方表单录入「代码 + 股数 + 成本价」，即可看总盈亏与当日盈亏，并让 AI 给卖出建议。</div></div>';
   const tb=document.getElementById('folioRows');
-  tb.innerHTML = hs.length ? hs.map(h=>`
+  tb.innerHTML = hs.length ? hs.map(h=>{
+    const nlot=(h.lots_view||[]).length;
+    return `
     <tr>
-      <td class="nm"><div class="n">${h.name||h.code}</div><div class="c">${h.code}</div></td>
+      <td class="nm">${nlot>1?`<span class="lotexp" onclick="toggleLots('${h.code}')" title="展开 ${nlot} 笔买入">▸</span>`:''}<div class="n">${h.name||h.code}</div><div class="c">${h.code}</div></td>
       <td>${fmtInt(h.shares)}</td>
       <td>${fmt(h.cost_price)}</td>
       <td class="${clr(h.chg_pct)}">${fmt(h.price)}</td>
       <td>${fmtInt(h.market_value)}</td>
-      <td class="${clr(h.pnl_pct)}"><b>${h.pnl_pct!=null?sgn(h.pnl_pct)+h.pnl_pct+'%':'—'}</b><div class="small">${sgn(h.pnl_amount)}${fmtInt(h.pnl_amount)}元</div>
-        <div class="small ${clr(h.pnl_net)}" title="扣掉已付买入费 ${fmt(h.buy_fee)} 元 + 现在卖出要付 ${fmt(h.sell_fee_if_now)} 元">净 ${sgn(h.pnl_net)}${fmtInt(h.pnl_net)}元${h.pnl_net_pct!=null?' ('+sgn(h.pnl_net_pct)+h.pnl_net_pct+'%)':''}</div></td>
+      <td class="${clr(h.pnl_pct)}"><b>${h.pnl_pct!=null?sgn(h.pnl_pct)+h.pnl_pct+'%':'—'}</b><div class="small">毛 ${sgn(h.pnl_amount)}${fmtInt(h.pnl_amount)}元</div>
+        <div class="small ${clr(h.pnl_broker)}" title="券商「持仓盈亏」口径=毛 − 已付买入费 ${fmt(h.buy_fee)} 元（不含未发生的卖出费）。这是你交易软件显示的数。">券商 ${sgn(h.pnl_broker)}${fmtInt(h.pnl_broker)}元</div>
+        <div class="small ${clr(h.pnl_net)}" title="净盈亏=毛 − 已付买入费 ${fmt(h.buy_fee)} − 现在卖出要付 ${fmt(h.sell_fee_if_now)}（更保守，连退出成本也扣）">净 ${sgn(h.pnl_net)}${fmtInt(h.pnl_net)}元${h.pnl_net_pct!=null?' ('+sgn(h.pnl_net_pct)+h.pnl_net_pct+'%)':''}</div></td>
       <td class="${clr(h.today_pnl)}"><b>${h.today_pnl!=null?(h.today_pnl>=0?'+':'')+fmtInt(h.today_pnl):'—'}</b><div class="small ${clr(h.chg_pct)}">${sgn(h.chg_pct)}${fmt(h.chg_pct)}%</div></td>
       <td>${h.buy_date||'—'}</td>
       <td class="acts">
@@ -797,7 +830,16 @@ async function loadPortfolio(){
         <button class="mini" onclick="openDetail('${h.code}')">深挖</button>
         <button class="mini danger" onclick="delHolding('${h.code}','${(h.name||h.code)}')">清仓</button>
       </td>
-    </tr><tr class="advrow" id="adv_${h.code}"><td colspan="9"></td></tr>`).join('') : '';
+    </tr>
+    <tr class="lotrow" id="lots_${h.code}"><td colspan="9">${lotsTable(h)}</td></tr>
+    <tr class="advrow" id="adv_${h.code}"><td colspan="9"></td></tr>`;}).join('') : '';
+  // 刷新会重建行 → 恢复已展开的逐笔明细（展开态存在 LOT_OPEN）
+  hs.forEach(h=>{
+    if(LOT_OPEN[h.code]){
+      const row=document.getElementById('lots_'+h.code); if(row) row.classList.add('open');
+      const exp=document.querySelector(`.lotexp[onclick*="'${h.code}'"]`); if(exp) exp.textContent='▾';
+    }
+  });
   // 刷新会重建上面的行 → 把已展开的「何时卖」建议重新注入，避免一闪而过被清掉
   const codes=new Set(hs.map(h=>h.code));
   Object.keys(FOLIO_ADV).forEach(code=>{

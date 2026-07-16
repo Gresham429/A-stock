@@ -199,12 +199,29 @@ def with_pnl(quotes: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
         pnl_net = round(pnl_amount - buy_fee - sell_fee, 2)
         pnl_net_pct = round(pnl_net / cost_value * 100, 2) if cost_value > 0 else None
         today_pnl = 0.0
+        lots_view = []
         for lot in lots:
             ls = float(lot.get("shares") or 0)
+            lc = float(lot.get("cost") or 0)
+            is_today = (lot.get("date") or "") == today
             # 今天买的 → 基准=买入价；之前持有的 → 基准=昨收
-            base = float(lot.get("cost") or 0) if (lot.get("date") or "") == today else last_close
+            base = lc if is_today else last_close
             if base:
                 today_pnl += (price - base) * ls
+            # 逐笔动态计算：每笔是**独立的一次委托**，故买入费按本笔金额单独算——
+            # 这就是「不足 5 元补 5 元」逐笔叠加的地方（拆 2 笔 = 2×5 元）。
+            amt = round(ls * lc, 2)
+            lot_buy_fee = fees.total("buy", amt, sched)
+            lot_mv = round(price * ls, 2)
+            lots_view.append({
+                "date": lot.get("date") or "", "shares": ls, "cost": lc,
+                "amount": amt, "buy_fee": round(lot_buy_fee, 2),
+                "market_value": lot_mv,
+                "pnl": round(lot_mv - amt, 2),                    # 本笔毛盈亏
+                "pnl_broker": round(lot_mv - amt - lot_buy_fee, 2),  # 本笔「含已付买入费」
+                "today_pnl": round((price - base) * ls, 2) if base else None,
+                "is_today": is_today,
+            })
         out.append({
             **h,
             "name": q.get("name", h["code"]),
@@ -213,6 +230,10 @@ def with_pnl(quotes: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
             "market_value": market_value,
             "buy_fee": round(buy_fee, 2), "sell_fee_if_now": round(sell_fee, 2),
             "pnl_net": pnl_net, "pnl_net_pct": pnl_net_pct,
+            # 券商口径的「持仓盈亏」= 毛 − **已付**买入费（不含未发生的卖出费）。
+            # 你交易软件显示的就是这个数；净盈亏比它更保守（连卖出费也扣了）。
+            "pnl_broker": round(pnl_amount - buy_fee, 2),
+            "lots_view": lots_view,
             "cost_value": cost_value,
             "pnl_amount": pnl_amount,
             "pnl_pct": pnl_pct,
@@ -240,6 +261,8 @@ def summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "pnl_pct": round((mv / cv - 1) * 100, 2) if cv > 0 else None,
         "pnl_net": round(net, 2),
         "pnl_net_pct": round(net / cv * 100, 2) if cv > 0 else None,
+        # 券商口径合计（毛 − 已付买入费）：对齐交易软件的「持仓盈亏」
+        "pnl_broker": round(mv - cv - fee_paid, 2),
         "fee_paid": round(fee_paid, 2), "fee_if_sell_all": round(fee_todo, 2),
         "today_pnl": round(today, 2),
         "today_pnl_pct": round(today / (mv - today) * 100, 2) if (mv - today) > 0 else None,

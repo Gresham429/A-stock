@@ -301,8 +301,8 @@ function maChips(){
 }
 function waveSeries(period){
   const W=WAVE||{};
-  if(period==='day') return {pts:(W.intraday||[]).map(p=>({label:p.t,value:p.price})), base:W.prev_close, kind:'intra'};
-  if(period==='5d')  return {pts:(W.min5||[]).map(p=>({label:p.t,value:p.close})), base:null, kind:'intra'};
+  if(period==='day') return {pts:(W.intraday||[]).map(p=>({label:p.t,value:p.price,avg:p.avg})), base:W.prev_close, kind:'intra'};
+  if(period==='5d')  return {pts:(W.min5||[]).map(p=>({label:p.t,value:p.close,avg:p.avg})), base:null, kind:'intra'};
   const c=_daysAgo(WAVE_WINDOW[period]||365);
   return {bars:_dailyWithMA().filter(x=>x.date>=c), base:null, kind:'daily'};
 }
@@ -333,9 +333,9 @@ function waveStats(series,period){
 function waveCap(period){
   if(period==='day'){
     const ts=WAVE&&WAVE._minTs?` · 刷新于 ${WAVE._minTs}`:'';
-    return '当日分时：逐分钟成交价，横向虚线=昨收基准。红涨绿跌，鼠标移上去看该分钟价与涨跌%。交易时段每30s自动刷新'+ts+'。';
+    return '当日分时：逐分钟成交价（红涨绿跌），横向虚线=昨收基准，<b style="color:#f0a020">橙线=当日均价(VWAP)</b>——价在均价上方=分时偏强。日线 MA 不适用于分钟数据，故此处用均价线。鼠标移上去看该分钟价/均价/涨跌%。交易时段每30s自动刷新'+ts+'。';
   }
-  if(period==='5d') return '近 5 交易日 5 分钟线。鼠标移到线上看每根具体价。';
+  if(period==='5d') return '近 5 交易日 5 分钟线，<b style="color:#f0a020">橙线=每日均价(VWAP，逐日重置)</b>。日线 MA 不适用于分钟数据，故用均价线。鼠标移到线上看每根具体价/均价。';
   return '日K蜡烛：实体=开盘↔收盘（红阳/绿阴），影线=最高/最低价；上方勾选 MA5/10/20/60/120/240（短中长期均线，颜色对应线），下方为成交量柱。鼠标移上去看当日 OHLC / 成交量(手) / 换手率(近似，成交量÷流通股本)；年化波动由区间内日收益率折算。';
 }
 function renderWave(){
@@ -372,12 +372,17 @@ function renderWavePeriod(){
 }
 function waveChart(series){
   const pts=series.pts,n=pts.length,vals=pts.map(p=>p.value);
+  const avgVals=pts.map(p=>p.avg).filter(v=>v!=null);
+  const hasAvg=avgVals.length>1;
   const W=640,H=200,padL=48,padR=10,padT=12,padB=22,plotW=W-padL-padR,plotH=H-padT-padB;
-  let min=Math.min(...vals),max=Math.max(...vals);
+  // 均价线纳入取值范围，避免被裁掉
+  let min=Math.min(...vals,...(hasAvg?avgVals:[])),max=Math.max(...vals,...(hasAvg?avgVals:[]));
   const pad=(max-min)*0.06||max*0.01||1; min-=pad; max+=pad; const rng=max-min||1;
   const xOf=i=> padL+(n>1? i*plotW/(n-1):plotW/2);
   const yOf=v=> padT+(max-v)/rng*plotH;
   const line=pts.map((p,i)=>`${xOf(i).toFixed(1)},${yOf(p.value).toFixed(1)}`).join(' ');
+  // 均价线(VWAP)：分时/5日的「均线」——日线 MA 不适用于分钟数据
+  const avgLine=hasAvg?pts.map((p,i)=>p.avg!=null?`${xOf(i).toFixed(1)},${yOf(p.avg).toFixed(1)}`:'').filter(Boolean).join(' '):'';
   const base=series.base!=null?series.base:vals[0];
   const up=vals[n-1]>=base, col=up?'var(--up)':'var(--down)', fill=up?'rgba(255,77,94,.08)':'rgba(34,201,139,.08)';
   const baseY=(base>=min&&base<=max)?yOf(base):null;
@@ -385,6 +390,7 @@ function waveChart(series){
   return `<svg viewBox="0 0 ${W} ${H}" onmousemove="waveHover(event)" onmouseleave="waveHoverEnd()">
     <polygon points="${padL},${padT+plotH} ${line} ${padL+plotW},${padT+plotH}" fill="${fill}"/>
     ${baseY!=null?`<line x1="${padL}" y1="${baseY.toFixed(1)}" x2="${padL+plotW}" y2="${baseY.toFixed(1)}" stroke="var(--line2)" stroke-dasharray="4 3"/>`:''}
+    ${avgLine?`<polyline points="${avgLine}" fill="none" stroke="#f0a020" stroke-width="1.2" opacity=".9"/>`:''}
     <polyline points="${line}" fill="none" stroke="${col}" stroke-width="1.6"/>
     <line id="wave_cross" x1="0" y1="${padT}" x2="0" y2="${padT+plotH}" stroke="var(--gold)" stroke-width="1" stroke-dasharray="3 3" style="display:none"/>
     <circle id="wave_dot" r="3.2" fill="var(--gold)" stroke="#05070b" stroke-width="1" style="display:none"/>
@@ -407,7 +413,8 @@ function waveHover(e){
   const base=ctx.base!=null?ctx.base:ctx.pts[0].value;
   const chg=base?(p.value-base)/base*100:0;
   const tip=document.getElementById('tip');
-  tip.innerHTML=`${p.label}　<b>${p.value.toFixed(2)}</b>　<span style="color:${chg>=0?'#ff4d5e':'#22c98b'}">${sgn(chg)}${chg.toFixed(2)}%</span>`;
+  tip.innerHTML=`${p.label}　<b>${p.value.toFixed(2)}</b>　<span style="color:${chg>=0?'#ff4d5e':'#22c98b'}">${sgn(chg)}${chg.toFixed(2)}%</span>`
+    +(p.avg!=null?`　<span style="color:#f0a020">均价 ${p.avg.toFixed(2)}</span>`:'');
   tip.style.display='block';
   tip.style.left=Math.min(e.clientX+14, window.innerWidth-tip.offsetWidth-14)+'px';
   tip.style.top=(e.clientY+16)+'px';

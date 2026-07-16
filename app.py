@@ -433,6 +433,26 @@ def kline(code: str):
                     "kline": ds.sina_kline(ds.normalize(code), num=120)})
 
 
+def _min5_with_avg(min5: list[dict]) -> list[dict]:
+    """5日 5 分钟线 + **按天重置的均价线(VWAP)**。
+
+    多日分时图的均价线每天开盘重新累计（跨天连续累计无意义）。用 close×volume 近似
+    成交额（sina 5min 不单给成交额）。volume 缺失则该点 avg=None，不外推。
+    """
+    out, cum_amt, cum_vol, cur_day = [], 0.0, 0.0, ""
+    for k in min5:
+        day = str(k.get("date", ""))[:10]
+        if day != cur_day:      # 跨天 → 重置累计
+            cum_amt, cum_vol, cur_day = 0.0, 0.0, day
+        vol = float(k.get("volume") or 0)
+        close = float(k.get("close") or 0)
+        cum_amt += close * vol
+        cum_vol += vol
+        out.append({"t": k["date"], "close": k["close"],
+                    "avg": round(cum_amt / cum_vol, 3) if cum_vol > 0 else None})
+    return out
+
+
 @app.route("/api/wave/<code>")
 def wave(code: str):
     """波动多周期：当日分时 + 5日(5分钟) + 日K(~260, 供30/60/当季/当年切片) + 昨收基准。
@@ -456,7 +476,7 @@ def wave(code: str):
         "float_shares": (q.get("float_mcap_yi") * 1e8 / q.get("price"))
                         if q.get("float_mcap_yi") and q.get("price") else None,
         "intraday": intraday,
-        "min5": [{"t": k["date"], "close": k["close"]} for k in min5],
+        "min5": _min5_with_avg(min5),
         "daily": [{"date": k["date"], "open": k["open"], "high": k["high"],
                    "low": k["low"], "close": k["close"], "volume": k["volume"]}
                   for k in daily],

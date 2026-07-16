@@ -58,6 +58,8 @@ from ai_blocks import (  # noqa: E402,F401
     _total_assets, _tier_block, _record_basis_stats, _lesson_block, _agent_blocks,
     _fee_block, _macro_block, _profile_block, _ai_web_context,
 )
+# 交易时段判定移到 agent_loop（与 current_slot 同源）；带回以保持路由调用点不变。
+from agent_loop import _market_open  # noqa: E402,F401
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -318,18 +320,6 @@ def rules_scenario():
 
 
 # ── 模拟委托交易（多存档，按真实行情+A股规则撮合） ────────────────────────
-def _market_open() -> bool:
-    """A股是否在交易时段（9:30–11:30 / 13:00–15:00，北京时间）。
-
-    **必须用 Asia/Shanghai，不能用本地时区** —— 前端 `_cnTradingNow` 早就这么做了，
-    后端此前用 `datetime.now()`（本地），机器不在北京时区就会错判整个交易时段
-    （本机恰好是 CST 故未暴露）。撮合门控依赖它，判错 = agent 在错的时间下单/不下单。
-    """
-    now = datetime.now(ZoneInfo("Asia/Shanghai"))
-    if not news_store.is_trading_day(now.date()):
-        return False
-    t = now.hour * 60 + now.minute
-    return (9 * 60 + 30) <= t <= (11 * 60 + 30) or (13 * 60) <= t <= (15 * 60)
 
 
 def _account_summary(acct: dict, quotes: dict) -> dict:

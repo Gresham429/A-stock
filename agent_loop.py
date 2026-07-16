@@ -30,6 +30,7 @@ from zoneinfo import ZoneInfo
 
 import agent_store
 import ai_blocks
+import news_store
 import datasources as ds
 import factor_lab
 import fees
@@ -68,13 +69,31 @@ SLOTS: tuple[tuple[str, int, int], ...] = (
 
 
 def current_slot() -> str:
-    """当前所处的交易时段桶；非交易时段返回空串。用北京时间（同 app._market_open）。"""
+    """当前所处的交易时段桶；非交易时段返回空串。用北京时间（同 `_market_open`）。"""
     now = datetime.now(ZoneInfo("Asia/Shanghai"))
     t = now.hour * 60 + now.minute
     for name, lo, hi in SLOTS:
         if lo <= t <= hi:
             return name
     return ""
+
+
+def _market_open() -> bool:
+    """A股是否在交易时段（9:30–11:30 / 13:00–15:00，北京时间）。
+
+    **必须用 Asia/Shanghai，不能用本地时区** —— 前端 `_cnTradingNow` 早就这么做了，
+    后端此前用 `datetime.now()`（本地），机器不在北京时区就会错判整个交易时段
+    （本机恰好是 CST 故未暴露）。撮合门控依赖它，判错 = agent 在错的时间下单/不下单。
+
+    （2026-07-16 从 app.py 移来：它是交易时段逻辑、与 `current_slot` 同源，且 agent_loop
+    是它的主要调用方。移来后 agent_loop 不再需要 `import app`，循环依赖彻底消除。
+    app.py 的 paper 路由改从 agent_loop 引用。）
+    """
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    if not news_store.is_trading_day(now.date()):
+        return False
+    t = now.hour * 60 + now.minute
+    return (9 * 60 + 30) <= t <= (11 * 60 + 30) or (13 * 60) <= t <= (15 * 60)
 
 
 @dataclass(frozen=True)
@@ -740,8 +759,7 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
                         + (f"；建仓结算 {len(graded)} 笔" if graded else ""),
                         detail={"graded": graded} if graded else None)
 
-    # ② 选股（复用既有 _screen_rows；延迟导入避免循环依赖）
-    import app
+    # ② 选股（复用 screening._screen_rows）
     cands = screening._screen_rows(float(acct["cash"]), focus)[:20]
     agent_store.log_run(agent_id, today, _ph("选股"), f"候选 {len(cands)} 只 focus={focus}")
 
@@ -801,7 +819,7 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
 
     # ④ 风控 + ⑤ 下单
     placed, rejected = [], []
-    market_open = app._market_open()   # 交易时段门控（app 已有实现，复用）
+    market_open = _market_open()        # 交易时段门控
     for it in intents:
         ok, why = risk_check(it, ctx)
         if not ok:
@@ -868,7 +886,6 @@ def run_all(dry_run: bool = False, blocks: str = "", force: bool = False,
 
     **非交易日直接跳过**：周末/节假日没有行情，跑了只会拿昨收当今价、产生假决策。
     """
-    import news_store
     if not force and not news_store.is_trading_day():
         logger.info("非交易日，agent 日循环跳过")
         return [{"ok": True, "skipped": "非交易日"}]
@@ -877,8 +894,7 @@ def run_all(dry_run: bool = False, blocks: str = "", force: bool = False,
         return []
     slot = current_slot()
     if require_open and not dry_run and not force:
-        import app
-        if not app._market_open() or not slot:
+        if not _market_open() or not slot:
             fired = []
             for ag in agents:      # 非交易时段仍补判条件单：补的是**历史**已发生的触发
                 try:

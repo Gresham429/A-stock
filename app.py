@@ -1297,9 +1297,16 @@ def api_sector_detail(name: str):
 @app.route("/api/factors")
 def api_factors():
     """因子回测结果：IC 均值/t值/胜率 + 当前方向 + 失效报警 + 容量。"""
+    stale, lag = factor_lab.is_stale()
     return jsonify({"summary": factor_lab.summary(),
                     "directions": factor_lab.directions(),
                     "alerts": factor_lab.decay_alert(),
+                    "history": factor_lab.direction_history(limit=20),
+                    "flip_rate": factor_lab.flip_rate(),
+                    "freshness": {"last_ic": factor_lab.last_ic_date(), "lag_days": lag,
+                                  "stale": stale,
+                                  "note": f"IC 天然滞后 {max(factor_lab.HORIZONS)} 个交易日"
+                                          "（今日因子值要等未来收益才能算 IC）"},
                     "status": factor_lab.status()})
 
 
@@ -1463,6 +1470,10 @@ def _universe_boot() -> None:
         agent_store.purge()
         factor_lab.init()
         factor_lab.purge()
+        # 因子 IC 惰性自动刷新：过期才重跑(14s)。判过期已扣除 IC 的 20 交易日结构性滞后
+        r = factor_lab.refresh_if_stale()
+        if r.get("skipped"):
+            logger.info("因子 IC: %s", r["skipped"])
         _agent_boot()
     except (OSError, ValueError, sqlite3.Error) as e:
         logger.warning("全市场池预热失败（不影响其余功能）: %s", e)

@@ -59,6 +59,12 @@ CREATE TABLE IF NOT EXISTS runs(
   id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT,
   stocks INTEGER, days INTEGER, samples INTEGER, note TEXT
 );
+CREATE TABLE IF NOT EXISTS direction_log(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT, factor TEXT, horizon INTEGER,
+  sign INTEGER, basis TEXT, t_stat REAL, prev_sign INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_dlog_factor ON direction_log(factor, horizon);
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
 """
 
@@ -418,3 +424,99 @@ def backtest_stops(n_stocks: int = 200, hold_days: int = 20, workers: int = 8) -
         })
     return {"ok": True, "stocks": len(series), "hold_days": hold_days,
             "samples": len(res[STOP_GRID[0]]), "grid": out}
+
+
+# ── 自动刷新 + 方向留痕 ────────────────────────────────────────────────────
+MAX_LAG_DAYS = 5     # ic_daily 落后超过这么多**自然日**就重跑（回测仅 14s，宁可勤快）
+
+
+def last_ic_date() -> str:
+    try:
+        with _conn() as c:
+            r = c.execute("SELECT MAX(date) d FROM ic_daily").fetchone()
+        return (r["d"] or "") if r else ""
+    except sqlite3.Error:
+        return ""
+
+
+def is_stale(max_lag_days: int = MAX_LAG_DAYS) -> tuple[bool, int]:
+    """IC 是否过期。返回 (过期?, 落后天数)。
+
+    **IC 天然滞后 max(HORIZONS)=20 个交易日**：今日的因子值要等 20 天后才知道未来
+    20 日收益，故最新可算的 IC 永远是 `today - 20 交易日`。判过期时必须把这段
+    结构性滞后算进去，否则会误判为"永远过期"、每次启动都重跑。
+    """
+    last = last_ic_date()
+    if not last:
+        return True, 9999
+    lag = (date_cls.today() - date_cls.fromisoformat(last)).days
+    structural = int(max(HORIZONS) * 1.5)   # 20 交易日 ≈ 30 自然日
+    return lag > structural + max_lag_days, lag
+
+
+def refresh_if_stale(n_stocks: int = 300) -> dict[str, Any]:
+    """惰性刷新：IC 过期才重跑（14s）。供 app 启动时后台调用。
+
+    **不做增量**：全量重跑仅 14s，而增量要处理「哪天该补算」的边界，复杂度不值。
+    """
+    stale, lag = is_stale()
+    if not stale:
+        return {"ok": True, "skipped": f"IC 未过期（最新 {last_ic_date()}，落后 {lag} 天）"}
+    logger.info("因子 IC 已过期（最新 %s，落后 %d 天），重跑回测…", last_ic_date(), lag)
+    before = {f: (direction(f) or {}).get("sign", 0) for f in FACTORS}
+    r = backtest(n_stocks)
+    if r.get("ok"):
+        log_directions(before)
+    return r
+
+
+def log_directions(prev: dict[str, int] | None = None) -> list[dict[str, Any]]:
+    """把当前方向留痕（**只在变化时记**）。返回本次发生的变更。
+
+    留痕的意义：方向翻转是 regime 切换的证据，也是「这个因子稳不稳」的证据——
+    若某因子一个月翻 5 次，它就是噪音，不该参与打分（`flip_rate()` 可查）。
+    """
+    prev = prev or {}
+    changed = []
+    now = datetime.now().isoformat(timespec="seconds")
+    with _LOCK, _conn() as c:
+        for f in FACTORS:
+            d = direction(f)
+            p = prev.get(f)
+            if p is not None and p == d["sign"]:
+                continue          # 没变，不记 —— 表里只留拐点
+            c.execute("INSERT INTO direction_log(ts,factor,horizon,sign,basis,t_stat,prev_sign) "
+                      "VALUES(?,?,10,?,?,?,?)",
+                      (now, f, d["sign"], d.get("basis", ""), d.get("t", 0.0), p))
+            changed.append({"factor": f, "from": p, "to": d["sign"], "basis": d.get("basis")})
+    if changed:
+        logger.info("因子方向变更: %s", changed)
+    return changed
+
+
+def direction_history(factor: str = "", limit: int = 30) -> list[dict[str, Any]]:
+    sql = "SELECT * FROM direction_log"
+    args: list[Any] = []
+    if factor:
+        sql += " WHERE factor=?"
+        args.append(factor)
+    sql += " ORDER BY id DESC LIMIT ?"
+    args.append(limit)
+    with _conn() as c:
+        return [dict(r) for r in c.execute(sql, args)]
+
+
+def flip_rate(days: int = 180) -> list[dict[str, Any]]:
+    """各因子近 N 日的方向翻转次数 —— **翻得越勤越不可信**。
+
+    实测（2024-02~2026-06，505 个交易日、每日滚动）：vol/cum20 各翻 1 次、
+    range_pos 翻 2 次 —— 说明 `|t|>2 + 60日窗口` 本身已足够稳，**不需要额外迟滞**
+    （加迟滞是没证据的复杂度）。此函数用于持续监控这个前提是否仍成立。
+    """
+    since = (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
+    with _conn() as c:
+        rows = [dict(r) for r in c.execute(
+            "SELECT factor, COUNT(*) n FROM direction_log WHERE ts >= ? AND prev_sign IS NOT NULL "
+            "GROUP BY factor", (since,))]
+    return [{"factor": r["factor"], "flips": r["n"], "days": days,
+             "verdict": "稳定" if r["n"] <= 3 else "⚠️ 翻转频繁，疑为噪音"} for r in rows]

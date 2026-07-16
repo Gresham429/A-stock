@@ -3,7 +3,7 @@
 设计见 `plan/2026-07-16-agent-evolution-design.md`。
 
     盘前 ① 研判(指数点位+K线结构+涨停跌停+板块强弱) → 大盘块 + 关注板块
-    盘中 ② 选股(复用 app._screen_rows + _pa_score) → 候选
+    盘中 ② 选股(复用 screening._screen_rows + _pa_score) → 候选
          ③ 决策(**可插拔**: SingleDecider / DebateDecider) → 买卖意向
          ④ 风控(确定性检查，可否决) → 放行的单
          ⑤ 下单(paper_store 真实撮合: 整手/涨跌停/T+1/**该账户的真实费率**)
@@ -740,7 +740,7 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
 
     # ② 选股（复用既有 _screen_rows；延迟导入避免循环依赖）
     import app
-    cands = app._screen_rows(float(acct["cash"]), focus)[:20]
+    cands = screening._screen_rows(float(acct["cash"]), focus)[:20]
     agent_store.log_run(agent_id, today, _ph("选股"), f"候选 {len(cands)} 只 focus={focus}")
 
     # 持仓 + 行情
@@ -758,10 +758,10 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
     total = float(acct["cash"]) + mv
 
     # 候选股 + 持仓的日K结构（规则库 84 条里 37 条要 K线/均线/趋势，原先一条都没给）。
-    # 走 app._safe_kline 的 TTL 缓存：12 个 agent 候选高度重叠，不缓存要打 240 次请求。
+    # 走 screening._safe_kline 的 TTL 缓存：12 个 agent 候选高度重叠，不缓存要打 240 次请求。
     struct: dict[str, str] = {}
     for code in codes:
-        struct[code] = structure.fmt_stock(structure.digest(app._safe_kline(code)))
+        struct[code] = structure.fmt_stock(structure.digest(screening._safe_kline(code)))
 
     ctx: dict[str, Any] = {
         "cash": float(acct["cash"]), "total": total, "focus": focus,

@@ -35,6 +35,7 @@ import fees
 import llm
 import paper_store
 import profile_store
+import outcome
 import structure
 import universe_store
 
@@ -161,6 +162,9 @@ _MKT_LOCK = threading.Lock()
 # 指数前缀**必须硬编码**：market_prefix 对 000xxx 一律判 sz，而上证在 sh（见 ds.index_quotes 注释）。
 # 只取两条：上证=权重/大盘状态，创业板=成长股情绪。全取 5 条是无谓的 token。
 _IDX_KLINE = {"上证指数": "sh000001", "创业板指": "sz399006"}
+
+HORIZONS = outcome.HORIZONS   # (5,10,20)，跟 factor_lab 走
+_BENCH_SYM = "sh000001"       # 超额基准=上证。日K永远可回溯、无缺口（板块基准做不到）
 
 
 def _market_block() -> str:
@@ -483,6 +487,66 @@ def _touched(code: str, side: str, limit: float, since_t: str, same_day: bool) -
         return False, "", 0.0
 
 
+def _sector_bars(sector: str, entry_date: str) -> list[dict[str, Any]]:
+    """把 `sector_daily` 的每日均涨跌**复利**成一条伪 K 线（只有 close 有意义）。
+
+    板块没有现成指数可用（东财板块指数走 clist，已封 IP —— PITFALLS#14）。
+    ⚠️ 两个已知限制，故板块超额只作**附加**、缺了不影响主标签：
+      · `sector_daily` **只有 2 天历史**（2026-07-15 起才有），无法回溯；
+      · 它靠「每交易日开 app」写入，漏一天即断档 —— 断档会让复利跨过缺失日，
+        算出的收益偏差不可控。故**发现断档就整个放弃**，不给半真的数。
+    """
+    if not sector:
+        return []
+    rows = universe_store.sector_history(sector, days=max(HORIZONS) + 40)
+    rows = [r for r in rows if r["date"] >= entry_date]
+    if not rows or rows[0]["date"] != entry_date:
+        return []                       # 建仓日当天没有板块统计 → 没有基准起点
+    bars, nav = [], 100.0
+    for i, r in enumerate(rows):
+        if i:                           # 第 0 根 = 建仓日基点，其涨跌属于建仓日之前
+            nav *= 1 + (r["avg_chg"] or 0) / 100
+        bars.append({"date": r["date"], "close": round(nav, 4)})
+    return bars
+
+
+def settle_entries(agent_id: int) -> list[dict[str, Any]]:
+    """结算建仓留痕：5/10/20 交易日后算**超额**收益。**只算不判罪**。
+
+    这是「学失败」链路从「买入时长得像错」转向「事后证明错」的那一步。
+    为什么原来错：`chase_high` 的文案写着「此后回落」，却在成交同一循环里就记，
+    那时「此后」还没发生（`detect_failures` 传的是 `settled["filled"]`）。
+
+    **补跑合法**：走日K = 既成事实，同 `sweep_orders`/`sweep_conditions`
+    （PITFALLS#3 明确允许）。不是重建决策环境，无未来函数。
+
+    幂等：同一条会被反复扫到（r5 先到、r20 后到）；20 日档出齐才落 `settled_at`。
+    """
+    out = []
+    for e in agent_store.open_entries(agent_id):
+        try:
+            bars = ds.sina_kline(e["code"], num=max(HORIZONS) + 40)
+            if not bars:
+                continue
+            stock = outcome.forward_returns(bars, e["entry_date"], e["entry_price"])
+            idx = outcome.bench_returns(ds.index_kline(_BENCH_SYM,
+                                                       num=max(HORIZONS) + 40), e["entry_date"])
+            x = outcome.excess(stock, idx)
+            s = outcome.excess(stock, outcome.bench_returns(
+                _sector_bars(e["sector"] or "", e["entry_date"]), e["entry_date"]))
+            rets: dict[str, float | None] = {}
+            for h in HORIZONS:
+                rets[f"r{h}"], rets[f"x{h}"], rets[f"s{h}"] = stock[h], x[h], s[h]
+            done = stock[max(HORIZONS)] is not None      # 最长档出了 = 这条结清
+            agent_store.update_entry(e["id"], rets, done)
+            if done:
+                out.append({"code": e["code"], "entry_date": e["entry_date"],
+                            **{k: v for k, v in rets.items() if v is not None}})
+        except Exception as ex:  # noqa: BLE001 单条结算失败不该拖垮整轮
+            logger.warning("建仓结算失败 %s %s: %s", e["code"], e["entry_date"], ex)
+    return out
+
+
 def sweep_orders(agent_id: int) -> dict[str, list]:
     """判定该 agent 所有在挂委托：触及则成交，隔日未成交则作废（A股当日有效）。
 
@@ -515,6 +579,15 @@ def sweep_orders(agent_id: int) -> dict[str, list]:
                 agent_store.add_condition(agent_id, o["code"], o["name"], "stop_loss",
                                           round(px * (1 + STOP_LOSS_PCT / 100), 3),
                                           o["shares"], note=f"建仓价 {px} 的 {STOP_LOSS_PCT}%")
+                # 建仓留痕：**只记事实、不判罪**。5/10/20 交易日后由 settle_entries 结算超额。
+                # 快照取**挂单时存下的**（决策那一刻 AI 看到的），不在这里重取——
+                # 此处 ctx 尚未构建（sweep 跑在选股之前），且事后重取会拿到已经变了的值。
+                try:
+                    snap = json.loads(o.get("snap") or "{}")
+                except (TypeError, ValueError):
+                    snap = {}
+                agent_store.add_entry(agent_id, o["code"], o["name"] or o["code"],
+                                      o["placed_date"], px, o["shares"], snap)
             else:
                 agent_store.cancel_conditions(agent_id, o["code"])
         else:
@@ -572,12 +645,15 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
     swept = sweep_conditions(agent_id)          # 先补判条件单（app 关闭期间可能已触发）
     settled = sweep_orders(agent_id)            # 再结算在挂委托 —— **必须在决策之前**，
     #                                             否则 AI 会基于未结算的持仓重复下单
+    graded = settle_entries(agent_id)           # 建仓留痕结算（走日K，与当前时段无关）
     if swept:
         acct = paper_store.get_account(ag["account_id"]) or acct
     market = _market_block()          # 指数点位+K线结构+涨停跌停+板块强弱（12 个 agent 共享缓存）
     agent_store.log_run(agent_id, today, _ph("研判"),
                         f"关注板块={focus or '全市场'}；大盘 {len(market)} 字"
-                        + (f"；条件单补判触发 {len(swept)} 笔" if swept else ""))
+                        + (f"；条件单补判触发 {len(swept)} 笔" if swept else "")
+                        + (f"；建仓结算 {len(graded)} 笔" if graded else ""),
+                        detail={"graded": graded} if graded else None)
 
     # ② 选股（复用既有 _screen_rows；延迟导入避免循环依赖）
     import app
@@ -648,8 +724,15 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
             continue
         # **挂单，不即时成交** —— 下个 slot / 次日开 app 时用分时或日K判定是否触及
         now_t = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%H:%M")
+        # 决策时刻的属性快照跟着委托走：成交后转存 entries，5/10/20 日后结算时回头看它。
+        # 只对买入留痕——判的是「建仓决策」；卖出的结果由 below_breakeven 当场核对。
+        m = ctx["metrics"].get(it.code) or {}
+        snap = {"range_pos": m.get("range_pos"), "vol": m.get("vol"),
+                "cum20": m.get("cum20"), "pa_score": m.get("pa_score"),
+                "sector": m.get("primary") or "",
+                "sector_chg": ctx.get("sector_chg", {}).get(it.code)} if it.side == "buy" else {}
         agent_store.place(agent_id, it.code, it.name, it.side, it.limit_price,
-                          it.shares, now_t, it.reason)
+                          it.shares, now_t, it.reason, snap)
         placed.append({"code": it.code, "side": it.side, "shares": it.shares,
                        "limit": it.limit_price, "t": now_t})
         # 挂单即冻结资金（按限价），避免同一轮里多笔委托超额占用

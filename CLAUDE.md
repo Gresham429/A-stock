@@ -53,12 +53,13 @@ python app.py                        # http://127.0.0.1:5000
 | `factor_lab.py` | **因子回测与失效监控**(`data/factors.db`)：`backtest`(299只×600日=162,014样本/14s) + `summary`(IC/t值) + **`direction()`动态定方向** + `rolling_ic`/`decay_alert`/`flip_rate` + `refresh_if_stale` + `backtest_stops`(止损网格) |
 | `agent_store.py` | **Agent 持久层**(`data/agents.db`)：`agents`/`runs`(原文90天·结论365天) / **`lessons`(闭集9类)** / `pending`(限价挂单) / `conditions`(止损) / `claims`(时段原子占位) / `equity` |
 | `agent_loop.py` | **日循环**：研判(`_market_block` 指数+K线结构+涨停跌停+板块强弱)→选股→**决策(可插拔 single/debate)**→风控(确定性硬门)→**挂单**→复盘(确定性失败检测)。`sweep_orders`/`sweep_conditions`/`current_slot` |
+| `outcome.py` | **结果结算**(纯函数)：`forward_returns`(自成交价, 按**K线根数**数交易日) + `bench_returns` + `excess`(扣 beta)。地平线**引用** `factor_lab.HORIZONS`(5/10/20) 不复制。**只算不判罪** |
 | `structure.py` | **K线结构摘要**(纯函数零网络)：`digest()` 出 MA5/20/60 + 近20日高低 + 最近3根 OHLC(带日期)；`fmt_stock`/`fmt_market` 成行喂 AI。**只给原料不下判断**——趋势由 AI 读均线自己判 |
 
 ### 测试（零依赖离线，`python3 tests/xxx.py` 直接跑；项目无 pytest）
 `test_universe_store.py`(9) 板块解析 · `test_screen_branches.py`(5) 选股三分支 ·
 `test_agent_gates.py`(10) agent 门+挂单 · `test_factor_lab.py`(6) 因子方向 ·
-`test_structure.py`(12) K线结构摘要 —— **共 42 例**
+`test_structure.py`(12) K线结构摘要 · `test_outcome.py`(10) 结果结算 —— **共 52 例**
 
 ## 数据源 & 坑（改代码前必读）
 
@@ -155,7 +156,8 @@ python3 tests/test_screen_branches.py    # 选股三分支 5 例（改 _screen_r
 python3 tests/test_agent_gates.py        # agent 门+挂单 10 例（改 run_day/幂等必跑）
 python3 tests/test_factor_lab.py         # 因子方向 6 例（改 direction/打分必跑）
 python3 tests/test_structure.py          # K线结构摘要 12 例（改 structure/决策提示词必跑）
-# 全部零依赖、离线、不打网络。共 42 例。
+python3 tests/test_outcome.py            # 结果结算 10 例（改 outcome/地平线/超额必跑）
+# 全部零依赖、离线、不打网络。共 52 例。
 
 # ⚠️ 改**决策提示词/数据面**后，必须实跑一个 debate 档（single 跑通≠debate 跑通，
 #    辩论是 token 预算最短板；实测踩过两次）：
@@ -208,9 +210,18 @@ curl -s 127.0.0.1:5000/api/agents               # agent 存档 + 教训汇总
    ⚠️ **注意**：数据面修好 ≠ 一定会成交。实测 07-16 下午大盘在跌（上证-0.82%/
    创业板-1.73%），AI **正确地**拒绝逆势做多 → 仍 0 成交。**要攒到失败样本，
    得等一个 AI 真的愿意出手的行情**——这是对的行为，不要为了攒数据去松风控。
-2. **结果导向的教训**（用户明确要过，挂单制已是其前置）：现在教训判的是「买入时长得像错」，
-   不是「事后证明错」。应改为：买入时只记候选(属性快照+建仓价) → N 天后用日K结算实际收益
-   → 够样本才成教训。**这能根治「教训与因子矛盾」，那个 `direction` 门控只是补丁。**
+2. **结果导向的教训 —— Phase 1 已上线(2026-07-16)，Phase 2 待做**。
+   见 `plan/2026-07-16-outcome-driven-lessons-design.md`。
+   - ✅ **Phase 1**：`entries` 表建仓留痕(挂单时抓快照) + `settle_entries()` 按
+     5/10/20 交易日结算**超额**收益(扣大盘 beta)。**只算不判罪，零阈值。**
+   - ⏳ **Phase 2**：判罪线**必须从数据读、不许拍**。做法：扩 `factor_lab.backtest()`
+     顺带留下 5/10/20 日超额收益的**分位分布**（现在算完就丢，复用既有 14s 那趟，
+     收集成本≈0）→ 判罪线 = 历史分布百分位（**是事实不是我定的数**）→ 够样本才把
+     当初的属性快照记成教训 → 文案改**个案口吻 + 带 n**（现在「>85 视为追高」是
+     普适规则口吻，证据却只有 n=1，属 PITFALLS#1 的翻版）。
+   - ⏳ Phase 2 一并处置现有 3 条 T+0 判罪的教训（`chase_high`/`high_vol_entry`/
+     `against_sector`）——它们现被 `direction()` 门控着，暂不造成新污染。
+   - **实测依据**：5 日与 20 日判罪 **33.1% 判反**（6240 个真实建仓点，相关系数仅 0.452）。
 3. **浏览器验证**：🤖 Agent modal / 净盈亏显示 / 💼 画像 modal / 公司叙事卡+溯源条。
    字段对齐都验了，**DOM 交互一次没验**。
 

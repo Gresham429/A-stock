@@ -93,13 +93,35 @@ CREATE TABLE IF NOT EXISTS pending(
   reason TEXT DEFAULT '',
   status TEXT DEFAULT 'live',    -- live | filled | expired | cancelled
   fill_date TEXT DEFAULT '', fill_t TEXT DEFAULT '', fill_price REAL DEFAULT 0,
-  note TEXT DEFAULT ''
+  note TEXT DEFAULT '',
+  -- 决策时刻的属性快照(JSON)：**必须在挂单时抓**，不能在成交时补。
+  -- 成交发生在后续循环的 sweep_orders 里，那时 ctx 还没建；且「AI 决策时看到的属性」
+  -- 本就是挂单那一刻的，事后重取会取到已经变了的值（= 一种未来函数）。
+  snap TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_pending_agent ON pending(agent_id, status);
 CREATE TABLE IF NOT EXISTS claims(
   agent_id INTEGER NOT NULL, date TEXT NOT NULL, slot TEXT NOT NULL, ts TEXT,
   PRIMARY KEY (agent_id, date, slot)
 );
+-- 建仓留痕：成交时**只记事实、不判罪**，5/10/20 交易日后由 outcome 结算超额收益。
+-- 为什么不在成交当天判：chase_high 的文案写着「此后回落」却在成交同一循环里记，
+-- 那时「此后」还没发生（见 plan/2026-07-16-outcome-driven-lessons-design.md）。
+CREATE TABLE IF NOT EXISTS entries(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_id INTEGER NOT NULL, code TEXT NOT NULL, name TEXT DEFAULT '',
+  entry_date TEXT NOT NULL, entry_price REAL NOT NULL, shares INTEGER DEFAULT 0,
+  -- 属性快照：判罪时回头看的就是这些（Phase 2）
+  range_pos REAL, vol REAL, cum20 REAL, pa_score REAL,
+  sector TEXT DEFAULT '', sector_chg REAL,
+  -- 结算结果：r=个股绝对, x=超额vs大盘(主标签), s=超额vs板块(尽力而为，可 NULL)
+  r5 REAL, r10 REAL, r20 REAL,
+  x5 REAL, x10 REAL, x20 REAL,
+  s5 REAL, s10 REAL, s20 REAL,
+  settled_at TEXT DEFAULT '',    -- 20 日档结算完成的时刻；空=未结清
+  UNIQUE(agent_id, code, entry_date)
+);
+CREATE INDEX IF NOT EXISTS idx_entries_open ON entries(settled_at, entry_date);
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
 """
 
@@ -114,6 +136,11 @@ def _conn() -> sqlite3.Connection:
 def init() -> None:
     with _LOCK, _conn() as c:
         c.executescript(_SCHEMA)
+        # 旧库迁移：pending.snap 是后加的（2026-07-16 结果导向教训）。
+        # CREATE TABLE IF NOT EXISTS 不会给已存在的表补列，必须显式 ALTER。
+        have = {r["name"] for r in c.execute("PRAGMA table_info(pending)")}
+        if "snap" not in have:
+            c.execute("ALTER TABLE pending ADD COLUMN snap TEXT DEFAULT ''")
 
 
 # ── agent 配置 ─────────────────────────────────────────────────────────────
@@ -177,6 +204,68 @@ def runs_of(agent_id: int, date: str = "", limit: int = 50) -> list[dict[str, An
         sql += " AND date=?"
         args.append(date)
     sql += " ORDER BY id DESC LIMIT ?"
+    args.append(limit)
+    with _conn() as c:
+        return [dict(r) for r in c.execute(sql, args)]
+
+
+# ── 建仓留痕 / 结果结算 ────────────────────────────────────────────────────
+def add_entry(agent_id: int, code: str, name: str, entry_date: str, entry_price: float,
+              shares: int, snap: dict[str, Any] | None = None) -> bool:
+    """建仓留痕：**只记事实，不判罪**。判罪等 5/10/20 交易日后的结算。
+
+    同 (agent, code, entry_date) 只留一条——同日多笔加仓视作同一次建仓决策，
+    保留首次的属性快照（那才是「做这个决策时看到的东西」）。
+    """
+    s = snap or {}
+    with _LOCK, _conn() as c:
+        cur = c.execute(
+            "INSERT OR IGNORE INTO entries(agent_id,code,name,entry_date,entry_price,shares,"
+            "range_pos,vol,cum20,pa_score,sector,sector_chg) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (agent_id, code, name, entry_date, float(entry_price), int(shares),
+             s.get("range_pos"), s.get("vol"), s.get("cum20"), s.get("pa_score"),
+             s.get("sector") or "", s.get("sector_chg")))
+        return cur.rowcount > 0
+
+
+def open_entries(agent_id: int | None = None) -> list[dict[str, Any]]:
+    """未结清的建仓（`settled_at` 为空）。结算扫描用。"""
+    sql = "SELECT * FROM entries WHERE settled_at='' "
+    args: list[Any] = []
+    if agent_id is not None:
+        sql += "AND agent_id=? "
+        args.append(agent_id)
+    sql += "ORDER BY entry_date"
+    with _conn() as c:
+        return [dict(r) for r in c.execute(sql, args)]
+
+
+def update_entry(entry_id: int, rets: dict[str, float | None], done: bool) -> None:
+    """写回结算结果。**幂等**——同一条会被反复扫到（r5 先到、r20 后到）。
+
+    done=True（20 日档已出）才落 `settled_at`，此后不再扫描。
+    """
+    cols = [k for k in ("r5", "r10", "r20", "x5", "x10", "x20", "s5", "s10", "s20") if k in rets]
+    if not cols and not done:
+        return
+    sets = ", ".join(f"{k}=?" for k in cols)
+    args: list[Any] = [rets[k] for k in cols]
+    if done:
+        sets += (", " if sets else "") + "settled_at=?"
+        args.append(datetime.now().isoformat(timespec="seconds"))
+    args.append(entry_id)
+    with _LOCK, _conn() as c:
+        c.execute(f"UPDATE entries SET {sets} WHERE id=?", args)
+
+
+def entries(agent_id: int | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    """建仓留痕（含结算结果），新的在前。供 API/前端。"""
+    sql = "SELECT * FROM entries "
+    args: list[Any] = []
+    if agent_id is not None:
+        sql += "WHERE agent_id=? "
+        args.append(agent_id)
+    sql += "ORDER BY entry_date DESC, id DESC LIMIT ?"
     args.append(limit)
     with _conn() as c:
         return [dict(r) for r in c.execute(sql, args)]
@@ -395,14 +484,20 @@ def slots_done(agent_id: int, date: str) -> list[str]:
 
 # ── 限价委托（挂单，非即时成交） ───────────────────────────────────────────
 def place(agent_id: int, code: str, name: str, side: str, limit_price: float,
-          shares: int, placed_t: str, reason: str = "") -> int:
-    """挂一笔限价委托。**当日有效**（A股规则：收盘未成交自动撤销）。"""
+          shares: int, placed_t: str, reason: str = "",
+          snap: dict[str, Any] | None = None) -> int:
+    """挂一笔限价委托。**当日有效**（A股规则：收盘未成交自动撤销）。
+
+    snap：决策时刻的属性快照，成交后转存进 `entries` 供日后结算判罪。
+    在**这里**抓而不是成交时抓——见 pending.snap 列的注释。
+    """
     with _LOCK, _conn() as c:
         cur = c.execute(
             "INSERT INTO pending(agent_id,code,name,side,limit_price,shares,"
-            "placed_date,placed_t,reason,status) VALUES(?,?,?,?,?,?,?,?,?,'live')",
+            "placed_date,placed_t,reason,status,snap) VALUES(?,?,?,?,?,?,?,?,?,'live',?)",
             (agent_id, code, name, side, round(float(limit_price), 3), int(shares),
-             date_cls.today().isoformat(), placed_t, reason[:200]))
+             date_cls.today().isoformat(), placed_t, reason[:200],
+             json.dumps(snap or {}, ensure_ascii=False)))
         return cur.lastrowid
 
 

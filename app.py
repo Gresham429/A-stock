@@ -1390,9 +1390,10 @@ def api_templates_add():
 # ── Agent 模拟交易（agent_store + agent_loop） ─────────────────────────────
 @app.route("/api/agents")
 def api_agents():
-    """agent 列表 + 教训汇总 + 容量。"""
+    """agent 列表 + 教训汇总 + 建仓留痕(含结算) + 容量。"""
     return jsonify({"agents": agent_store.list_agents(),
                     "lessons": agent_store.lesson_rollup(12),
+                    "entries": agent_store.entries(limit=50),
                     "status": agent_store.status()})
 
 

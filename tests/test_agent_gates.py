@@ -24,13 +24,47 @@ def test_dry_run_phase_is_prefixed():
     assert src.count('_ph("') >= 5, "部分 log_run 未走 _ph()，试跑记录会混进真跑"
 
 
-def test_already_ran_matches_exact_phase():
-    """幂等门必须精确匹配「复盘」——若用 in / startswith，「试跑-复盘」会被误判为真跑。"""
-    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                            "agent_loop.py"), encoding="utf-8").read()
-    seg = src[src.index("def already_ran"):src.index("def run_day")]
-    assert 'r["phase"] == "复盘"' in seg, "幂等门未精确匹配 phase"
-    assert "in r[" not in seg, "幂等门用了模糊匹配，试跑-复盘 会被误判"
+def test_idempotence_is_atomic_claim():
+    """幂等必须靠**原子占位**，不能靠「查有没有跑过」。
+
+    查记录是「开头查、180 秒后才写」——两个并发 run_all 会双双挤过去。实测发生过：
+    10:19:58 与 10:20:08 各起一轮，两轮都跑完(179s/177s)，两个 agent 各跑了 2 次。
+    """
+    import inspect
+    src = inspect.getsource(agent_loop.run_day)
+    assert "claim_slot" in src, "run_day 未用原子占位做幂等"
+    assert "release_slot" in src, "跑失败未释放占位 → 该桶当天再也跑不了"
+    # claims 表必须靠 PRIMARY KEY 冲突保证原子性
+    st = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "agent_store.py"), encoding="utf-8").read()
+    assert "PRIMARY KEY (agent_id, date, slot)" in st, "claims 表缺复合主键，占位不原子"
+    assert "sqlite3.IntegrityError" in st, "claim_slot 未靠主键冲突判定"
+
+
+def test_claim_slot_is_exclusive():
+    """同一 (agent, 日, 桶) 只能被抢到一次；不同桶互不影响。"""
+    agent_store.init()
+    aid, d = -12345, "1999-01-01"
+    agent_store.release_slot(aid, d, "早盘")
+    agent_store.release_slot(aid, d, "尾盘")
+    assert agent_store.claim_slot(aid, d, "早盘") is True, "首次应抢到"
+    assert agent_store.claim_slot(aid, d, "早盘") is False, "第二次应被挡 —— 竞态未修"
+    assert agent_store.claim_slot(aid, d, "尾盘") is True, "不同桶应可跑"
+    agent_store.release_slot(aid, d, "早盘")
+    assert agent_store.claim_slot(aid, d, "早盘") is True, "释放后应可重试"
+    agent_store.release_slot(aid, d, "早盘")
+    agent_store.release_slot(aid, d, "尾盘")
+
+
+def test_slots_defined_and_no_backfill():
+    """时段桶定义合法；且**不得**有补跑逻辑（补跑必然引入未来函数）。"""
+    import inspect
+    names = [s[0] for s in agent_loop.SLOTS]
+    assert len(names) == len(set(names)), "桶名重复"
+    for name, lo, hi in agent_loop.SLOTS:
+        assert 0 <= lo < hi <= 24 * 60, f"{name} 时间范围非法"
+    src = inspect.getsource(agent_loop)
+    assert "as-of" not in src.lower() or "无 as-of" in src, "若做补跑必须先解决全市场历史快照"
 
 
 def test_run_all_has_market_gate():

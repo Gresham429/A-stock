@@ -1420,6 +1420,8 @@ def api_agents_runs(gid: int):
                     "orders": paper_store.orders_of(ag.get("account_id", 0), 60),
                     "positions": paper_store.positions_of(ag.get("account_id", 0)),
                     "conditions": agent_store.conditions_of(gid),
+                    "pending": agent_store.pending_of(gid),
+                    "pending_stats": agent_store.pending_stats(),
                     "equity": agent_store.equity_of(gid, _arg_int("days", 90)),
                     "lessons": agent_store.lessons(gid, 20),
                     "account": paper_store.get_account(
@@ -1439,7 +1441,8 @@ def _agent_boot() -> None:
         if r.get("skipped"):
             logger.info("agent %s: %s", r.get("agent", "-"), r["skipped"])
         elif r.get("ok"):
-            logger.info("agent %s [%s]: 成交 %d / 教训 %d", r.get("agent"), r.get("slot", "-"),
+            logger.info("agent %s [%s]: 挂出 %d / 结算成交 %d / 教训 %d",
+                        r.get("agent"), r.get("slot", "-"), len(r.get("placed") or []),
                         len(r.get("filled") or []), len(r.get("lessons") or []))
 
 

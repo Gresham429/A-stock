@@ -112,6 +112,27 @@ def test_lesson_must_not_contradict_factor_data():
         assert f'bad("{factor}")' in seg, f"{kind} 的记录未按 {factor} 的因子方向门控"
 
 
+def test_limit_orders_are_placed_not_filled():
+    """决策产出的是**挂单**，不是即时成交 —— 且结算必须在决策之前跑。"""
+    import inspect
+    src = inspect.getsource(agent_loop.run_day)
+    assert "agent_store.place(" in src, "决策未走挂单，仍在即时成交"
+    assert src.index("sweep_orders(") < src.index("decider("), (
+        "挂单结算必须在决策**之前** —— 否则 AI 会基于未结算的持仓重复下单")
+    assert 'detect_failures(agent_id, ctx, settled["filled"])' in src, (
+        "教训必须基于**真正成交**的，不是刚挂出的委托（挂单未必成交）")
+
+
+def test_fill_price_is_limit_not_optimistic():
+    """成交价必须用 limit_price，不能用当时更优的价 —— 乐观假设会系统性高估表现。"""
+    import inspect
+    src = inspect.getsource(agent_loop._touched)
+    assert "limit" in src and "既成事实" in src
+    # 返回的成交价必须是 limit，不是分时里更优的那个点
+    assert "hit[\"t\"], limit" in src or "(True, hit[\"t\"], limit)" in src, (
+        "买单成交价未锁定在 limit_price")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

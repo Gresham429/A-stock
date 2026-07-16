@@ -85,6 +85,17 @@ CREATE TABLE IF NOT EXISTS conditions(
   triggered_date TEXT DEFAULT '', fill_price REAL DEFAULT 0, note TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_cond_agent ON conditions(agent_id, status);
+CREATE TABLE IF NOT EXISTS pending(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_id INTEGER NOT NULL, code TEXT NOT NULL, name TEXT DEFAULT '',
+  side TEXT NOT NULL, limit_price REAL NOT NULL, shares INTEGER NOT NULL,
+  placed_date TEXT NOT NULL, placed_t TEXT NOT NULL,   -- placed_t: 'HH:MM' 挂单时刻
+  reason TEXT DEFAULT '',
+  status TEXT DEFAULT 'live',    -- live | filled | expired | cancelled
+  fill_date TEXT DEFAULT '', fill_t TEXT DEFAULT '', fill_price REAL DEFAULT 0,
+  note TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_pending_agent ON pending(agent_id, status);
 CREATE TABLE IF NOT EXISTS claims(
   agent_id INTEGER NOT NULL, date TEXT NOT NULL, slot TEXT NOT NULL, ts TEXT,
   PRIMARY KEY (agent_id, date, slot)
@@ -275,6 +286,7 @@ def purge() -> dict[str, int]:
         c.execute("DELETE FROM equity WHERE date < ?", (d730,))
         out["equity_deleted"] = c.total_changes - b
         c.execute("DELETE FROM claims WHERE date < ?", (d365,))
+        c.execute("DELETE FROM pending WHERE placed_date < ?", (d365,))
     return out
 
 
@@ -379,3 +391,56 @@ def slots_done(agent_id: int, date: str) -> list[str]:
     with _conn() as c:
         return [r["slot"] for r in c.execute(
             "SELECT slot FROM claims WHERE agent_id=? AND date=?", (agent_id, date))]
+
+
+# ── 限价委托（挂单，非即时成交） ───────────────────────────────────────────
+def place(agent_id: int, code: str, name: str, side: str, limit_price: float,
+          shares: int, placed_t: str, reason: str = "") -> int:
+    """挂一笔限价委托。**当日有效**（A股规则：收盘未成交自动撤销）。"""
+    with _LOCK, _conn() as c:
+        cur = c.execute(
+            "INSERT INTO pending(agent_id,code,name,side,limit_price,shares,"
+            "placed_date,placed_t,reason,status) VALUES(?,?,?,?,?,?,?,?,?,'live')",
+            (agent_id, code, name, side, round(float(limit_price), 3), int(shares),
+             date_cls.today().isoformat(), placed_t, reason[:200]))
+        return cur.lastrowid
+
+
+def live_pending(agent_id: int | None = None, date: str = "") -> list[dict[str, Any]]:
+    sql = "SELECT * FROM pending WHERE status='live'"
+    args: list[Any] = []
+    if agent_id is not None:
+        sql += " AND agent_id=?"
+        args.append(agent_id)
+    if date:
+        sql += " AND placed_date=?"
+        args.append(date)
+    with _conn() as c:
+        return [dict(r) for r in c.execute(sql + " ORDER BY id", args)]
+
+
+def close_pending(pid: int, status: str, fill_date: str = "", fill_t: str = "",
+                  fill_price: float = 0.0, note: str = "") -> None:
+    with _LOCK, _conn() as c:
+        c.execute("UPDATE pending SET status=?, fill_date=?, fill_t=?, fill_price=?, note=? "
+                  "WHERE id=?", (status, fill_date, fill_t, round(fill_price, 3), note, pid))
+
+
+def pending_of(agent_id: int, limit: int = 60) -> list[dict[str, Any]]:
+    with _conn() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT * FROM pending WHERE agent_id=? ORDER BY id DESC LIMIT ?",
+            (agent_id, limit))]
+
+
+def pending_stats(days: int = 30) -> dict[str, Any]:
+    """挂单成交率 —— 未成交本身也是信息（价格挂太保守 = 系统性错过）。"""
+    since = (date_cls.today() - timedelta(days=days)).isoformat()
+    with _conn() as c:
+        rows = [dict(r) for r in c.execute(
+            "SELECT status, COUNT(*) n FROM pending WHERE placed_date >= ? GROUP BY status",
+            (since,))]
+    tot = sum(r["n"] for r in rows) or 0
+    by = {r["status"]: r["n"] for r in rows}
+    return {"total": tot, **by,
+            "fill_rate": round(100 * by.get("filled", 0) / tot, 1) if tot else None}

@@ -82,21 +82,44 @@ def forward_returns(bars: list[dict[str, Any]], entry_date: str, entry_price: fl
     return _rets_from(bars, i, float(entry_price), hs)
 
 
-def bench_returns(bars: list[dict[str, Any]], entry_date: str,
-                  horizons: Iterable[int] = HORIZONS) -> dict[int, float | None]:
-    """基准（大盘/板块）收益：自建仓日**收盘**起算。
+def horizon_end_dates(bars: list[dict[str, Any]], entry_date: str,
+                      horizons: Iterable[int] = HORIZONS) -> dict[int, str | None]:
+    """个股 +h 根 K 线**落在哪一天**。基准要按这个日期对齐，不能自己数 h 根。
 
-    基准没有「成交价」这回事，只能用收盘。与个股侧的成交价起点有 <1 个日内波动的
-    口径差——二阶效应，**明确记下不假装没有**（见设计文档）。
+    停牌会让个股的「+20 根」横跨比 20 个交易日更长的日历窗口。
     """
     hs = list(horizons)
     i = _idx_of(bars or [], entry_date)
     if i is None:
         return {h: None for h in hs}
-    base = _close(bars, i)
-    if base is None:
-        return {h: None for h in hs}
-    return _rets_from(bars, i, base, hs)
+    out: dict[int, str | None] = {}
+    for h in hs:
+        j = i + h
+        out[h] = str(bars[j]["date"])[:10] if 0 <= j < len(bars) else None
+    return out
+
+
+def bench_returns(bars: list[dict[str, Any]], entry_date: str,
+                  end_dates: dict[int, str | None]) -> dict[int, float | None]:
+    """基准（大盘/板块）收益：建仓日收盘 → **个股 +h 根那一天**的收盘。
+
+    **收的是终点日期而不是 horizons —— 这是刻意的**：让「两边各数 h 根」这种
+    窗口错配在 API 上根本无法表达。踩过（2026-07-16 本模块首版）：个股停牌 5 天时
+    拿 8 个交易日的个股收益减 3 个交易日的指数收益，**超额高估 10 个百分点且不报错**。
+
+    基准没有「成交价」这回事，只能用收盘。与个股侧的成交价起点有 <1 个日内波动的
+    口径差——二阶效应，**明确记下不假装没有**（见设计文档）。
+
+    终点日在基准里缺失 → None，**不拿邻近日顶替**（顶替 = 悄悄换了窗口）。
+    """
+    i = _idx_of(bars or [], entry_date)
+    base = _close(bars, i) if i is not None else None
+    out: dict[int, float | None] = {}
+    for h, d in end_dates.items():
+        j = _idx_of(bars or [], d) if d else None
+        c = _close(bars, j) if j is not None else None
+        out[h] = None if (base is None or c is None) else round((c / base - 1) * 100, 3)
+    return out
 
 
 def excess(stock: dict[int, float | None],

@@ -29,13 +29,15 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 import agent_store
+import ai_blocks
 import datasources as ds
 import factor_lab
 import fees
 import llm
+import outcome
 import paper_store
 import profile_store
-import outcome
+import screening
 import structure
 import universe_store
 
@@ -779,7 +781,7 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
 
     # 每个 agent 用**自己的**档位/费率块（档位按本账户总资产，非用户真实持仓）
     if not blocks:
-        ctx["blocks"] = app._agent_blocks(ag, ctx["cash"], total, len(positions))
+        ctx["blocks"] = ai_blocks._agent_blocks(ag, ctx["cash"], total, len(positions))
     # 个体情节记忆：把这个 agent 自己的历史建仓+结果拼进 blocks（教训已在 _agent_blocks 里按 agent 过滤）
     hist = _agent_history_block(agent_id, ag["account_id"])
     if hist:

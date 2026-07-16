@@ -69,8 +69,45 @@ def test_forward_returns_none_when_entry_date_absent():
 def test_bench_returns_measured_from_close():
     """基准（大盘/板块）从建仓日**收盘**起算 —— 基准没有「成交价」这回事。"""
     bars = _bars([3000.0] + [3060.0] * 25)
-    r = outcome.bench_returns(bars, bars[0]["date"], (5,))
+    ends = outcome.horizon_end_dates(bars, bars[0]["date"], (5,))
+    r = outcome.bench_returns(bars, bars[0]["date"], ends)
     assert r[5] == 2.0, f"基准收益错: {r[5]}（应 (3060/3000-1)*100=2.0）"
+
+
+def _pair(dates_closes):
+    return [{"date": d, "open": c, "high": c, "low": c, "close": c} for d, c in dates_closes]
+
+
+def test_bench_window_aligned_by_date_not_bar_count():
+    """**个股停牌时，基准必须按日历窗口对齐，不能按各自的K线根数。**
+
+    踩过（2026-07-16，本模块首版）：个股停牌 5 天 → 它的 +3 根跨了 8 个交易日，
+    而指数的 +3 根只有 3 个交易日 → 拿 8 天的个股收益减 3 天的指数收益。
+    实测高估 10 个百分点，且**不报错**。A股停牌很常见，这会污染大批标签。
+    """
+    stock = _pair([("2026-01-05", 100.0), ("2026-01-06", 100.0), ("2026-01-07", 100.0),
+                   # 停牌 01-08~01-14（个股没有这几根）
+                   ("2026-01-15", 130.0), ("2026-01-16", 130.0)])
+    idx = _pair([("2026-01-05", 3000.0), ("2026-01-06", 3000.0), ("2026-01-07", 3000.0),
+                 ("2026-01-08", 3000.0), ("2026-01-09", 3000.0), ("2026-01-12", 3000.0),
+                 ("2026-01-13", 3000.0), ("2026-01-14", 3000.0),
+                 ("2026-01-15", 3300.0), ("2026-01-16", 3300.0)])
+    st = outcome.forward_returns(stock, "2026-01-05", 100.0, (3,))
+    ends = outcome.horizon_end_dates(stock, "2026-01-05", (3,))
+    assert ends[3] == "2026-01-15", f"个股 +3 根的终点日期错: {ends[3]}"
+    bn = outcome.bench_returns(idx, "2026-01-05", ends)
+    assert bn[3] == 10.0, f"基准未按个股窗口(01-05→01-15)算: {bn[3]}（应 10.0）"
+    ex = outcome.excess(st, bn)
+    assert ex[3] == 20.0, f"超额错: {ex[3]}（30% - 10% = 20%；若为 30 则是窗口错配）"
+
+
+def test_bench_none_when_end_date_missing_from_bench():
+    """基准在该终点日没有K线 → None，不拿邻近日顶替（顶替=悄悄换了窗口）。"""
+    stock = _pair([("2026-01-05", 100.0), ("2026-01-06", 110.0)])
+    idx = _pair([("2026-01-05", 3000.0)])          # 基准缺 01-06
+    ends = outcome.horizon_end_dates(stock, "2026-01-05", (1,))
+    bn = outcome.bench_returns(idx, "2026-01-05", ends)
+    assert bn[1] is None, f"基准缺该日却给了值: {bn[1]}"
 
 
 def test_excess_strips_beta():
@@ -109,7 +146,8 @@ def test_survives_dirty_bars():
     bars[7]["close"] = None
     try:
         outcome.forward_returns(bars, bars[0]["date"], 100.0, (5, 20))
-        outcome.bench_returns(bars, bars[0]["date"], (5,))
+        ends = outcome.horizon_end_dates(bars, bars[0]["date"], (5,))
+        outcome.bench_returns(bars, bars[0]["date"], ends)
     except Exception as e:  # noqa: BLE001 —— 就是要证明它不抛
         raise AssertionError(f"脏数据穿透: {type(e).__name__}: {e}") from e
 

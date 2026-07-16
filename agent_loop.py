@@ -163,8 +163,18 @@ _MKT_LOCK = threading.Lock()
 # 只取两条：上证=权重/大盘状态，创业板=成长股情绪。全取 5 条是无谓的 token。
 _IDX_KLINE = {"上证指数": "sh000001", "创业板指": "sz399006"}
 
-HORIZONS = outcome.HORIZONS   # (5,10,20)，跟 factor_lab 走
-_BENCH_SYM = "sh000001"       # 超额基准=上证。日K永远可回溯、无缺口（板块基准做不到）
+HORIZONS = outcome.HORIZONS       # (5,10,20)，跟 factor_lab 走
+JUDGE_H = max(HORIZONS)           # 判罪看最长档(20日)：5日与20日实测 33.1% 判反
+# 判罪线：超额收益落在历史分布**底部十分位**才记教训。
+# **这是纪律参数，不是数据结论**——分布是事实(161,994 样本)，「取底部 10%」是
+# 我方的**选择性**取舍，需用户认可，不假装有数据支持（PITFALLS#1 的要求）。
+# 为什么不用「超额<0」这个看着最自然的线：实测 p50(20日) = **-0.90%**，
+# 个股跑输上证是常态(指数市值加权) → 「超额<0」会把 **53%** 的建仓点判成失败，
+# AI 会学到「你几乎总是失败」。分布本身否掉了那条线。
+LESSON_PCT = 10
+
+_BENCH_SYM = factor_lab.BENCH_SYM  # 超额基准=上证。**引用**不复制：判罪线(factor_lab
+#                                   的超额分布)与被判的数必须同口径，否则不报错地错。
 
 
 def _market_block() -> str:
@@ -510,6 +520,36 @@ def _sector_bars(sector: str, entry_date: str) -> list[dict[str, Any]]:
     return bars
 
 
+def _judge_entry(e: dict[str, Any], x: float | None) -> str:
+    """结清的建仓 → 该不该记教训。**判罪线只能来自数据分布，无分布则不判。**
+
+    与旧的 T+0 判罪（`detect_failures` 的 chase_high 等）的根本区别：
+    那些判的是「买入时长得像错」，这条判的是「**事后证明**跑输了历史上 90% 的建仓点」。
+
+    文案是**个案陈述**，不宣称规律：n 太小（20–30 笔/年，统计验证要 784 笔≈31 年，
+    PITFALLS#5），把单笔亏损写成「>85 视为追高」那种普适口吻，就是拿一个样本冒充规律。
+    属性快照只作**当时的上下文**列出，不宣称因果。
+    """
+    if x is None:
+        return ""                       # 超额算不出（基准缺失/停牌）→ 不判，不拿绝对收益顶替
+    rank = factor_lab.rank_of(JUDGE_H, x)
+    if rank is None:
+        logger.info("无超额分布，跳过判罪（跑一次 factor_lab.backtest 即可）")
+        return ""                       # **无分布不判罪**：退回默认阈值=偷偷拍了个数
+    if rank > LESSON_PCT:
+        return ""                       # 没差到底部十分位 → 不是失败，不记
+    ctx = "/".join(
+        f"{k}={e[k]}" for k in ("pa_score", "range_pos", "vol", "cum20")
+        if e.get(k) is not None) or "属性快照缺失"
+    ev = (f"{e['code']} {e['name']} 于 {e['entry_date']} 建仓价 {e['entry_price']}，"
+          f"{JUDGE_H} 交易日超额收益 {x:+.2f}%（扣除上证同期涨跌后），"
+          f"在 16 万个历史建仓点中处于**第 {rank} 百分位**——比 {100 - rank}% 的建仓点差。"
+          f"当时属性：{ctx}。"
+          f"（单笔个案，非规律；属性仅为当时上下文，不代表因果）")
+    return "bad_outcome" if agent_store.add_lesson(e["agent_id"], "bad_outcome", ev,
+                                                   e["code"]) else ""
+
+
 def settle_entries(agent_id: int) -> list[dict[str, Any]]:
     """结算建仓留痕：5/10/20 交易日后算**超额**收益。**只算不判罪**。
 
@@ -529,19 +569,24 @@ def settle_entries(agent_id: int) -> list[dict[str, Any]]:
             if not bars:
                 continue
             stock = outcome.forward_returns(bars, e["entry_date"], e["entry_price"])
-            idx = outcome.bench_returns(ds.index_kline(_BENCH_SYM,
-                                                       num=max(HORIZONS) + 40), e["entry_date"])
+            # 基准按**个股 +h 根落在的那一天**对齐——个股停牌时两边各数 h 根会错配窗口
+            # （实测超额高估 10 个百分点且不报错）。
+            ends = outcome.horizon_end_dates(bars, e["entry_date"])
+            idx = outcome.bench_returns(
+                ds.index_kline(_BENCH_SYM, num=max(HORIZONS) + 40), e["entry_date"], ends)
             x = outcome.excess(stock, idx)
             s = outcome.excess(stock, outcome.bench_returns(
-                _sector_bars(e["sector"] or "", e["entry_date"]), e["entry_date"]))
+                _sector_bars(e["sector"] or "", e["entry_date"]), e["entry_date"], ends))
             rets: dict[str, float | None] = {}
             for h in HORIZONS:
                 rets[f"r{h}"], rets[f"x{h}"], rets[f"s{h}"] = stock[h], x[h], s[h]
-            done = stock[max(HORIZONS)] is not None      # 最长档出了 = 这条结清
+            done = stock[JUDGE_H] is not None            # 最长档出了 = 这条结清
             agent_store.update_entry(e["id"], rets, done)
             if done:
-                out.append({"code": e["code"], "entry_date": e["entry_date"],
-                            **{k: v for k, v in rets.items() if v is not None}})
+                rec = {"code": e["code"], "entry_date": e["entry_date"],
+                       **{k: v for k, v in rets.items() if v is not None}}
+                rec["lesson"] = _judge_entry(e, x[JUDGE_H])
+                out.append(rec)
         except Exception as ex:  # noqa: BLE001 单条结算失败不该拖垮整轮
             logger.warning("建仓结算失败 %s %s: %s", e["code"], e["entry_date"], ex)
     return out

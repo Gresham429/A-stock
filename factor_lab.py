@@ -44,6 +44,10 @@ IC_KEEP_DAYS = 1095      # 滚动 IC 保留 3 年（要看衰减趋势，得留�
 KLINE_DAYS = 600         # 新浪日K 实测上限 ~600 根（≈2.4 年）
 WARMUP = 25              # 前 N 根用于算 20 日窗口指标，不产出样本
 HORIZONS = (5, 10, 20)   # 未来收益天数
+# 超额分布的基准。前缀**必须硬编码**：market_prefix 对 000xxx 判 sz，而上证在 sh。
+# **单一事实源**：agent_loop 结算时引用这同一个常量——两处基准若不一致，
+# 判罪线与被判的那个数就不是一个口径的，且不会报错。
+BENCH_SYM = "sh000001"
 
 # 待验因子：只含**确定性、只吃日K**的分量。net20(资金) 因数据源只给 30 天，无法回测。
 FACTORS = ("vol", "cum20", "range_pos")
@@ -65,8 +69,20 @@ CREATE TABLE IF NOT EXISTS direction_log(
   sign INTEGER, basis TEXT, t_stat REAL, prev_sign INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_dlog_factor ON direction_log(factor, horizon);
+-- 超额收益的历史分位分布：**判罪线的唯一合法来源**。
+-- 「超额多负算失败」是个阈值，按 PITFALLS#1 的战绩(拍的方向被数据打脸 5 次)不能拍。
+-- 这张表让「这笔在历史上有多差」成为**可查的事实**，而不是我定的数。
+-- 由 backtest() 顺带产出（远期收益本就在算，收集成本≈0；原先算完就丢）。
+CREATE TABLE IF NOT EXISTS excess_dist(
+  horizon INTEGER NOT NULL, pct INTEGER NOT NULL,   -- pct: 1/5/10/25/50/75/90/95/99
+  value REAL, n INTEGER, updated_at TEXT,
+  PRIMARY KEY (horizon, pct)
+);
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
 """
+
+# 分布记录这几个分位点：够定判罪线，也够让 AI 知道「有多差」，且不必存 16 万个原始值。
+DIST_PCTS = (1, 5, 10, 25, 50, 75, 90, 95, 99)
 
 
 def _conn() -> sqlite3.Connection:
@@ -151,6 +167,55 @@ def _series_of(code: str) -> tuple[str, list[dict]]:
         return code, []
 
 
+def _percentile(xs: list[float], p: float) -> float | None:
+    """第 p 百分位（线性插值，同 numpy 默认口径）。空样本 → None。
+
+    自己实现是因为本项目零第三方依赖（只依赖 flask）。
+    """
+    if not xs:
+        return None
+    s = sorted(xs)
+    if len(s) == 1:
+        return round(s[0], 4)
+    k = (len(s) - 1) * (p / 100.0)
+    lo, hi = int(k // 1), min(int(k // 1) + 1, len(s) - 1)
+    return round(s[lo] + (s[hi] - s[lo]) * (k - lo), 4)
+
+
+def excess_dist() -> dict[int, dict[int, float]]:
+    """读超额收益分位分布 {horizon: {pct: value}}。没跑过回测则为空。"""
+    out: dict[int, dict[int, float]] = {}
+    try:
+        with _conn() as c:
+            for r in c.execute("SELECT horizon, pct, value FROM excess_dist"):
+                if r["value"] is not None:
+                    out.setdefault(r["horizon"], {})[r["pct"]] = r["value"]
+    except sqlite3.Error as e:
+        logger.warning("超额分布读取失败: %s", e)
+    return out
+
+
+def rank_of(horizon: int, x: float, dist: dict[int, dict[int, float]] | None = None) -> int | None:
+    """这笔的超额收益 x 落在历史分布的第几百分位。**无分布返回 None，绝不猜。**
+
+    返回 None 时调用方必须放弃判罪——退回某个默认阈值等于偷偷拍了个数（PITFALLS#1）。
+    """
+    d = (dist if dist is not None else excess_dist()).get(horizon) or {}
+    if not d:
+        return None
+    pts = sorted(d.items(), key=lambda kv: kv[1])     # 按分位值升序
+    if x <= pts[0][1]:
+        return pts[0][0]
+    if x >= pts[-1][1]:
+        return pts[-1][0]
+    for (p_lo, v_lo), (p_hi, v_hi) in zip(pts, pts[1:]):
+        if v_lo <= x <= v_hi:
+            if v_hi == v_lo:
+                return p_lo
+            return int(round(p_lo + (p_hi - p_lo) * (x - v_lo) / (v_hi - v_lo)))
+    return None
+
+
 def backtest(n_stocks: int = 300, workers: int = 8) -> dict[str, Any]:
     """跑一次全量回测：抽样 → 拉日K → 逐日算因子与未来收益 → 每日横截面 IC → 落盘。
 
@@ -166,12 +231,24 @@ def backtest(n_stocks: int = 300, workers: int = 8) -> dict[str, Any]:
     if not series:
         return {"ok": False, "msg": "无有效日K"}
 
-    # 逐只算：每日因子值 + 未来收益
+    # 基准日线：用于把绝对收益换成**超额**收益（判罪线必须是超额口径，否则 beta
+    # 混进线里 —— 大盘跌的月份所有建仓点都落到下尾，判罪线就成了「别在熊市买」）。
+    bench: dict[str, float] = {}
+    try:
+        for b in ds.index_kline(BENCH_SYM, num=KLINE_DAYS):
+            c_ = float(b.get("close") or 0)
+            if c_ > 0:
+                bench[str(b["date"])[:10]] = c_
+    except Exception as e:  # noqa: BLE001 基准取不到只是不产出分布，IC 照跑
+        logger.warning("基准日K取数失败，本轮不产出超额分布: %s", e)
+
+    # 逐只算：每日因子值 + 未来收益（+ 顺带收超额分布，远期收益本就在算，成本≈0）
     per_day: dict[str, dict[str, list]] = {}   # date -> {factor: [值], "fwd{h}": [收益]}
+    ex_pool: dict[int, list[float]] = {h: [] for h in HORIZONS}
     samples = 0
     for code, kl in series.items():
         closes = [float(k["close"]) for k in kl]
-        dates = [k["date"] for k in kl]
+        dates = [str(k["date"])[:10] for k in kl]
         for t in range(WARMUP, len(closes) - max(HORIZONS)):
             if closes[t] <= 0:
                 continue
@@ -182,7 +259,14 @@ def backtest(n_stocks: int = 300, workers: int = 8) -> dict[str, Any]:
             for k_, v in f.items():
                 d.setdefault(k_, []).append(v)
             for h in HORIZONS:
-                d.setdefault(f"fwd{h}", []).append((closes[t + h] / closes[t] - 1) * 100)
+                fwd = (closes[t + h] / closes[t] - 1) * 100
+                d.setdefault(f"fwd{h}", []).append(fwd)
+                # 超额：基准**按日期对齐**到 dates[t] → dates[t+h]，不是自己数 h 根。
+                # 个股停牌时 t+h 根会横跨比 h 个交易日更长的日历窗口，各数各的会错配
+                # （实测超额高估 10 个百分点且不报错，见 outcome.bench_returns）。
+                b0, b1 = bench.get(dates[t]), bench.get(dates[t + h])
+                if b0 and b1:
+                    ex_pool[h].append(fwd - (b1 / b0 - 1) * 100)
             samples += 1
 
     # 每日横截面 IC
@@ -196,13 +280,28 @@ def backtest(n_stocks: int = 300, workers: int = 8) -> dict[str, Any]:
                 ic = _spearman(xs, ys)
                 if ic is not None:
                     rows.append((date, f, h, round(ic, 6), len(xs)))
+    # 超额分位分布 —— 判罪线的唯一合法来源（见 excess_dist 表注释）
+    now_ = datetime.now().isoformat(timespec="seconds")
+    dist_rows = []
+    for h, pool in ex_pool.items():
+        for p in DIST_PCTS:
+            v = _percentile(pool, p)
+            if v is not None:
+                dist_rows.append((h, p, v, len(pool), now_))
     with _LOCK, _conn() as c:
         c.executemany("INSERT INTO ic_daily(date,factor,horizon,ic,n) VALUES(?,?,?,?,?) "
                       "ON CONFLICT(date,factor,horizon) DO UPDATE SET ic=excluded.ic, n=excluded.n",
                       rows)
+        if dist_rows:
+            c.executemany(
+                "INSERT INTO excess_dist(horizon,pct,value,n,updated_at) VALUES(?,?,?,?,?) "
+                "ON CONFLICT(horizon,pct) DO UPDATE SET value=excluded.value, n=excluded.n, "
+                "updated_at=excluded.updated_at", dist_rows)
         c.execute("INSERT INTO runs(created_at,stocks,days,samples,note) VALUES(?,?,?,?,?)",
                   (datetime.now().isoformat(timespec="seconds"), len(series),
                    len(per_day), samples, f"factors={','.join(FACTORS)}"))
+    if dist_rows:
+        logger.info("超额分布：%s", {h: len(p) for h, p in ex_pool.items()})
     purge()
     logger.info("因子回测完成：%d 只 × %d 日 = %d 样本，%d 条 IC", len(series), len(per_day),
                 samples, len(rows))

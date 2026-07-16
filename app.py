@@ -1320,13 +1320,23 @@ def api_sector_detail(name: str):
 
 @app.route("/api/factors")
 def api_factors():
-    """因子回测结果：IC 均值/t值/胜率 + 当前方向 + 失效报警 + 容量。"""
+    """因子回测结果：IC 均值/t值/胜率 + 当前方向 + 失效报警 + 超额分布/判罪线 + 容量。"""
     stale, lag = factor_lab.is_stale()
     return jsonify({"summary": factor_lab.summary(),
                     "directions": factor_lab.directions(),
                     "alerts": factor_lab.decay_alert(),
                     "history": factor_lab.direction_history(limit=20),
                     "flip_rate": factor_lab.flip_rate(),
+                    # 超额分布 = 判罪线的唯一合法来源；判罪线本身是**纪律参数**，
+                    # 暴露出来让用户能认可/否决（PITFALLS#1：拍的数不许假装有数据支持）。
+                    "excess_dist": factor_lab.excess_dist(),
+                    "lesson_gate": {
+                        "horizon": agent_loop.JUDGE_H, "pct": agent_loop.LESSON_PCT,
+                        "note": f"超额收益落在历史分布底部 {agent_loop.LESSON_PCT}% 才记教训。"
+                                f"分布是事实(16万样本)，取底部 {agent_loop.LESSON_PCT}% 是"
+                                f"**纪律参数**（选择性取舍，非数据结论）。"
+                                f"不用「超额<0」是因为 p50 为负——个股跑输上证是常态，"
+                                f"那条线会把过半建仓点判成失败。"},
                     "freshness": {"last_ic": factor_lab.last_ic_date(), "lag_days": lag,
                                   "stale": stale,
                                   "note": f"IC 天然滞后 {max(factor_lab.HORIZONS)} 个交易日"

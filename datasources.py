@@ -465,9 +465,11 @@ def _sina_kline_sym(sym: str, num: int, scale: int) -> list[dict[str, Any]]:
 
 
 def tencent_minute(code: str) -> list[dict[str, Any]]:
-    """腾讯当日分时（逐分钟价格，不封 IP）。返回 [{t:'09:30', price}]。
+    """腾讯当日分时（逐分钟价格 + 当日均价线，不封 IP）。返回 [{t:'09:30', price, avg}]。
 
     源 ifzq.gtimg.cn minute/query，data[sym].data.data 每项 'HHMM 价 累计量 累计额'。
+    `avg` = 当日 VWAP = 累计额 ÷ (累计量×100)——**累计量单位是手(100股)**，实测校准。
+    这是分时图的标准「均价线」（日线 MA 不适用于一天之内的分钟数据）。
     非交易时段返回上一交易日分时；数据缺失返回空列表。
     """
     sym = market_prefix(code) + code
@@ -488,8 +490,16 @@ def tencent_minute(code: str) -> list[dict[str, Any]]:
             price = float(parts[1])
         except ValueError:
             continue
+        avg = None
+        if len(parts) >= 4:      # 累计量(手)/累计额(元) → 当日均价 VWAP
+            try:
+                cvol, camt = float(parts[2]), float(parts[3])
+                if cvol > 0:
+                    avg = round(camt / (cvol * 100), 3)
+            except ValueError:
+                avg = None
         out.append({"t": f"{hhmm[:2]}:{hhmm[2:]}" if len(hhmm) == 4 else hhmm,
-                    "price": price})
+                    "price": price, "avg": avg})
     return out
 
 

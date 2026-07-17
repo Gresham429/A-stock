@@ -178,7 +178,27 @@ DECIDERS: dict[str, Callable[[dict], tuple[list[Intent], str]]] = {
 
 _MKT_TTL = 300       # 大盘快照进程内缓存秒数：12 个 agent 看的是**同一个**大盘
 _mkt_cache: tuple[float, str] = (0.0, "")
+_mkt_regime: str = ""      # 最近一次算出的粗粒度大盘状态 tag（journal 用；随大盘缓存一起更新）
 _MKT_LOCK = threading.Lock()
+
+
+def _regime_tag(struct: dict[str, Any], mb: dict[str, Any]) -> str:
+    """粗粒度大盘状态 tag：`趋势/情绪`，共享底座里用于按「同类行情」检索。
+
+    刻意粗（~9 桶）——太细则永远匹配不上。趋势看上证收盘 vs MA20；情绪看涨停−跌停净数
+    （涨跌家数已因东财封 IP 恒空，故用涨停/跌停替代）。数据缺就降级为 flat/neutral。
+    """
+    trend = "flat"
+    d = (struct or {}).get("上证指数")
+    if d and d.get("ma20") and d.get("last"):
+        c, m = d["last"][-1]["close"], d["ma20"]
+        trend = "up" if c > m * 1.01 else "down" if c < m * 0.99 else "flat"
+    sent = "neutral"
+    lu, ld = (mb or {}).get("limit_up"), (mb or {}).get("limit_down")
+    if lu is not None and ld is not None:
+        net = lu - ld
+        sent = "hot" if net > 30 else "cold" if net < -10 else "neutral"
+    return f"{trend}/{sent}"
 
 # 指数前缀**必须硬编码**：market_prefix 对 000xxx 一律判 sz，而上证在 sh（见 ds.index_quotes 注释）。
 # 只取两条：上证=权重/大盘状态，创业板=成长股情绪。全取 5 条是无谓的 token。
@@ -236,6 +256,41 @@ def _agent_history_block(agent_id: int, account_id: int) -> str:
     return "\n".join(lines)
 
 
+_ACT_CN = {"buy": "买入", "skip": "观望", "sell": "卖出", "hold": "持有"}
+
+
+def _agent_journal_block(agent_id: int) -> str:
+    """【你最近的决策与理由】：喂回这个 agent 自己最近的决策(买/观望)+**当时写下的理由**
+    +已出的结果。修「不知道自己之前的判断」。
+
+    理由是它当时已经写下的那句话（买的 reason / 观望的 skip_reason），不是新写的反思——
+    故不引入「5 个样本拟合噪音」。结果结算后贴上，是事实校准，不是自我总结。
+    末尾一句显式压过度锚定：一段弱势里连续观望不该演变成再也不敢动。
+    """
+    try:
+        rows = agent_store.journal_of(agent_id, limit=8)
+    except Exception as e:  # noqa: BLE001 记忆缺失不该让决策崩
+        logger.warning("journal 块读取失败 %s: %s", agent_id, e)
+        return ""
+    if not rows:
+        return ""
+    lines = ["【你最近的决策与理由（自己的情节记忆：当时怎么想、后来怎样；理由=你当时写下的原话，非事后反思）】"]
+    for r in reversed(rows):     # 时间正序读着顺
+        head = f"- {r['date']} {r.get('slot','')} [{_ACT_CN.get(r['action'], r['action'])}]"
+        if r.get("code"):
+            head += f" {r['code']} {r.get('name','')}"
+        if r.get("regime"):
+            head += f"·大盘{r['regime']}"
+        head += f"：{r.get('summary') or '（未记理由）'}"
+        if r.get("settled_at") and r.get("x20") is not None:
+            p = r.get("x20_pctile")
+            head += f" → 20日超额 {r['x20']:+.2f}%" + (f"（第 {p} 百分位）" if p is not None else "")
+        lines.append(head)
+    lines.append("- 这是你自己的经历、不是规律：用于保持判断连续性；别把一段弱势里的连续观望"
+                 "演成再不敢动，也别无视已被结果证伪的思路。")
+    return "\n".join(lines)
+
+
 def _market_block() -> str:
     """【今日大盘】块：指数点位+结构 / 涨停跌停 / 板块强弱。
 
@@ -277,6 +332,8 @@ def _market_block() -> str:
             sectors = []
         out = structure.fmt_market(iq.get("indices") or [], iq.get("amount_liang_yi"),
                                    struct, mb.get("limit_up"), mb.get("limit_down"), sectors)
+        global _mkt_regime
+        _mkt_regime = _regime_tag(struct, mb)     # journal 用；随缓存一起更新，桶内一致
         _mkt_cache = (time.time(), out)
         return out
 
@@ -651,6 +708,9 @@ def settle_entries(agent_id: int) -> list[dict[str, Any]]:
                     rets["x20_pctile"] = pctile
             agent_store.update_entry(e["id"], rets, done)
             if done:
+                # P2：把结果贴回对应的买入 journal 行（幂等：settled_at 空才贴）
+                agent_store.journal_staple_outcome(e["agent_id"], e["code"],
+                                                   e["entry_date"], x[JUDGE_H], pctile)
                 rec = {"code": e["code"], "entry_date": e["entry_date"],
                        **{k: v for k, v in rets.items() if v is not None}}
                 rec["lesson"] = _judge_entry(e, x[JUDGE_H], pctile)
@@ -813,6 +873,10 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
     hist = _agent_history_block(agent_id, ag["account_id"])
     if hist:
         ctx["blocks"] = (ctx["blocks"] or "") + "\n\n" + hist
+    # P2：自己最近的决策+理由+结果（连续性）——理由是当时已写下的原话，不新增 LLM 负担
+    jrnl = _agent_journal_block(agent_id)
+    if jrnl:
+        ctx["blocks"] = (ctx["blocks"] or "") + "\n\n" + jrnl
     # ③ 决策（可插拔）
     decider = DECIDERS.get(ag.get("decider") or "single", _single_decider)
     try:
@@ -849,6 +913,9 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
                 "sector_chg": ctx.get("sector_chg", {}).get(it.code)} if it.side == "buy" else {}
         agent_store.place(agent_id, it.code, it.name, it.side, it.limit_price,
                           it.shares, now_t, it.reason, snap)
+        if it.side == "buy":   # P2：买入决策入 journal（理由=它当时写下的 reason 原话）
+            agent_store.journal_add(agent_id, it.code, it.name, today, slot,
+                                    _mkt_regime, snap, "buy", it.reason)
         placed.append({"code": it.code, "side": it.side, "shares": it.shares,
                        "limit": it.limit_price, "t": now_t})
         # 挂单即冻结资金（按限价），避免同一轮里多笔委托超额占用
@@ -859,6 +926,14 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
                         f"挂出 {len(placed)} / 否决 {len(rejected)}"
                         + (f"；本轮结算成交 {len(settled['filled'])}" if settled["filled"] else ""),
                         detail={"placed": placed, "rejected": rejected, "settled": settled})
+    # P2：没有任何买入意向 → 记一条「观望」到 journal（连续性：为什么这几天没动）
+    if not dry_run and not any(it.side == "buy" for it in intents):
+        try:
+            skip_reason = ((json.loads(raw) or {}).get("skip_reason") or "").strip() if raw else ""
+        except (ValueError, TypeError):
+            skip_reason = ""       # debate 等非纯 JSON 输出解析失败 → 记空原因，不阻断
+        agent_store.journal_add(agent_id, "", "", today, slot, _mkt_regime, {},
+                                "skip", skip_reason or "（未记原因）")
 
     # ⑥ 复盘：确定性失败检测
     # 教训基于**真正成交**的（来自本轮结算），不是刚挂出的委托——挂单未必成交

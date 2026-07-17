@@ -112,6 +112,52 @@ def test_for_ai_deterministic_under_ties():
     assert a == b and a != "", "等 hits 下 for_ai 两次调用输出不一致（非确定性）"
 
 
+def test_journal_self_view_shows_decisions_with_reasons():
+    """P2（连续性）：自视图喂回自己最近的决策(买/观望)+**当时写下的理由原话**+regime。"""
+    _fresh_db()
+    import agent_loop as al
+    agent_store.journal_add(17, "002354", "天娱数科", "2026-07-17", "早盘",
+                            "down/cold", {"pa_score": 77}, "buy", "形态分最高、低位顺势")
+    agent_store.journal_add(17, "", "", "2026-07-16", "尾盘", "down/cold", {},
+                            "skip", "大盘弱、观望等企稳")
+    block = al._agent_journal_block(17)
+    assert "买入" in block and "观望" in block, f"缺买/观望分类: {block}"
+    assert "形态分最高" in block and "观望等企稳" in block, "缺当时理由原话"
+    assert "大盘down/cold" in block, "缺 regime 标注"
+
+
+def test_journal_outcome_stapled_and_idempotent():
+    """P2：结算后结果贴回买入行，自视图显示超额+冻结分位；二次 staple 不改（幂等）。"""
+    _fresh_db()
+    import agent_loop as al
+    agent_store.journal_add(17, "002354", "天娱", "2026-06-10", "早盘", "flat/neutral",
+                            {}, "buy", "试一笔")
+    agent_store.journal_staple_outcome(17, "002354", "2026-06-10", -9.99, 8)
+    block = al._agent_journal_block(17)
+    assert "20日超额 -9.99%" in block and "第 8 百分位" in block, f"结果未贴回: {block}"
+    agent_store.journal_staple_outcome(17, "002354", "2026-06-10", 5.0, 90)   # 再贴
+    assert agent_store.journal_of(17)[0]["x20"] == -9.99, "二次 staple 改了已结算行（应幂等）"
+
+
+def test_journal_isolated_per_agent():
+    """P2：自视图只看自己的 journal（account 隔离，多-agent 对照干净）。"""
+    _fresh_db()
+    import agent_loop as al
+    agent_store.journal_add(17, "002354", "天娱", "2026-07-17", "早盘", "", {}, "buy", "a")
+    agent_store.journal_add(18, "600519", "茅台", "2026-07-17", "早盘", "", {}, "buy", "b")
+    assert "002354" in al._agent_journal_block(17) and "600519" not in al._agent_journal_block(17)
+
+
+def test_regime_tag_coarse_and_degrades():
+    """P2：regime tag 粗粒度 趋势/情绪；数据缺则降级 flat/neutral（不抛）。"""
+    import agent_loop as al
+    up = {"上证指数": {"ma20": 3000.0, "last": [{"close": 3100.0}]}}
+    assert al._regime_tag(up, {"limit_up": 80, "limit_down": 5}) == "up/hot"
+    down = {"上证指数": {"ma20": 3000.0, "last": [{"close": 2900.0}]}}
+    assert al._regime_tag(down, {"limit_up": 5, "limit_down": 40}) == "down/cold"
+    assert al._regime_tag({}, {}) == "flat/neutral", "缺数据未降级"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

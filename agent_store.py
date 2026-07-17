@@ -131,6 +131,20 @@ CREATE TABLE IF NOT EXISTS entries(
   UNIQUE(agent_id, code, entry_date)
 );
 CREATE INDEX IF NOT EXISTS idx_entries_open ON entries(settled_at, entry_date);
+-- 情节记忆 journal（P2）：append-only。每条=一次决策(买/跳过/卖)，带**当时已写下的理由**
+-- （买=reason / 跳过=skip_reason，复用现成的一句话、不新增 LLM 负担）；结算后把结果贴上。
+-- 永不回改 → 结构上不会「变动」。既是交易 agent 自视图的来源，也是用户面按 code 查的底座。
+CREATE TABLE IF NOT EXISTS journal(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_id INTEGER NOT NULL, code TEXT DEFAULT '', name TEXT DEFAULT '',
+  date TEXT NOT NULL, slot TEXT DEFAULT '', regime TEXT DEFAULT '',
+  signals TEXT DEFAULT '',        -- 决策时属性快照(JSON)
+  action TEXT NOT NULL,           -- buy / skip / sell / hold
+  summary TEXT DEFAULT '',        -- 当时理由(buy=reason / skip=skip_reason)
+  x20 REAL, x20_pctile INTEGER, settled_at TEXT DEFAULT ''   -- 结算时贴上的结果(仅 buy)
+);
+CREATE INDEX IF NOT EXISTS idx_journal_agent ON journal(agent_id, id);
+CREATE INDEX IF NOT EXISTS idx_journal_code ON journal(code, id);
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
 """
 
@@ -283,6 +297,44 @@ def entries(agent_id: int | None = None, limit: int = 50) -> list[dict[str, Any]
     args.append(limit)
     with _conn() as c:
         return [dict(r) for r in c.execute(sql, args)]
+
+
+# ── 情节记忆 journal（P2）─────────────────────────────────────────────────────
+def journal_add(agent_id: int, code: str, name: str, date: str, slot: str,
+                regime: str, signals: dict[str, Any] | None, action: str,
+                summary: str) -> None:
+    """记一条决策到 journal（append-only）。summary 用**已有的**理由原话，不新增 LLM 调用。"""
+    with _LOCK, _conn() as c:
+        c.execute(
+            "INSERT INTO journal(agent_id,code,name,date,slot,regime,signals,action,summary) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (agent_id, code or "", name or "", date, slot or "", regime or "",
+             json.dumps(signals or {}, ensure_ascii=False), action, summary or ""))
+
+
+def journal_of(agent_id: int, limit: int = 8) -> list[dict[str, Any]]:
+    """某 agent 最近 N 条决策（自视图）。id 降序=最近在前，确定性。"""
+    with _conn() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT * FROM journal WHERE agent_id=? ORDER BY id DESC LIMIT ?", (agent_id, limit))]
+
+
+def journal_for_code(code: str, limit: int = 8) -> list[dict[str, Any]]:
+    """某只股票上全舰队的历史决策（用户面「本台对这只票的看法」house-view，P2c/P3）。"""
+    with _conn() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT * FROM journal WHERE code=? AND action='buy' ORDER BY id DESC LIMIT ?",
+            (code, limit))]
+
+
+def journal_staple_outcome(agent_id: int, code: str, date: str,
+                           x20: float | None, pctile: int | None) -> None:
+    """结算时把结果贴到对应的买入 journal 行（一次性，settled_at 空才贴 → 幂等）。"""
+    with _LOCK, _conn() as c:
+        c.execute(
+            "UPDATE journal SET x20=?, x20_pctile=?, settled_at=? "
+            "WHERE agent_id=? AND code=? AND date=? AND action='buy' AND settled_at=''",
+            (x20, pctile, datetime.now().isoformat(timespec="seconds"), agent_id, code, date))
 
 
 # ── 教训库 ─────────────────────────────────────────────────────────────────

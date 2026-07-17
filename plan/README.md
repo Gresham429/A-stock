@@ -18,11 +18,14 @@
 | [2026-07-16-agent-evolution-design](2026-07-16-agent-evolution-design.md) | Multi-Agent 模拟交易 + 失败归因驱动的提示词进化（总设计） |
 | [2026-07-16-outcome-driven-lessons-design](2026-07-16-outcome-driven-lessons-design.md) | 结果导向教训：从「买入时长得像错」到「事后证明错」（超额结算 + 判罪线来自分布） |
 | [2026-07-16-decision-data-plane-design](2026-07-16-decision-data-plane-design.md) | 决策数据面：给候选股补 K 线结构 + 真·大盘块，让提示词能满足自己注入的规则 |
+| [2026-07-18-agent-memory-redesign](2026-07-18-agent-memory-redesign.md) | **agent 记忆重构 P1–P3**：共享底座 journal(冻结分位/情节自视图/个股 house-view/舰队只读层) |
+| [2026-07-17-intraday-agent-scheduler-design](2026-07-17-intraday-agent-scheduler-design.md) | 盘中调度器：守护线程每 5 分钟探一次，长期挂机也每桶自动跑 |
 
 ### 数据与选股
 | 文档 | 一句话 |
 |------|--------|
 | [2026-07-15-full-market-universe-design](2026-07-15-full-market-universe-design.md) | 全市场股票池 + 板块日变化统计 |
+| [2026-07-17-sector-history-backfill-design](2026-07-17-sector-history-backfill-design.md) | 板块走势历史回填：逐股日 K 补 ~250 交易日 + 面板分栏/走势窗口 |
 | [2026-07-13-all-sector-screening-and-market-overview](2026-07-13-all-sector-screening-and-market-overview.md) | 全板块两级选股 + 大盘局势研判 |
 
 ### AI 知识、缓存与溯源

@@ -28,7 +28,8 @@ logger = logging.getLogger(__name__)
 _DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 DB_PATH = os.path.join(_DIR, "universe.db")
 _LOCK = threading.Lock()
-_backfill_lock = threading.Lock()
+_backfill_lock = threading.Lock()      # 板块归属回填（逐股 slist）单飞
+_sd_backfill_lock = threading.Lock()   # 板块日变化历史回填单飞（与归属回填独立，互不阻塞）
 
 # 申万一级 31 类（2021 版）——硬编码锚点。slist 标签顺序不稳定、Ⅱ/Ⅲ 后缀只有部分股票带，
 # 靠顺序/后缀解析不可靠；用这份闭集匹配实测 12/12 命中。
@@ -403,6 +404,49 @@ def status() -> dict[str, Any]:
 
 
 # ── 板块日变化统计 ─────────────────────────────────────────────────────────
+def _agg_sector_payload(date: str, snap: dict[str, Any], memb: list) -> list[tuple]:
+    """按板块聚合某一天的快照 -> sector_daily 行元组。
+
+    `snapshot_daily`（当日 live）与 `backfill_sector_daily`（历史回填）**共用本函数**，
+    保证两者口径完全一致、不漂移；纯函数、零网络，可离线单测。
+
+    参数：
+        snap: code -> {"chg_pct", "amount", "price", "name"}（price<=0 的股跳过）。
+        memb: `stock_sectors` 行（含 code/sector/kind）；一股可属多板块（多行）。
+    返回：INSERT 用的 12 元组列表，列序同 `sector_daily` 表。
+    """
+    agg: dict[str, dict[str, Any]] = {}
+    for m in memb:
+        q = snap.get(m["code"])
+        if not q or q["price"] <= 0:
+            continue
+        a = agg.setdefault(m["sector"], {"kind": m["kind"], "chg": [], "up": 0, "down": 0,
+                                         "lu": 0, "amt": 0.0, "lead": None})
+        chg = q["chg_pct"]
+        a["chg"].append(chg)
+        a["amt"] += q["amount"]
+        if chg > 0:
+            a["up"] += 1
+        elif chg < 0:
+            a["down"] += 1
+        # 涨停近似：主板 ±10%、创业板/科创板 ±20%（留 0.3 容差，不取精确撮合价）
+        cap = 19.7 if m["code"].startswith(("30", "688")) else 9.7
+        if chg >= cap:
+            a["lu"] += 1
+        if a["lead"] is None or chg > a["lead"]["chg_pct"]:
+            a["lead"] = {"code": m["code"], "name": q.get("name", ""), "chg_pct": chg}
+    payload = []
+    for sector, a in agg.items():
+        if not a["chg"]:
+            continue
+        lead = a["lead"] or {}
+        payload.append((date, sector, a["kind"], len(a["chg"]),
+                        round(sum(a["chg"]) / len(a["chg"]), 3), a["up"], a["down"], a["lu"],
+                        a["amt"], lead.get("code", ""), lead.get("name", ""),
+                        round(lead.get("chg_pct", 0.0), 3)))
+    return payload
+
+
 def snapshot_daily(date: str = "") -> int:
     """按板块聚合当日全市场快照 -> sector_daily（支撑「板块每日变化对比」）。
 
@@ -420,35 +464,7 @@ def snapshot_daily(date: str = "") -> int:
         logger.warning("板块日统计跳过：板块归属尚未回填")
         return 0
     snap = {r["code"]: r for r in rows}
-    agg: dict[str, dict[str, Any]] = {}
-    for m in memb:
-        q = snap.get(m["code"])
-        if not q or q["price"] <= 0:
-            continue
-        a = agg.setdefault(m["sector"], {"kind": m["kind"], "chg": [], "up": 0, "down": 0,
-                                         "lu": 0, "amt": 0.0, "lead": None})
-        chg = q["chg_pct"]
-        a["chg"].append(chg)
-        a["amt"] += q["amount"]
-        if chg > 0:
-            a["up"] += 1
-        elif chg < 0:
-            a["down"] += 1
-        # 涨停近似：主板 ±10%、创业板/科创板 ±20%（留 0.3 容差，不取精确撮合价）
-        cap = 19.7 if q["code"].startswith(("30", "688")) else 9.7
-        if chg >= cap:
-            a["lu"] += 1
-        if a["lead"] is None or chg > a["lead"]["chg_pct"]:
-            a["lead"] = q
-    payload = []
-    for sector, a in agg.items():
-        if not a["chg"]:
-            continue
-        lead = a["lead"] or {}
-        payload.append((date, sector, a["kind"], len(a["chg"]),
-                        round(sum(a["chg"]) / len(a["chg"]), 3), a["up"], a["down"], a["lu"],
-                        a["amt"], lead.get("code", ""), lead.get("name", ""),
-                        round(lead.get("chg_pct", 0.0), 3)))
+    payload = _agg_sector_payload(date, snap, memb)
     with _LOCK, _conn() as c:
         c.executemany(
             "INSERT INTO sector_daily(date,sector,kind,n,avg_chg,up_n,down_n,limit_up_n,"
@@ -461,6 +477,84 @@ def snapshot_daily(date: str = "") -> int:
     logger.info("板块日统计 %s: %d 个板块%s", date, len(payload),
                 f"（清理 {dropped} 行过期）" if dropped else "")
     return len(payload)
+
+
+def backfill_sector_daily(days: int = 95, workers: int = 10) -> dict[str, Any]:
+    """回填过去 ~一个季度的 `sector_daily`（板块走势历史）。
+
+    逐股拉日 K（新浪 getKLineData，不封 IP），按**当前**板块归属逐日聚合，口径与 live
+    `snapshot_daily` 完全一致（共用 `_agg_sector_payload`）。**只填缺失日期**（不覆盖已有
+    live 行），可重复运行。
+
+    未来函数安全：某历史日 `avg_chg` 仅用当日/前一日既成收盘价（同「日 K low 补条件单」，
+    见 plan/2026-07-17-sector-history-backfill-design.md）。近似：当前归属套历史日有轻微错配、
+    前复权口径致除权日略偏、amount 由 close×volume 估。
+
+    返回 {ok, fetched(股票数), days(写入天数), rows(写入行数)}。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    if not _sd_backfill_lock.acquire(blocking=False):
+        logger.info("板块历史回填：已有一轮在跑，跳过")
+        return {"ok": False, "msg": "回填进行中"}
+    try:
+        with _conn() as c:
+            memb = c.execute("SELECT code, sector, kind FROM stock_sectors").fetchall()
+            names = {r["code"]: r["name"] for r in c.execute("SELECT code, name FROM stocks")}
+            have = {r["date"] for r in c.execute("SELECT DISTINCT date FROM sector_daily")}
+        if not memb:
+            logger.warning("板块历史回填跳过：板块归属尚未回填")
+            return {"ok": False, "msg": "板块归属未就绪"}
+        codes = sorted({m["code"] for m in memb})
+        logger.info("板块历史回填开始：%d 只 × ~%d 日 K（已有 %d 天，只填缺失）",
+                    len(codes), days, len(have))
+
+        # 1) 并发逐股拉日 K，算每根 K 的 chg_pct，按日归组（跳过已有日期）
+        per_day: dict[str, dict[str, Any]] = {}
+        done = [0]
+
+        def _fetch(code: str) -> tuple[str, list]:
+            return code, ds.sina_kline(code, num=days + 5, scale=240)
+
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+            for code, bars in ex.map(_fetch, codes):
+                done[0] += 1
+                if done[0] % 500 == 0:
+                    logger.info("板块历史回填抓取 %d/%d", done[0], len(codes))
+                if len(bars) < 2:
+                    continue
+                nm = names.get(code, "")
+                for i in range(1, len(bars)):
+                    prev_c = bars[i - 1]["close"]
+                    cur = bars[i]
+                    if prev_c <= 0 or cur["close"] <= 0:
+                        continue
+                    d = str(cur["date"])[:10]
+                    if d in have:  # live 已有 / 本轮已处理的日期，不重算
+                        continue
+                    per_day.setdefault(d, {})[code] = {
+                        "chg_pct": (cur["close"] / prev_c - 1) * 100,
+                        "amount": cur["close"] * cur["volume"],
+                        "price": cur["close"], "name": nm}
+
+        # 2) 逐日聚合 + 写入（ON CONFLICT DO NOTHING：绝不覆盖 live 行）
+        total_rows = 0
+        for d in sorted(per_day):
+            payload = _agg_sector_payload(d, per_day[d], memb)
+            if not payload:
+                continue
+            with _LOCK, _conn() as c:
+                c.executemany(
+                    "INSERT INTO sector_daily(date,sector,kind,n,avg_chg,up_n,down_n,"
+                    "limit_up_n,amount,leader_code,leader_name,leader_chg) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(date,sector) DO NOTHING",
+                    payload)
+            total_rows += len(payload)
+        purge()
+        logger.info("板块历史回填完成：写 %d 天 / %d 行", len(per_day), total_rows)
+        return {"ok": True, "fetched": len(codes), "days": len(per_day), "rows": total_rows}
+    finally:
+        _sd_backfill_lock.release()
 
 
 def purge(days: int = SECTOR_KEEP_DAYS) -> int:

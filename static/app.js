@@ -1120,6 +1120,13 @@ function secKind(k){ SEC_KIND=k;
 const secPct=v=>{const c=v>0?'var(--up)':v<0?'var(--down)':'var(--flat)';
   return `<span class="num" style="color:${c}">${v>0?'+':''}${(v||0).toFixed(2)}%</span>`;};
 
+async function backfillSectors(){
+  if(!confirm('后台逐股拉日K，补齐约一个季度的板块走势历史（约几分钟）。期间可继续用，完成后点板块类型按钮刷新。开始？')) return;
+  try{ const j=await (await fetch('/api/sectors/backfill',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({days:95})})).json();
+    alert(j.running?'已在后台开始回填（约几分钟）。完成后点上方板块类型按钮刷新即可看到走势。':('未启动：'+(j.msg||'')));
+  }catch(e){ alert('触发失败：'+e); }
+}
+
 async function reloadSectors(force){
   const gen=++secSeq, list=document.getElementById('secList');
   list.innerHTML='<div class="muted small" style="padding:14px">读取板块统计…</div>';
@@ -1130,9 +1137,12 @@ async function reloadSectors(force){
     if(gen!==secSeq) return;               // 过期响应丢弃，防切换时错位
     const st=j.status||{};
     const pend=st.sectors_pending||0;
+    const sdDays=st.sector_daily_days||0;
     document.getElementById('secStatus').innerHTML =
       `${j.date||'—'} · 全池 ${st.total||0} 只(可选 ${st.eligible||0}) · 板块 ${st.sector_count||0} 个`
-      + ` · 库 ${st.db_mb||0}MB(留${Math.round((st.keep_days||365)/365)}年·${st.sector_daily_days||0}天)`
+      + ` · 库 ${st.db_mb||0}MB(留${Math.round((st.keep_days||365)/365)}年·<b>${sdDays}天</b>)`
+      + ` <button class="mini" onclick="backfillSectors()" title="逐股日K补齐约一个季度历史，后台约几分钟">📈 回填走势历史</button>`
+      + (sdDays<20?` <span class="small" style="color:var(--gold)">走势数据仅 ${sdDays} 天，点回填补齐季度</span>`:'')
       + (pend>0?` · <span style="color:var(--gold)">板块回填中 ${st.sectors_tagged||0}/${st.eligible||0}</span>`:'');
     if(!j.rows||!j.rows.length){ list.innerHTML='<div class="muted small" style="padding:14px">暂无数据。板块归属回填完成后自动出现。</div>'; return; }
     const mxAmt=Math.max(...j.rows.map(r=>r.amount||0),1);
@@ -1158,17 +1168,42 @@ async function openSectorDetail(nameEnc){
   const name=decodeURIComponent(nameEnc);
   box.innerHTML=`<div class="subh">${esc(name)}</div><div class="muted small">读取成分股…</div>`;
   try{
-    const j=await (await fetch(`/api/sectors/${nameEnc}?days=30`)).json();
+    const j=await (await fetch(`/api/sectors/${nameEnc}?days=95`)).json();
     if(gen!==secSeq) return;
     const hist=j.history||[];
-    const spark=hist.length>1?sparkline(hist.map(h=>h.avg_chg)):'';
+    const spark=hist.length>1?sectorTrend(hist):'';
     box.innerHTML=`<div class="subh">${esc(name)} · 成分股 ${j.total||0} 只${j.total>40?'（显示流通市值前 40）':''}</div>`
-      + (spark?`<div class="small muted" style="margin-bottom:6px">近 ${hist.length} 日板块均涨跌</div>${spark}`:'')
+      + (spark
+          ? `<div class="small muted" style="margin-bottom:2px">近 ${hist.length} 日「每日板块均涨跌」走势${hist.length<20?'（数据偏少，点上方"📈回填走势历史"补齐季度）':''}</div>${spark}`
+          : '<div class="small muted" style="margin-bottom:6px">走势数据不足（需≥2 天）——点上方"📈回填走势历史"。</div>')
       + `<div class="sec-mem">${(j.members||[]).map(m=>
           `<div onclick="closeSectors();openDetail('${m.code}')">
              <span>${esc(m.name)} <span class="c">${m.code}</span></span>
              <span>${secPct(m.chg_pct)}</span></div>`).join('')}</div>`;
   }catch(e){ if(gen===secSeq) box.innerHTML=`<div class="subh">${esc(name)}</div><div class="muted small">读取失败。</div>`; }
+}
+
+/** 板块走势：近 N 日「每日板块均涨跌」折线（放大版，标注最高/最低值 + 起止日期，红涨绿跌） */
+function sectorTrend(hist){
+  if(!hist||hist.length<2) return '';
+  const vals=hist.map(h=>h.avg_chg||0);
+  const W=560,H=96,padL=4,padR=4,padT=12,padB=16;
+  const mn=Math.min(...vals,0), mx=Math.max(...vals,0), rng=(mx-mn)||1;
+  const x=i=>padL+i*(W-padL-padR)/(vals.length-1);
+  const y=v=>padT+(1-(v-mn)/rng)*(H-padT-padB);
+  const pts=vals.map((v,i)=>`${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  const col=vals[vals.length-1]>=0?'var(--up)':'var(--down)';
+  const zero=y(0).toFixed(1);
+  const d0=(hist[0].date||'').slice(5), d1=(hist[hist.length-1].date||'').slice(5);
+  const imx=vals.indexOf(mx), imn=vals.indexOf(mn);
+  const lbl=(i,v)=>`<text x="${x(i).toFixed(1)}" y="${(y(v)+(v>=0?-3:9)).toFixed(1)}" fill="var(--muted)" font-size="9" font-family="var(--mono)" text-anchor="middle">${v>0?'+':''}${v.toFixed(1)}%</text>`;
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:${H}px">
+    <line x1="${padL}" y1="${zero}" x2="${W-padR}" y2="${zero}" stroke="var(--line2)" stroke-dasharray="3 3"/>
+    <polyline points="${pts}" fill="none" stroke="${col}" stroke-width="1.6"/>
+    ${lbl(imx,mx)}${lbl(imn,mn)}
+    <text x="${padL}" y="${H-4}" fill="var(--muted)" font-size="9" font-family="var(--mono)">${d0}</text>
+    <text x="${W-padR}" y="${H-4}" fill="var(--muted)" font-size="9" font-family="var(--mono)" text-anchor="end">${d1}</text>
+  </svg>`;
 }
 
 /** 板块均涨跌迷你折线（零依赖内联 SVG，红涨绿跌） */

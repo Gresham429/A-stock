@@ -964,6 +964,19 @@ def api_sectors_snapshot():
     return jsonify({"sectors": universe_store.snapshot_daily()})
 
 
+@app.route("/api/sectors/backfill", methods=["POST"])
+def api_sectors_backfill():
+    """后台回填板块日变化历史(~一个季度)，让板块走势有足够数据。逐股日 K，只填缺失日期。"""
+    try:
+        days = int((request.get_json(silent=True) or {}).get("days", 95))
+    except (TypeError, ValueError):
+        days = 95
+    days = max(10, min(days, 250))  # 夹在 [10, 250] 交易日
+    threading.Thread(target=universe_store.backfill_sector_daily,
+                     kwargs={"days": days}, daemon=True).start()
+    return jsonify({"ok": True, "running": True, "days": days})
+
+
 @app.route("/api/sectors/<name>")
 def api_sector_detail(name: str):
     """单板块：近 N 日变化历史 + 成分股行情（按流通市值降序，上限 40）。"""
@@ -1152,6 +1165,43 @@ def _agent_boot() -> None:
                         len(r.get("filled") or []), len(r.get("lessons") or []))
 
 
+# 盘中每 5 分钟探一次日循环。claim_slot 保证每桶只真跑一次，多余 tick 近乎零成本；
+# 解决「app 在非交易时段启动、此后当日决策永不自动触发」——见
+# plan/2026-07-17-intraday-agent-scheduler-design.md。
+_AGENT_TICK_SEC = 300
+_agent_tick_lock = threading.Lock()  # 单飞：一轮没跑完就跳过本次 tick，不叠并发 run_all
+
+
+def _agent_tick() -> None:
+    """一次调度心跳：非阻塞抢单飞锁 → 跑一轮 `_agent_boot`（run_all(require_open=True)）。
+
+    抢不到锁（上一轮还在跑）就跳过——20 个 agent 一轮 workers=3 可能 7~20 分钟，
+    不能让 5 分钟的 tick 叠出第二个并发 run_all（会翻倍行情/LLM 并发、易被限流）。
+    """
+    if not _agent_tick_lock.acquire(blocking=False):
+        logger.info("agent 调度：上一轮未结束，跳过本次 tick")
+        return
+    try:
+        _agent_boot()
+    finally:
+        _agent_tick_lock.release()
+
+
+def _agent_scheduler() -> None:
+    """盘中日循环调度器：先立刻跑一次（等价旧的启动即 `_agent_boot`），之后每 5 分钟探一次。
+
+    `require_open` + `claim_slot` 双门保证：非交易时段只补条件单；每桶只真决策一次。
+    守护线程，绝不因单次异常整体退出。
+    """
+    _agent_tick()
+    while True:
+        time.sleep(_AGENT_TICK_SEC)
+        try:
+            _agent_tick()
+        except Exception as e:  # noqa: BLE001 调度器绝不能因单次心跳异常而停摆
+            logger.warning("agent 调度心跳异常（下次继续）：%s", e)
+
+
 def _universe_boot() -> None:
     """启动时后台预热：名单刷新 + 板块回填续跑 + 当日统计。不阻塞启动。"""
     try:
@@ -1173,7 +1223,9 @@ def _universe_boot() -> None:
         r = factor_lab.refresh_if_stale()
         if r.get("skipped"):
             logger.info("因子 IC: %s", r["skipped"])
-        _agent_boot()
+        # 启动即跑一次 + 之后每 5 分钟探一次（长期挂机也能每桶自动跑，见
+        # plan/2026-07-17-intraday-agent-scheduler-design.md）。守护线程，不阻塞预热。
+        threading.Thread(target=_agent_scheduler, daemon=True).start()
     except (OSError, ValueError, sqlite3.Error) as e:
         logger.warning("全市场池预热失败（不影响其余功能）: %s", e)
 

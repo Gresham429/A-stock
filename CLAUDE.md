@@ -28,7 +28,7 @@ app.py 用显式 import 带回名字，路由调用点与 `app._X` 可达性不�
 | 文件 | 职责 |
 |------|------|
 | `datasources.py` | 行情/指标/K线/财报/新闻/研报/龙虎榜/解禁 + `sina_all_stocks`(全A名单+快照,5527只/12s) + `index_quotes`/`market_breadth`(大盘) + `global_markets`(外围数值) + `concept_tags`(东财板块) |
-| `universe_store.py` | **全市场池**(`data/universe.db`)：全A名单 + 板块归属(东财 slist 逐股回填~100min) + 板块日变化。`codes_of`/`sector_of`/`sectors_map`/`taxonomy`/`snapshot_daily`/`sector_ranking` |
+| `universe_store.py` | **全市场池**(`data/universe.db`)：全A名单 + 板块归属(东财 slist 逐股回填~100min) + 板块日变化。`codes_of`/`sector_of`/`sectors_map`/`taxonomy`/`snapshot_daily`/`sector_ranking`/**`backfill_sector_daily`**(逐股日K补历史·`_agg_sector_payload` 与 live 共用口径) |
 | `universe.py` | **降级为「精选龙头」fallback**(10×48×170)。`universe_store` 未就绪时兜底 + `is_leader` 标记 |
 | `news_store.py` | L2 新闻库(滚动1年) + `is_trading_day`(动态节假日) |
 | `notes_store.py` | L5 私域笔记(永久) |
@@ -64,7 +64,8 @@ app.py 用显式 import 带回名字，路由调用点与 `app._X` 可达性不�
 `test_universe_store.py`(9) 板块解析 · `test_screen_branches.py`(5) 选股三分支 ·
 `test_agent_gates.py`(10) agent 门+挂单 · `test_factor_lab.py`(6) 因子方向 ·
 `test_structure.py`(12) K线结构摘要 · `test_outcome.py`(12) 结果结算 ·
-`test_excess_dist.py`(14) 超额分布+判罪线 · `test_agent_memory.py`(6) 个体记忆 —— **共 74 例**
+`test_excess_dist.py`(14) 超额分布+判罪线 · `test_agent_memory.py`(6) 个体记忆 ·
+`test_sector_backfill.py`(13) 板块聚合口径(`_agg_sector_payload`) —— **共 87 例**
 
 ## 数据源 & 坑（改代码前必读）
 
@@ -139,6 +140,8 @@ app.py 用显式 import 带回名字，路由调用点与 `app._X` 可达性不�
 |------|------|
 | **索引：plan/ 全部文档** | `plan/README.md`（本会话加，按主题分组） |
 | 全市场股票池 + 板块日变化 | `plan/2026-07-15-full-market-universe-design.md` |
+| **盘中 agent 调度器**（长期挂机也每桶自动跑） | `plan/2026-07-17-intraday-agent-scheduler-design.md` |
+| **板块走势历史回填**（补齐一个季度） | `plan/2026-07-17-sector-history-backfill-design.md` |
 | multi-agent + 失败归因 + 提示词进化（含**个体记忆**两层） | `plan/2026-07-16-agent-evolution-design.md` |
 | **决策数据面**（K线结构 + 真·大盘块） | `plan/2026-07-16-decision-data-plane-design.md` |
 | **结果导向教训**（超额结算 + 判罪线来自分布） | `plan/2026-07-16-outcome-driven-lessons-design.md` |
@@ -170,6 +173,10 @@ app.py 用显式 import 带回名字，路由调用点与 `app._X` 可达性不�
   `refresh_if_stale()` 在启动时惰性重跑（14s）。
 - **agent 三道门**：非交易日 → 交易时段(`require_open`) → **时段桶原子占位**(`claim_slot`)。
   时段桶=早盘/尾盘，**错过不补**。
+- **盘中调度器**（2026-07-17，`app._agent_scheduler`）：日循环不再只在启动跑一次——守护线程
+  **每 5 分钟**探一次 `run_all(require_open=True)`。**长期挂机、非交易时段启动 app 也能每桶自动跑**
+  （此前凌晨开 app → 启动那次命中非交易时段跳过 → 当天再不触发，早盘桶空）。`claim_slot` 幂等
+  保证每桶只真跑一次（多余 tick 秒返回、零 LLM）；`_agent_tick_lock` 单飞防并发叠加。
 - **限价挂单**：AI 给 `limit_price`，`place()` 挂单不即时成交；`sweep_orders()` 用
   分时(当日)/日K(隔夜)判定触及，**成交价锁 limit 不取更优**。当日有效。
 - **agent 记忆分两层**（2026-07-16）：**个体**——每 agent 决策只召回**自己的**教训
@@ -189,13 +196,14 @@ python3 tests/test_structure.py          # K线结构摘要 12 例（改 structu
 python3 tests/test_outcome.py            # 结果结算 12 例（改 outcome/地平线/超额必跑）
 python3 tests/test_excess_dist.py        # 超额分布+判罪线 14 例（改判罪/分布必跑）
 python3 tests/test_agent_memory.py       # 个体记忆 6 例（改 for_ai/战绩块必跑）
-# 全部零依赖、离线、不打网络。共 74 例。
+python3 tests/test_sector_backfill.py    # 板块聚合口径 13 例（改 _agg_sector_payload/snapshot_daily/回填必跑）
+# 全部零依赖、离线、不打网络。共 87 例。
 
 # ⚠️ 改**决策提示词/数据面**后，必须实跑一个 debate 档（single 跑通≠debate 跑通，
 #    辩论是 token 预算最短板；实测踩过两次）：
 #    python3 -c "import agent_loop as al; print(al.run_day(18, dry_run=True, force=True))"
 
-python3 -c "import ast; [ast.parse(open(f).read()) for f in ['app.py','agent_loop.py','screening.py','ai_blocks.py','outcome.py','structure.py']]"
+python3 -c "import ast; [ast.parse(open(f).read()) for f in ['app.py','agent_loop.py','screening.py','ai_blocks.py','outcome.py','structure.py','universe_store.py']]"
 node --check static/app.js
 
 python app.py &                          # ⚠️ 一律用 127.0.0.1 别用 localhost：
@@ -246,7 +254,7 @@ curl -s 127.0.0.1:5000/api/agents               # agent 存档 + 教训汇总
 
 1. **让 20 个 agent 攒数据（唯一的主线待办，不卡代码、卡时间）** —— 教训库**仍是空的**，
    「学失败→反哺提示词」+ 个体记忆 + 结果导向判罪 **全部机制就位但零真实数据验证**。
-   开 app 自动跑（交易时段·每桶一次）。
+   开 app 即自动跑（**盘中调度器每 5 分钟探一次，每桶一次；何时启动 app 都行**，2026-07-17 修）。
    - **第一批 20 日结算约 2026-08-13 落地**（今日建的仓满 20 交易日）；教训要「跑输历史 90%」才产生，稀疏。
    - ⚠️ 数据面修好 ≠ 一定成交：实测 07-16 大盘跌，AI **正确**拒绝逆势做多 → 0 成交。
      **要失败样本得等 AI 真愿出手的行情，别为攒数据松风控。**
@@ -270,7 +278,8 @@ curl -s 127.0.0.1:5000/api/agents               # agent 存档 + 教训汇总
 - **测试盲区**：`fees` / `portfolio`(现金扣减) / `template_store` / `paper_store` 撮合 /
   `provenance` **均无单测**（本会话新增的 `structure`/`outcome`/`excess_dist`/`agent_memory` 已有测）。
 - **`DebateDecider` 默认不启用**（UI 可选）：先用 single 拿基线，用数据证明需要再切。
-- **launchd 定时全不挂**（用户决定）：agent「不开 app 就意味着那天不炒股」；
+- **launchd 定时全不挂**（用户决定）：agent「不开 app 就意味着那天不炒股」——但**只要 app 开着**，
+  盘中调度器就每桶自动跑（无需在交易时段启动，2026-07-17 修）。
   板块统计「每交易日都开 app，`_universe_boot` 已覆盖」。
 
 ### 🔒 卡在数据源（代码已就位，拿到源即接；用户要求提醒他加）

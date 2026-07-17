@@ -273,7 +273,7 @@ curl -s 127.0.0.1:5000/api/agents               # agent 存档 + 教训汇总
 用户 2026-07-18 凌晨明确：整理文档后新开会话自主推进优化、明早审阅。**🟡 类未经用户确认不要改。**
 每做完一项：补离线单测 → 跑全套件(12 文件) → 若改后端则重启 app 验 boot → 单独 commit 推送。
 
-🟢 **可自主执行（安全、加值、有测试兜底）** —— 2026-07-18 自主会话已推进 #1–#3
+🟢 **可自主执行（安全、加值、有测试兜底）** —— 2026-07-18 自主会话已全部完成 #1–#4
 1. ✅ **regime-view（P3 收尾）**（commit fee320f）：`agent_store.journal_for_regime` +
    `ai_blocks._regime_view` + `agent_loop.current_regime` + app.py 大盘研判/选股两处注入。
    test_agent_memory 13→15，全套件绿、boot 验证、实跑得 down/cold 空块无崩。属机制补齐(journal 空时空块)。
@@ -284,8 +284,12 @@ curl -s 127.0.0.1:5000/api/agents               # agent 存档 + 教训汇总
    建议(🟡)首选「让 _pa_score 方向跟池子走」。
 3. ✅ **debate token 校验**（本会话验证，见上「冒烟测试」✅ 行）：agent 18 记忆塞到显示上限
    (记忆块 ~8261 字符)实跑 debate，裁判仍产出完整 JSON、未截断。8000/12000 预算有余量。
-4. ⏳ **浏览器 DOM 真机验证**：前端(板块分栏/高亮/搜索/走势窗口)只做过 node/结构验证。
-   `pip install playwright && playwright install chromium` 后截图核验（装依赖可逆、可自主）。
+4. ✅ **浏览器 DOM 真机验证**（本会话完成）：playwright headless chromium 实开面板，
+   11/11 断言过、零 console error——分栏(list.x=77<detail.x=691)、默认高亮(公用事业)、
+   高亮随点击移动(→非银金融)、走势 SVG(243 天历史)、4 窗口 chip 切换(20/60/120/全部)、
+   搜索过滤(31→1 匹配、清空还原)。截图目视亦确认渲染正确、红涨绿跌。
+   ⚠️ 坑：chromium 要 `env -u HTTP_PROXY... NO_PROXY='*'` 绕代理 + 用 `domcontentloaded`
+   不用 `networkidle`（本页持续轮询永不 idle）。playwright 已装入 miniconda（可 pip uninstall 回退）。
 
 🟡 **需用户签字才改（自主会话只分析列建议，别直接改）**
 - **阈值改动**：`CHASE_HIGH_POS` 85→80（range_pos 是线性惩罚、85 是任意切点）；纪律参数见下。

@@ -161,6 +161,37 @@ def test_stock_house_view_cross_agent():
     assert ai_blocks._stock_house_view("600519") == "", "无记录的票应返回空（不注入空块）"
 
 
+def test_journal_for_regime_fleet_buys_only():
+    """P3：regime-view 底座——按 regime 查全舰队买入决策；只取 buy、跨 agent、regime 精确匹配。"""
+    _fresh_db()
+    agent_store.journal_add(17, "002354", "天娱", "2026-07-17", "早盘", "up/hot", {}, "buy", "追热点")
+    agent_store.journal_add(18, "600519", "茅台", "2026-07-16", "尾盘", "up/hot", {}, "buy", "白马")
+    agent_store.journal_add(19, "", "", "2026-07-15", "早盘", "up/hot", {}, "skip", "观望")   # 非 buy 不计
+    agent_store.journal_add(17, "000001", "平安", "2026-07-14", "早盘", "down/cold", {}, "buy", "别的行情")
+    rows = agent_store.journal_for_regime("up/hot")
+    codes = {r["code"] for r in rows}
+    assert codes == {"002354", "600519"}, f"应只含 up/hot 的买入、跨 agent: {codes}"
+    assert agent_store.journal_for_regime("") == [], "空 regime 应返回 []"
+    assert agent_store.journal_for_regime("never/seen") == [], "无历史的 regime 应返回 []"
+
+
+def test_regime_view_aggregates_settled_and_open():
+    """P3：_regime_view 出「已结算均值+胜率」聚合 + 逐条；无 regime/无历史 → 空块。"""
+    _fresh_db()
+    import ai_blocks
+    agent_store.journal_add(17, "002354", "天娱", "2026-07-17", "早盘", "up/hot", {}, "buy", "追热点")
+    agent_store.journal_staple_outcome(17, "002354", "2026-07-17", 6.0, 88)
+    agent_store.journal_add(18, "600519", "茅台", "2026-07-16", "尾盘", "up/hot", {}, "buy", "白马")
+    agent_store.journal_staple_outcome(18, "600519", "2026-07-16", -2.0, 30)
+    agent_store.journal_add(19, "300750", "宁德", "2026-07-15", "早盘", "up/hot", {}, "buy", "开新仓")  # 未结算
+    view = ai_blocks._regime_view("up/hot")
+    assert "已结算 2 次买入" in view and "跑赢大盘 1/2 次" in view, f"聚合行不对: {view}"
+    assert "平均 20 日超额 +2.00%" in view, f"均值算错(应 (6-2)/2=+2.00%): {view}"
+    assert "追热点" in view and "结果未定" in view, "缺逐条理由/未结算标注"
+    assert ai_blocks._regime_view("") == "", "空 regime 应空块"
+    assert ai_blocks._regime_view("never/seen") == "", "无历史 regime 应空块"
+
+
 def test_regime_tag_coarse_and_degrades():
     """P2：regime tag 粗粒度 趋势/情绪；数据缺则降级 flat/neutral（不抛）。"""
     import agent_loop as al

@@ -57,6 +57,7 @@ from screening import (  # noqa: E402,F401
 from ai_blocks import (  # noqa: E402,F401
     _total_assets, _tier_block, _record_basis_stats, _lesson_block, _agent_blocks,
     _fee_block, _macro_block, _profile_block, _ai_web_context, _stock_house_view,
+    _regime_view,
 )
 # 交易时段判定移到 agent_loop（与 current_slot 同源）；带回以保持路由调用点不变。
 from agent_loop import _market_open  # noqa: E402,F401
@@ -152,7 +153,7 @@ def _market_overview_payload(force: bool = False, with_ai: bool = True) -> dict:
     ai = None
     if config.llm_enabled() and idx.get("indices"):
         try:
-            ai = llm.market_overview(idx["indices"], breadth, _tier_block() + _fee_block() + _lesson_block() + _macro_block() + _ai_web_context("market"))
+            ai = llm.market_overview(idx["indices"], breadth, _tier_block() + _fee_block() + _lesson_block() + _macro_block() + _regime_view(agent_loop.current_regime()) + _ai_web_context("market"))
         except llm.LLMError as e:
             logger.warning("大盘研判 AI 失败: %s", e)
     model = config.DEEPSEEK_MODEL if config.llm_enabled() else None
@@ -889,7 +890,7 @@ def recommend_screen():
     if not rows:
         return jsonify({"ok": False, "msg": "候选池行情拉取失败，请重试"}), 502
     market_ctx = _market_overview_payload().get("ai")  # 复用缓存的大盘研判结论
-    web_ctx = _tier_block() + _fee_block() + _lesson_block() + _macro_block() + _ai_web_context("market")
+    web_ctx = _tier_block() + _fee_block() + _lesson_block() + _macro_block() + _regime_view(agent_loop.current_regime()) + _ai_web_context("market")
     try:
         result = llm.market_screen(rows, capital, focus, market_ctx, web_ctx)
     except llm.LLMError as e:

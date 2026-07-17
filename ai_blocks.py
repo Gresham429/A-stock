@@ -105,6 +105,39 @@ def _stock_house_view(code: str) -> str:
         lines.append(head)
     return "\n".join(lines) + "\n\n"
 
+def _regime_view(regime: str) -> str:
+    """【同类行情回看】(regime-view，P3 收尾)：当前大盘 regime tag 下，模拟盘全体 agent
+    历史上出手过几次、结果如何——给大盘研判/选股 AI 一个「同类行情里我们做得怎样」的事实校准。
+
+    共享底座 journal 按 regime 查（`_stock_house_view` 是按 code 查的同底座另一视图）。
+    regime 空 或 该 regime 无历史买入 → 不注入（机制补齐，journal 空时本就空）。事实统计、非规律。
+    """
+    if not regime:
+        return ""
+    try:
+        rows = agent_store.journal_for_regime(regime, limit=12)
+    except (sqlite3.Error, OSError) as e:
+        logger.warning("regime-view 生成失败: %s", e)
+        return ""
+    if not rows:
+        return ""
+    settled = [r for r in rows if r.get("settled_at") and r.get("x20") is not None]
+    lines = [f"【同类行情（大盘 {regime}）回看：模拟盘全体 agent 在此类行情下的出手与结果，"
+             f"事实统计、非规律】"]
+    if settled:
+        avg = sum(r["x20"] for r in settled) / len(settled)
+        win = sum(1 for r in settled if r["x20"] > 0)
+        lines.append(f"已结算 {len(settled)} 次买入：平均 20 日超额 {avg:+.2f}%，"
+                     f"跑赢大盘 {win}/{len(settled)} 次。")
+    for r in reversed(rows[:6]):
+        head = f"- {r['date']} {r.get('code','')} {r.get('name','')}：{r.get('summary') or '（未记理由）'}"
+        if r.get("settled_at") and r.get("x20") is not None:
+            head += f" → 20日超额 {r['x20']:+.2f}%"
+        else:
+            head += " → 结果未定"
+        lines.append(head)
+    return "\n".join(lines) + "\n\n"
+
 def _agent_blocks(ag: dict, cash: float, total: float, n_pos: int) -> str:
     """**每个 agent 自己的**注入块：档位按它自己的账户总资产、费率按它绑的画像。
 

@@ -327,6 +327,20 @@ def journal_for_code(code: str, limit: int = 8) -> list[dict[str, Any]]:
             (code, limit))]
 
 
+def journal_for_regime(regime: str, limit: int = 12) -> list[dict[str, Any]]:
+    """某类大盘行情(regime tag)下全舰队的买入决策+结果（regime-view，P3 收尾）。
+
+    按「同类行情」回看战绩：只取买入（skip/hold/sell 谈不上战绩），新的在前、确定性。
+    regime tag 刻意粗(~9 桶)故能匹配上；journal 空或该 regime 无历史 → 返回 []。
+    """
+    if not regime:
+        return []
+    with _conn() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT * FROM journal WHERE regime=? AND action='buy' ORDER BY id DESC LIMIT ?",
+            (regime, limit))]
+
+
 def journal_staple_outcome(agent_id: int, code: str, date: str,
                            x20: float | None, pctile: int | None) -> None:
     """结算时把结果贴到对应的买入 journal 行（一次性，settled_at 空才贴 → 幂等）。"""

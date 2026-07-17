@@ -338,6 +338,21 @@ def _market_block() -> str:
         return out
 
 
+def current_regime() -> str:
+    """当前粗粒度大盘 regime tag（regime-view 检索用，供用户面研判/选股 AI）。
+
+    `_market_block()` 算大盘时会把它更新；这里在尚未算过时惰性触发一次（`_market_block`
+    内部带 300s 缓存+锁，故不会额外多打网络，交易时段调度器也已把它焐热）。取不到 → 空串
+    → `_regime_view` 出空块（机制补齐、journal 空时本就空）。
+    """
+    if not _mkt_regime:
+        try:
+            _market_block()      # 副作用：更新 _mkt_regime
+        except Exception as e:   # noqa: BLE001 取不到 regime 不该让研判/选股崩
+            logger.warning("current_regime 计算失败: %s", e)
+    return _mkt_regime
+
+
 def _decide_prompt(ctx: dict[str, Any]) -> str:
     cand = "\n".join(
         f"- {r['code']} {r['name']} 现价{r.get('price')} 形态分{r.get('pa_score')} "

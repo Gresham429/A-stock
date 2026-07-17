@@ -41,6 +41,7 @@ let DATA=[], sortKey='net20', sortDir=-1, autoTimer=null, LLM=false, MODEL='', W
 // 请求令牌：每次发起自增；异步响应回来前若已非最新，则丢弃（防面板/抽屉切换时旧响应错位）
 let recSeq=0, detailSeq=0, mktSeq=0, secSeq=0, agSeq=0;
 let SEC_KIND='sw1';
+let SEC_DAYS=60, SEC_CUR='';   // 板块走势窗口(交易日；9999=全部) / 当前查看的板块(用于切窗口重取)
 let TAXO=null;   // 板块两级分类（/api/config 下发）
 let WAVE=null, WAVE_PERIOD='day', WAVE_CTX=null, KL_CTX=null, waveTimer=null;   // 行情多周期数据 / 当前周期 / 折线hover几何 / 蜡烛hover几何 / 分时自动刷新定时器
 let FOLIO_ADV={};   // 持仓「何时卖」建议缓存 code->{html}|{loading:true}，跨自动刷新保留
@@ -1169,6 +1170,9 @@ async function reloadSectors(force){
   }catch(e){ if(gen===secSeq) list.innerHTML='<div class="muted small" style="padding:14px">板块统计读取失败。</div>'; }
 }
 
+/** 切换板块走势窗口区间（20/60/120日/全部），重取当前板块 */
+function secDays(n){ SEC_DAYS=n; if(SEC_CUR) openSectorDetail(SEC_CUR); }
+
 /** 按名称过滤板块列表（客户端，纯隐藏行，不重新请求） */
 function filterSectors(q){
   q=(q||'').trim().toLowerCase();
@@ -1185,16 +1189,20 @@ async function openSectorDetail(nameEnc, el){
   document.querySelectorAll('#secList .sec-row.sel').forEach(r=>r.classList.remove('sel'));
   const row=el||document.querySelector(`#secList .sec-row[data-sec="${nameEnc}"]`);
   if(row) row.classList.add('sel');
+  SEC_CUR=nameEnc;   // 记住当前板块，切窗口时重取
+  const chips=[[20,'20日'],[60,'60日'],[120,'120日'],[9999,'全部']]
+    .map(([n,l])=>`<button class="wave-chip${SEC_DAYS===n?' on':''}" onclick="secDays(${n})">${l}</button>`).join('');
   box.innerHTML=`<div class="subh">${esc(name)}</div><div class="muted small">读取成分股…</div>`;
   try{
-    const j=await (await fetch(`/api/sectors/${nameEnc}?days=95`)).json();
+    const j=await (await fetch(`/api/sectors/${nameEnc}?days=${SEC_DAYS}`)).json();
     if(gen!==secSeq) return;
     const hist=j.history||[];
     const spark=hist.length>1?sectorTrend(hist):'';
     box.innerHTML=`<div class="subh">${esc(name)} · 成分股 ${j.total||0} 只${j.total>40?'（显示流通市值前 40）':''}</div>`
+      + `<div class="wave-chips" style="margin:2px 0 8px">${chips}</div>`
       + (spark
           ? `<div class="small muted" style="margin-bottom:2px">近 ${hist.length} 日「每日板块均涨跌」走势${hist.length<20?'（数据偏少，点上方"📈回填走势历史"补齐季度）':''}</div>${spark}`
-          : '<div class="small muted" style="margin-bottom:6px">走势数据不足（需≥2 天）——点上方"📈回填走势历史"。</div>')
+          : '<div class="small muted" style="margin-bottom:6px">该窗口走势数据不足（需≥2 天）——换更长窗口或点上方"📈回填走势历史"。</div>')
       + `<div class="sec-mem">${(j.members||[]).map(m=>
           `<div onclick="closeSectors();openDetail('${m.code}')">
              <span>${esc(m.name)} <span class="c">${m.code}</span></span>

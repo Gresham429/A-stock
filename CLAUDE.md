@@ -214,6 +214,9 @@ python3 tests/test_paper_store.py        # 撮合规则 整手/涨跌停/T+1（�
 # ⚠️ 改**决策提示词/数据面**后，必须实跑一个 debate 档（single 跑通≠debate 跑通，
 #    辩论是 token 预算最短板；实测踩过两次）：
 #    python3 -c "import agent_loop as al; print(al.run_day(18, dry_run=True, force=True))"
+#    ✅ 2026-07-18 校验：把 agent 18 记忆塞到显示上限（journal 8/entries 12/lessons 10 类，
+#    记忆块合计 ~8261 字符）后实跑 debate——裁判仍产出完整 JSON（intents+skip_reason，
+#    输出仅 263 字），未截断。当前 8000/12000 预算对满记忆有余量，不必调大。
 
 python3 -c "import ast; [ast.parse(open(f).read()) for f in ['app.py','agent_loop.py','screening.py','ai_blocks.py','outcome.py','structure.py','universe_store.py','agent_store.py']]"
 node --check static/app.js
@@ -270,15 +273,18 @@ curl -s 127.0.0.1:5000/api/agents               # agent 存档 + 教训汇总
 用户 2026-07-18 凌晨明确：整理文档后新开会话自主推进优化、明早审阅。**🟡 类未经用户确认不要改。**
 每做完一项：补离线单测 → 跑全套件(12 文件) → 若改后端则重启 app 验 boot → 单独 commit 推送。
 
-🟢 **可自主执行（安全、加值、有测试兜底）**
-1. **regime-view（P3 收尾）**：`_regime_view(regime)` 注入大盘研判/选股 AI，按「同类行情」回看战绩。
-   `agent_store` 加 `journal_for_regime(regime,limit)` + `ai_blocks` 加块 + app.py 注入。属机制补齐(journal 空时空块)。
-2. **`_PRESCREEN` 选股偏差调查（#3 唯一有牙的发现）**：先按流通市值筛前 600、再用**偏爱反转/超跌**的因子
-   (`range_pos`/`cum20` 负 IC)，可能系统性漏掉小盘反转股。用 `factor_lab` 做覆盖分析、**只出结论**；
-   改 `_PRESCREEN` 归 🟡。
-3. **debate token 校验**：记忆块给决策提示词加了字数。给某 agent 塞满 journal 后跑
-   `al.run_day(<id>, dry_run=True, force=True)` 的 debate 档，确认不超预算（CLAUDE.md「踩过两次」）。
-4. **浏览器 DOM 真机验证**：本会话前端(板块分栏/高亮/搜索/走势窗口)只做了 node/结构验证。
+🟢 **可自主执行（安全、加值、有测试兜底）** —— 2026-07-18 自主会话已推进 #1–#3
+1. ✅ **regime-view（P3 收尾）**（commit fee320f）：`agent_store.journal_for_regime` +
+   `ai_blocks._regime_view` + `agent_loop.current_regime` + app.py 大盘研判/选股两处注入。
+   test_agent_memory 13→15，全套件绿、boot 验证、实跑得 down/cold 空块无崩。属机制补齐(journal 空时空块)。
+2. ✅ **`_PRESCREEN` 选股偏差调查**（commit d4f749a，只出结论、改动归 🟡）：
+   用 factor_lab 同款机器做覆盖分析。**结论有牙**——mcap 预筛丢 88%(4391/4991)，
+   反转因子 range_pos/cum20 只在被丢小盘有效(IC t−12~−16)、在保留大盘方向翻转/空信号；
+   机制=direction() 全池方向被小盘主导却用到大盘池。详见 `plan/2026-07-18-prescreen-coverage-analysis.md`。
+   建议(🟡)首选「让 _pa_score 方向跟池子走」。
+3. ✅ **debate token 校验**（本会话验证，见上「冒烟测试」✅ 行）：agent 18 记忆塞到显示上限
+   (记忆块 ~8261 字符)实跑 debate，裁判仍产出完整 JSON、未截断。8000/12000 预算有余量。
+4. ⏳ **浏览器 DOM 真机验证**：前端(板块分栏/高亮/搜索/走势窗口)只做过 node/结构验证。
    `pip install playwright && playwright install chromium` 后截图核验（装依赖可逆、可自主）。
 
 🟡 **需用户签字才改（自主会话只分析列建议，别直接改）**

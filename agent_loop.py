@@ -218,7 +218,7 @@ def _agent_history_block(agent_id: int, account_id: int) -> str:
             x = e.get("x20")
             if x is None:
                 continue
-            rank = factor_lab.rank_of(JUDGE_H, x)
+            rank = e.get("x20_pctile")   # 读结算时**冻结**的分位，不再重算（不随判罪线漂移）
             tail = f"（历史第 {rank} 百分位）" if rank is not None else ""
             settled.append(f"- {e['entry_date']} 买 {e['code']} {e.get('name','')} @{e['entry_price']} "
                            f"→ {JUDGE_H}日超额 {x:+.2f}%{tail}")
@@ -579,8 +579,11 @@ def _sector_bars(sector: str, entry_date: str) -> list[dict[str, Any]]:
     return bars
 
 
-def _judge_entry(e: dict[str, Any], x: float | None) -> str:
+def _judge_entry(e: dict[str, Any], x: float | None, rank: int | None) -> str:
     """结清的建仓 → 该不该记教训。**判罪线只能来自数据分布，无分布则不判。**
+
+    `rank` = 结算时算好的冻结分位（由 `settle_entries` 传入，不在此重算——保证教训文案里
+    的分位与战绩块显示的分位是同一个冻结值，不会因判罪线漂移而两处对不上）。
 
     与旧的 T+0 判罪（`detect_failures` 的 chase_high 等）的根本区别：
     那些判的是「买入时长得像错」，这条判的是「**事后证明**跑输了历史上 90% 的建仓点」。
@@ -591,7 +594,6 @@ def _judge_entry(e: dict[str, Any], x: float | None) -> str:
     """
     if x is None:
         return ""                       # 超额算不出（基准缺失/停牌）→ 不判，不拿绝对收益顶替
-    rank = factor_lab.rank_of(JUDGE_H, x)
     if rank is None:
         logger.info("无超额分布，跳过判罪（跑一次 factor_lab.backtest 即可）")
         return ""                       # **无分布不判罪**：退回默认阈值=偷偷拍了个数
@@ -640,11 +642,18 @@ def settle_entries(agent_id: int) -> list[dict[str, Any]]:
             for h in HORIZONS:
                 rets[f"r{h}"], rets[f"x{h}"], rets[f"s{h}"] = stock[h], x[h], s[h]
             done = stock[JUDGE_H] is not None            # 最长档出了 = 这条结清
+            pctile = None
+            if done and x[JUDGE_H] is not None:
+                # **判罪线只在结算这一刻查一次 → 冻结进 entries.x20_pctile**。
+                # 此后战绩块/判罪都读这个冻结值，不再随分布漂移重算（P1：修「记忆总是变动」）。
+                pctile = factor_lab.rank_of(JUDGE_H, x[JUDGE_H])
+                if pctile is not None:
+                    rets["x20_pctile"] = pctile
             agent_store.update_entry(e["id"], rets, done)
             if done:
                 rec = {"code": e["code"], "entry_date": e["entry_date"],
                        **{k: v for k, v in rets.items() if v is not None}}
-                rec["lesson"] = _judge_entry(e, x[JUDGE_H])
+                rec["lesson"] = _judge_entry(e, x[JUDGE_H], pctile)
                 out.append(rec)
         except Exception as ex:  # noqa: BLE001 单条结算失败不该拖垮整轮
             logger.warning("建仓结算失败 %s %s: %s", e["code"], e["entry_date"], ex)

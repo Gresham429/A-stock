@@ -125,6 +125,8 @@ CREATE TABLE IF NOT EXISTS entries(
   r5 REAL, r10 REAL, r20 REAL,
   x5 REAL, x10 REAL, x20 REAL,
   s5 REAL, s10 REAL, s20 REAL,
+  x20_pctile INTEGER,            -- 判罪分位：结算时按当时判罪线算一次即**冻结**，
+                                 -- 此后战绩块/判罪都读它、不再随分布漂移重算（P1 稳定性）
   settled_at TEXT DEFAULT '',    -- 20 日档结算完成的时刻；空=未结清
   UNIQUE(agent_id, code, entry_date)
 );
@@ -148,6 +150,10 @@ def init() -> None:
         have = {r["name"] for r in c.execute("PRAGMA table_info(pending)")}
         if "snap" not in have:
             c.execute("ALTER TABLE pending ADD COLUMN snap TEXT DEFAULT ''")
+        # 旧库迁移：entries.x20_pctile 是 P1（记忆稳定性）后加的冻结判罪分位。
+        have_e = {r["name"] for r in c.execute("PRAGMA table_info(entries)")}
+        if "x20_pctile" not in have_e:
+            c.execute("ALTER TABLE entries ADD COLUMN x20_pctile INTEGER")
 
 
 # ── agent 配置 ─────────────────────────────────────────────────────────────
@@ -252,7 +258,8 @@ def update_entry(entry_id: int, rets: dict[str, float | None], done: bool) -> No
 
     done=True（20 日档已出）才落 `settled_at`，此后不再扫描。
     """
-    cols = [k for k in ("r5", "r10", "r20", "x5", "x10", "x20", "s5", "s10", "s20") if k in rets]
+    cols = [k for k in ("r5", "r10", "r20", "x5", "x10", "x20", "s5", "s10", "s20",
+                        "x20_pctile") if k in rets]
     if not cols and not done:
         return
     sets = ", ".join(f"{k}=?" for k in cols)
@@ -316,7 +323,7 @@ def lesson_rollup(limit: int = 8) -> list[dict[str, Any]]:
         rows = [dict(r) for r in c.execute(
             "SELECT kind, SUM(hits) hits, COUNT(DISTINCT agent_id) agents, "
             "MAX(last_seen) last_seen FROM lessons GROUP BY kind "
-            "ORDER BY hits DESC LIMIT ?", (limit,))]
+            "ORDER BY hits DESC, kind ASC LIMIT ?", (limit,))]   # kind ASC：等 hits 不抖
     for r in rows:
         r["label"] = LESSON_KINDS.get(r["kind"], (r["kind"], ""))[0]
     return rows
@@ -336,7 +343,7 @@ def for_ai(limit: int = 6, agent_id: int | None = None) -> str:
         with _conn() as c:
             rows = [dict(r) for r in c.execute(
                 "SELECT kind, SUM(hits) hits FROM lessons WHERE agent_id=? "
-                "GROUP BY kind ORDER BY hits DESC LIMIT ?", (agent_id, limit))]
+                "GROUP BY kind ORDER BY hits DESC, kind ASC LIMIT ?", (agent_id, limit))]
         scope = "你（本账户）过去"
     else:
         rows = lesson_rollup(limit)
@@ -350,7 +357,7 @@ def for_ai(limit: int = 6, agent_id: int | None = None) -> str:
             # 代表性文案：优先取本 agent 的；跨 agent 时取 hits 最高的那条
             q = "SELECT lesson FROM lessons WHERE kind=?" + (" AND agent_id=?" if agent_id else "")
             args = (r["kind"], agent_id) if agent_id else (r["kind"],)
-            hit = c.execute(q + " ORDER BY hits DESC LIMIT 1", args).fetchone()
+            hit = c.execute(q + " ORDER BY hits DESC, last_seen DESC, id DESC LIMIT 1", args).fetchone()
         lines.append(f"- [{label}] 累计 {r['hits']} 次：{hit['lesson'] if hit else ''}")
     lines.append("- 以上错误请在本次判断中主动规避；若本次建议可能重蹈其中某条，必须说明为何这次不同。")
     return "\n".join(lines)

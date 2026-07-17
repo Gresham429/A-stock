@@ -102,7 +102,10 @@ def _judge(x, dist=_DIST):
     o_dist, o_add = fl.excess_dist, agent_store.add_lesson
     fl.excess_dist, agent_store.add_lesson = (lambda: dist), fake_add
     try:
-        return bool(al._judge_entry(dict(_ENTRY), x)), box.get("text", "")
+        # 分位由调用方（settle_entries）算好传入；测试同样用 stub 分布算 rank 再传。
+        # 与 settle_entries 一致：x 为 None 不算 rank（否则 rank_of 会崩）。
+        rank = fl.rank_of(al.JUDGE_H, x) if x is not None else None
+        return bool(al._judge_entry(dict(_ENTRY), x, rank)), box.get("text", "")
     finally:
         fl.excess_dist, agent_store.add_lesson = o_dist, o_add
 

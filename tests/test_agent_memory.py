@@ -86,6 +86,32 @@ def test_history_only_own_account():
     assert "002354" in b17 and "600519" not in b17, "agent 17 看到了 agent 18 的仓"
 
 
+def test_pctile_is_frozen_from_column():
+    """P1（稳定性）：战绩块历史分位读 entries.x20_pctile（结算时冻结），不再重算判罪线。
+
+    fresh 库无 excess_dist → 旧代码调 rank_of 会得 None、无分位尾巴；现在显示出
+    「第 8 百分位」只可能来自冻结列，证明记忆不再随判罪线漂移而变动。
+    """
+    _fresh_db()
+    import agent_loop as al
+    agent_store.add_entry(17, "002354", "天娱数科", "2026-06-10", 8.87, 300, {"pa_score": 77})
+    eid = agent_store.entries(17)[0]["id"]
+    agent_store.update_entry(eid, {"r20": -8.9, "x20": -9.99, "x20_pctile": 8}, done=True)
+    block = al._agent_history_block(17, 19)
+    assert "第 8 百分位" in block, f"未读到冻结分位（应显示第 8 百分位）: {block}"
+    assert agent_store.entries(17)[0]["x20_pctile"] == 8, "x20_pctile 未写入/未持久"
+
+
+def test_for_ai_deterministic_under_ties():
+    """P1（稳定性）：等 hits 的教训 kind 顺序稳定（kind ASC 平局键）→ 两次调用输出一致。"""
+    _fresh_db()
+    agent_store.add_lesson(17, "chase_high", 90, "600000")
+    agent_store.add_lesson(17, "against_sector", 91, "600001")   # 各 1 次，hits 相等
+    a = agent_store.for_ai(agent_id=17)
+    b = agent_store.for_ai(agent_id=17)
+    assert a == b and a != "", "等 hits 下 for_ai 两次调用输出不一致（非确定性）"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

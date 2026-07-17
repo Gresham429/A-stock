@@ -1109,13 +1109,14 @@ async function openAgentDetail(id){
 }
 
 /* ── 🧭 板块每日变化 ───────────────────────────────────────────────────── */
-function openSectors(){ SEC_KIND='sw1'; document.getElementById('secDetail').innerHTML='';
+function _clearSecSearch(){ const s=document.getElementById('secSearch'); if(s) s.value=''; }
+function openSectors(){ SEC_KIND='sw1'; _clearSecSearch();
   document.querySelectorAll('#sectorsModal .sec-kinds .btn').forEach(b=>b.classList.toggle('on',b.dataset.k==='sw1'));
   document.getElementById('sectorsModal').classList.add('open'); reloadSectors(); }
 function closeSectors(){ document.getElementById('sectorsModal').classList.remove('open'); }
-function secKind(k){ SEC_KIND=k;
+function secKind(k){ SEC_KIND=k; _clearSecSearch();
   document.querySelectorAll('#sectorsModal .sec-kinds .btn').forEach(b=>b.classList.toggle('on',b.dataset.k===k));
-  document.getElementById('secDetail').innerHTML=''; reloadSectors(); }
+  reloadSectors(); }
 
 const secPct=v=>{const c=v>0?'var(--up)':v<0?'var(--down)':'var(--flat)';
   return `<span class="num" style="color:${c}">${v>0?'+':''}${(v||0).toFixed(2)}%</span>`;};
@@ -1151,7 +1152,8 @@ async function reloadSectors(force){
       + j.rows.map(r=>{
         const tot=Math.max((r.up_n||0)+(r.down_n||0),1);
         const uw=Math.round(100*(r.up_n||0)/tot);
-        return `<div class="sec-row" onclick="openSectorDetail('${encodeURIComponent(r.sector)}')">
+        const enc=encodeURIComponent(r.sector);
+        return `<div class="sec-row" data-sec="${enc}" data-name="${esc((r.sector||'').toLowerCase())}" onclick="openSectorDetail('${enc}',this)">
           <div class="nm">${esc(r.sector)}<div class="small muted" style="font-family:var(--mono)">成交 ${((r.amount||0)/1e8).toFixed(1)}亿</div></div>
           <div>${secPct(r.avg_chg)}</div>
           <div class="num muted">${r.n||0}</div>
@@ -1160,12 +1162,29 @@ async function reloadSectors(force){
           <div class="num" style="color:${r.limit_up_n?'var(--up)':'var(--muted)'}">${r.limit_up_n||0}</div>
           <div class="small">${esc(r.leader_name||'—')} ${r.leader_name?secPct(r.leader_chg):''}</div>
         </div>`;}).join('');
+    // 默认选中排名第一的板块——右侧立即出走势（免点即见）；并复用当前搜索词
+    const first=list.querySelector('.sec-row:not(.head)');
+    if(first) openSectorDetail(first.dataset.sec, first);
+    const sq=document.getElementById('secSearch'); if(sq&&sq.value) filterSectors(sq.value);
   }catch(e){ if(gen===secSeq) list.innerHTML='<div class="muted small" style="padding:14px">板块统计读取失败。</div>'; }
 }
 
-async function openSectorDetail(nameEnc){
+/** 按名称过滤板块列表（客户端，纯隐藏行，不重新请求） */
+function filterSectors(q){
+  q=(q||'').trim().toLowerCase();
+  document.querySelectorAll('#secList .sec-row').forEach(r=>{
+    if(r.classList.contains('head')) return;
+    r.style.display=(!q||(r.dataset.name||'').includes(q))?'':'none';
+  });
+}
+
+async function openSectorDetail(nameEnc, el){
   const gen=++secSeq, box=document.getElementById('secDetail');
   const name=decodeURIComponent(nameEnc);
+  // 选中高亮：清旧、标当前行
+  document.querySelectorAll('#secList .sec-row.sel').forEach(r=>r.classList.remove('sel'));
+  const row=el||document.querySelector(`#secList .sec-row[data-sec="${nameEnc}"]`);
+  if(row) row.classList.add('sel');
   box.innerHTML=`<div class="subh">${esc(name)}</div><div class="muted small">读取成分股…</div>`;
   try{
     const j=await (await fetch(`/api/sectors/${nameEnc}?days=95`)).json();

@@ -27,6 +27,7 @@
 | [2026-07-15-full-market-universe-design](2026-07-15-full-market-universe-design.md) | 全市场股票池 + 板块日变化统计 |
 | [2026-07-17-sector-history-backfill-design](2026-07-17-sector-history-backfill-design.md) | 板块走势历史回填：逐股日 K 补 ~250 交易日 + 面板分栏/走势窗口 |
 | [2026-07-13-all-sector-screening-and-market-overview](2026-07-13-all-sector-screening-and-market-overview.md) | 全板块两级选股 + 大盘局势研判 |
+| [2026-07-18-prescreen-coverage-analysis](2026-07-18-prescreen-coverage-analysis.md) | **_PRESCREEN 选股偏差覆盖分析**：mcap 预筛丢弃 88%，反转因子只在被丢的小盘有效、方向在保留的大盘翻转（只出结论、改动归 🟡） |
 
 ### AI 知识、缓存与溯源
 | 文档 | 一句话 |

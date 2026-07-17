@@ -81,6 +81,30 @@ def _lesson_block(agent_id: int | None = None) -> str:
         logger.warning("教训块生成失败: %s", e)
         return ""
 
+def _stock_house_view(code: str) -> str:
+    """【本台对本股的历史看法】(P2c)：模拟盘全体 agent 在这只票上出手过几次、当时理由、结果。
+
+    用户面深挖/持仓用——把「本台之前怎么看这只票、后来对不对」喂给 AI（共享底座 journal，
+    按 code 查）。只列买入决策；journal 空则不注入。事实统计，非规律。
+    """
+    try:
+        rows = agent_store.journal_for_code(code, limit=6)
+    except (sqlite3.Error, OSError) as e:
+        logger.warning("个股 house-view 生成失败: %s", e)
+        return ""
+    if not rows:
+        return ""
+    lines = [f"【本台对 {code} 的历史看法（模拟盘全体 agent 在此票上的出手与结果，事实统计、非规律）】"]
+    for r in reversed(rows):
+        head = f"- {r['date']}：{r.get('summary') or '（未记理由）'}"
+        if r.get("settled_at") and r.get("x20") is not None:
+            p = r.get("x20_pctile")
+            head += f" → 20日超额 {r['x20']:+.2f}%" + (f"（第 {p} 百分位）" if p is not None else "")
+        else:
+            head += " → 结果未定"
+        lines.append(head)
+    return "\n".join(lines) + "\n\n"
+
 def _agent_blocks(ag: dict, cash: float, total: float, n_pos: int) -> str:
     """**每个 agent 自己的**注入块：档位按它自己的账户总资产、费率按它绑的画像。
 
@@ -99,8 +123,11 @@ def _agent_blocks(ag: dict, cash: float, total: float, n_pos: int) -> str:
     except (sqlite3.Error, OSError, ValueError) as e:
         logger.warning("agent 费率块失败: %s", e)
         fee = ""
-    # 教训用**这个 agent 自己的**（个体记忆，非全体池）——多-agent 对照实验才干净。
-    return tier + fee + _lesson_block(agent_id=ag.get("id")) + rules_store.for_ai()
+    # 教训**主看自己的**（个体记忆，多-agent 对照才干净）；**另加全舰队只读层**(P3)——
+    # 市场真理(如「追高在弱势里普遍跑输」)该共享，且标签区分「你本账户」vs「全体账户」，
+    # 不污染各自的行为统计（策略身份在档位/自视图里，不在这层，故不会收敛趋同）。
+    return (tier + fee + _lesson_block(agent_id=ag.get("id"))
+            + _lesson_block() + rules_store.for_ai())
 
 def _fee_block() -> str:
     """【交易成本】注入块：给 AI 具体费率与保本涨幅，而非「注意手续费」这种空话。

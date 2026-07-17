@@ -148,6 +148,19 @@ def test_journal_isolated_per_agent():
     assert "002354" in al._agent_journal_block(17) and "600519" not in al._agent_journal_block(17)
 
 
+def test_stock_house_view_cross_agent():
+    """P2c：个股 house-view 汇集**全体 agent** 在这只票上的买入决策+理由+结果（共享底座按 code 查）。"""
+    _fresh_db()
+    import ai_blocks
+    agent_store.journal_add(17, "002354", "天娱", "2026-07-17", "早盘", "down/cold", {}, "buy", "低位顺势")
+    agent_store.journal_add(18, "002354", "天娱", "2026-07-10", "尾盘", "flat/neutral", {}, "buy", "反弹试仓")
+    agent_store.journal_staple_outcome(18, "002354", "2026-07-10", -6.5, 15)
+    hv = ai_blocks._stock_house_view("002354")
+    assert "低位顺势" in hv and "反弹试仓" in hv, f"house-view 应含全体 agent 的理由: {hv}"
+    assert "20日超额 -6.50%" in hv, "已结算笔应显示结果"
+    assert ai_blocks._stock_house_view("600519") == "", "无记录的票应返回空（不注入空块）"
+
+
 def test_regime_tag_coarse_and_degrades():
     """P2：regime tag 粗粒度 趋势/情绪；数据缺则降级 flat/neutral（不抛）。"""
     import agent_loop as al

@@ -56,7 +56,7 @@ from screening import (  # noqa: E402,F401
 # AI 提示词注入块（2026-07-16 抽出 ai_blocks.py）。同样显式带回，路由调用点不改。
 from ai_blocks import (  # noqa: E402,F401
     _total_assets, _tier_block, _record_basis_stats, _lesson_block, _agent_blocks,
-    _fee_block, _macro_block, _profile_block, _ai_web_context,
+    _fee_block, _macro_block, _profile_block, _ai_web_context, _stock_house_view,
 )
 # 交易时段判定移到 agent_loop（与 current_slot 同源）；带回以保持路由调用点不变。
 from agent_loop import _market_open  # noqa: E402,F401
@@ -786,7 +786,7 @@ def recommend_position(code: str):
                                          f_news.result(), f_kline.result())
     vol_hist = _vol_hist(kl)
     prof = _company_profile(code, q.get("name", ""), news, financials)
-    web_ctx = _tier_block() + _fee_block() + _lesson_block() + _macro_block() + _profile_block(prof) + _ai_web_context("position", code, q.get("name", ""))
+    web_ctx = _tier_block() + _fee_block() + _lesson_block() + _macro_block() + _profile_block(prof) + _ai_web_context("position", code, q.get("name", "")) + _stock_house_view(code)
     scen = rules_store.get_scenario()
     rule_map = rules_store.active_rule_map(scen)
     try:
@@ -842,7 +842,7 @@ def recommend_entry(code: str):
     vol_hist = _vol_hist(kl)
     market_ctx = _market_overview_payload().get("ai")
     prof = _company_profile(code, q.get("name", ""), news, financials)
-    web_ctx = _tier_block() + _fee_block() + _lesson_block() + _macro_block() + _profile_block(prof) + _ai_web_context("position", code, q.get("name", ""))
+    web_ctx = _tier_block() + _fee_block() + _lesson_block() + _macro_block() + _profile_block(prof) + _ai_web_context("position", code, q.get("name", "")) + _stock_house_view(code)
     scen = rules_store.get_scenario()
     rule_map = rules_store.active_rule_map(scen)
     try:

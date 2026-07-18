@@ -191,8 +191,10 @@ app.py 用显式 import 带回名字，路由调用点与 `app._X` 可达性不�
   - **视图（都从 journal/lessons 查，确定性检索）**：交易 agent → `_agent_journal_block`(自己近 8 条决策+理由+结果)
     + 自己教训 + **全舰队只读层**(`_lesson_block()`，市场真理该共享，标签区分「你本账户」vs「全体账户」→ 不趋同)；
     用户面深挖/持仓 → `_stock_house_view(code)`(全体 agent 对这只票的历史看法)。
-  - 战绩/journal **只喂事实原话、不让 agent 写事后反思**(反思=拟合噪音)。测试 `test_agent_memory`(13)。
-  - ⏳ **未做**：`regime-view`(大盘研判按同类行情回看，P3 收尾，见下一步🟢#1) + 舰队→提示词提炼(D，用户最终目标)。
+  - **regime-view（P3 收尾，2026-07-18 完成 fee320f）**：`journal_for_regime` + `ai_blocks._regime_view` +
+    `agent_loop.current_regime`，注入大盘研判/选股 AI，按「同类行情」回看全舰队战绩；journal 空时空块。
+  - 战绩/journal **只喂事实原话、不让 agent 写事后反思**(反思=拟合噪音)。测试 `test_agent_memory`(15)。
+  - ⏳ **未做**：舰队→提示词提炼(D，用户最终目标，等教训库有数据再做)。
 
 ## 冒烟测试（改完自测）
 
@@ -205,7 +207,7 @@ python3 tests/test_factor_cohort.py      # cohort 方向 6 例（改 direction c
 python3 tests/test_structure.py          # K线结构摘要 12 例（改 structure/决策提示词必跑）
 python3 tests/test_outcome.py            # 结果结算 12 例（改 outcome/地平线/超额必跑）
 python3 tests/test_excess_dist.py        # 超额分布+判罪线 14 例（改判罪/分布必跑）
-python3 tests/test_agent_memory.py       # 个体记忆 6 例（改 for_ai/战绩块必跑）
+python3 tests/test_agent_memory.py       # 个体记忆+journal+regime-view 15 例（改 for_ai/战绩块/journal 必跑）
 python3 tests/test_sector_backfill.py    # 板块聚合口径（改 _agg_sector_payload/snapshot_daily/回填必跑）
 python3 tests/test_fees.py               # 费率数学（改 fees.py 必跑）
 python3 tests/test_portfolio.py          # 持仓现金/盈亏三口径（改 portfolio.py 必跑）
@@ -251,56 +253,39 @@ curl -s 127.0.0.1:5000/api/agents               # agent 存档 + 教训汇总
 
 ## 当前状态 / 待办
 
-**代码全部已推 GitHub(main)，工作区干净。12 个测试文件、离线全过。app 单进程在跑(最新代码)。**
-本会话(2026-07-17→18)7 个 commit：盘中调度器 · 板块走势(回填/分栏/窗口) · **agent 记忆重构 P1–P3** · 钱数学补测 · 阈值验证。
+**代码全部已推 GitHub(main)，工作区干净。13 个测试文件、离线全过。app 单进程在跑(最新代码)。**
+本会话(2026-07-18)7 个 commit：4 项 🟢 自主优化(regime-view · 选股偏差分析 · debate 校验 · DOM 验证) + **cohort-aware 方向修复**(3 commit)。
 
-### 本会话做了什么（给下个会话的时间线，2026-07-17→18）
+### 本会话做了什么（给下个会话的时间线，2026-07-18）
 
-1. **盘中 agent 调度器**(`app._agent_scheduler`)：日循环不再只启动跑一次，守护线程每 5 分钟探一次
-   `run_all(require_open=True)`；`claim_slot` 幂等保证每桶只真跑一次。**修「非交易时段开 app→当天不炒股」**。
-2. **板块走势**：`universe_store.backfill_sector_daily` 逐股日 K 补历史(现有 ~250 交易日) + 面板**左右分栏
-   +选中高亮+搜索** + 走势**窗口区间 20/60/120/全部**。修「板块太多/无高亮/要下滑/看不到走势」。
-3. **agent 记忆重构 P1–P3**（聊完重做，用户嫌旧 mem 不好）：
-   - **P1 冻结判罪分位**：`entries.x20_pctile` 结算时算一次即冻结，战绩块/判罪读它、不再随判罪线漂移。**修「记忆总是变动」**。
-   - **P2 情节 journal**(`agent_store.journal` 表)：每次决策(买/观望)入库、理由=**当时已写的原话**、结算贴结果；
-     `_agent_journal_block` 注入自视图。**修「不知道自己之前的判断」**。零新增 LLM 负担。
-   - **P2c 个股 house-view** + **P3 全舰队只读层**：`_stock_house_view(code)` 注入用户面深挖/持仓；
-     agent 在自己教训外另读全舰队汇总(`_lesson_block()`)。完成「共享底座」。
-4. **钱数学补测**：`test_fees(21)`/`test_portfolio(19)`/`test_paper_store(18)`——记忆系统信任的结算/费率/撮合，之前零测。
-5. **阈值验证**(分析、无改动)：16 万因子 IC + 止损网格回测查 `CHASE_HIGH_POS/STOP_LOSS/…`，**方向全对、无雷**（详见下）。
-
-### 🔴 下一步 / 下个会话可直接执行的优化 backlog
-
-**分三类：🟢 可自主做(安全、无需用户签字) · 🟡 需用户签字才改 · ⏳ 卡时间。**
-用户 2026-07-18 凌晨明确：整理文档后新开会话自主推进优化、明早审阅。**🟡 类未经用户确认不要改。**
-每做完一项：补离线单测 → 跑全套件(13 文件) → 若改后端则重启 app 验 boot → 单独 commit 推送。
-
-🟢 **可自主执行（安全、加值、有测试兜底）** —— 2026-07-18 自主会话已全部完成 #1–#4
-1. ✅ **regime-view（P3 收尾）**（commit fee320f）：`agent_store.journal_for_regime` +
-   `ai_blocks._regime_view` + `agent_loop.current_regime` + app.py 大盘研判/选股两处注入。
-   test_agent_memory 13→15，全套件绿、boot 验证、实跑得 down/cold 空块无崩。属机制补齐(journal 空时空块)。
-2. ✅ **`_PRESCREEN` 选股偏差调查**（commit d4f749a，只出结论、改动归 🟡）：
-   用 factor_lab 同款机器做覆盖分析。**结论有牙**——mcap 预筛丢 88%(4391/4991)，
-   反转因子 range_pos/cum20 只在被丢小盘有效(IC t−12~−16)、在保留大盘方向翻转/空信号；
-   机制=direction() 全池方向被小盘主导却用到大盘池。详见 `plan/2026-07-18-prescreen-coverage-analysis.md`。
-   建议(🟡)首选「让 _pa_score 方向跟池子走」。
-3. ✅ **debate token 校验**（本会话验证，见上「冒烟测试」✅ 行）：agent 18 记忆塞到显示上限
-   (记忆块 ~8261 字符)实跑 debate，裁判仍产出完整 JSON、未截断。8000/12000 预算有余量。
-4. ✅ **浏览器 DOM 真机验证**（本会话完成）：playwright headless chromium 实开面板，
-   11/11 断言过、零 console error——分栏(list.x=77<detail.x=691)、默认高亮(公用事业)、
-   高亮随点击移动(→非银金融)、走势 SVG(243 天历史)、4 窗口 chip 切换(20/60/120/全部)、
-   搜索过滤(31→1 匹配、清空还原)。截图目视亦确认渲染正确、红涨绿跌。
-   ⚠️ 坑：chromium 要 `env -u HTTP_PROXY... NO_PROXY='*'` 绕代理 + 用 `domcontentloaded`
+1. **regime-view（P3 收尾）**(fee320f)：`agent_store.journal_for_regime` + `ai_blocks._regime_view`
+   + `agent_loop.current_regime`，注入大盘研判/选股 AI，按「同类行情」回看全舰队战绩。journal 空时空块。
+2. **`_PRESCREEN` 选股偏差覆盖分析**(d4f749a，只出结论)：mcap 预筛丢 88%，反转因子 range_pos/cum20
+   **只在被丢的小盘有效**(IC t−12~−16)、在保留的大盘方向翻转。见 `plan/2026-07-18-prescreen-coverage-analysis.md`。
+3. **debate token 校验**：agent 18 记忆塞到显示上限(~8261 字符)实跑 debate，裁判仍产出完整 JSON、未截断
+   → 8000/12000 预算有余量（结论记入「冒烟测试」✅ 行）。
+4. **板块面板 DOM 真机验证**(fc3f87e)：playwright headless chromium，11/11 断言 + 截图目视，零 console error。
+   ⚠️ 再做 DOM 测要：`env -u HTTP_PROXY... NO_PROXY='*'` 绕代理 + `page.goto(wait_until='domcontentloaded')`
    不用 `networkidle`（本页持续轮询永不 idle）。playwright 已装入 miniconda（可 pip uninstall 回退）。
+5. **cohort-aware 方向修复**(5710387 底座 + e99749b 接线 + 0270642 文档，承接 #2)：无 focus 全市场选股改用
+   **大盘 cohort 方向**打分——range_pos 大盘 +1 vs 全池 −1，近高点大盘股形态分 +33。`factor_lab`
+   加 `ic_cohort`/`backtest_large`/`scoring_directions`。**只影响用户面全市场选股**(agent 永远 focus、
+   不受影响；excess_dist/判罪线/教训门未动)。见 `plan/2026-07-18-cohort-aware-direction-plan.md`。
+   **顺带挖出 `codes_of()` 无 focus 按代码号排序非市值的坑(PITFALLS#5b)**。
+
+> 上一会话(2026-07-17→18)：盘中调度器 · 板块走势(回填/分栏/窗口) · agent 记忆重构 P1–P3 · 钱数学补测 · 阈值验证。
+> 详见对应 commit 与 `plan/`；机制说明在下方「关键机制速查」。
+
+### 🔴 下一步 / 下个会话可直接执行的 backlog
+
+**分两类：🟡 需用户签字才改 · ⏳ 卡时间。**
+（上一批 🟢 自主项 #1–#4 + cohort 修复本会话已全部完成，见上「本会话做了什么」。）
+每做一项：补离线单测 → 跑全套件(13 文件) → 若改后端则重启 app 验 boot → 单独 commit 推送。**🟡 未经用户确认不要改。**
 
 🟡 **需用户签字才改（自主会话只分析列建议，别直接改）**
-- ✅ **cohort-aware 方向（原「让 _pa_score 方向跟池子走」，用户 2026-07-18 批准后已实现）**：
-  commit 5710387(底座)+e99749b(接线)。无 focus 全市场选股改用大盘 cohort 方向打分——
-  range_pos 大盘 +1(t5.87) vs 全池 −1，近高点大盘股形态分 +33。**只影响用户面全市场选股**
-  （agent 永远 focus、不受影响；excess_dist/判罪线/教训门未动）。方案+判定见
-  `plan/2026-07-18-cohort-aware-direction-plan.md`。**顺带挖出 codes_of() 无 focus 按代码号
-  排序的坑（PITFALLS#5b）**。⚠️ 未做：`sample_codes` 同坑（全池 IC 样本是代码分层非市值分层，
-  动它碰判罪线、留待用户定）。
+- **`sample_codes` 市值分层实为代码分层**（cohort 修复时挖出，PITFALLS#5b）：`codes_of()` 无 focus 按
+  代码号排序、非市值 → 全池 IC/`excess_dist` 的样本是代码分层、非宣称的市值分层。**未修**（动它碰判罪线/
+  冻结分位，敏感）。要修须重排样本 + 重跑分布 + 确认冻结分位不受影响。
 - **阈值改动**：`CHASE_HIGH_POS` 85→80（只用于 detect_failures 教训门、被 `bad('range_pos')` 门控，
   非打分；85 是线性惩罚上的任意切点）；纪律参数见下。**建议保持 85**（降到 80 只多记追高教训）。
 - **#4 拆大文件**：`app.py`(1240)/`agent_loop.py`(1040) 超 <400 规则。**高风险重构、纯维护性收益**，
@@ -309,7 +294,7 @@ curl -s 127.0.0.1:5000/api/agents               # agent 存档 + 教训汇总
 
 ⏳ **卡时间（唯一主线，代码全就位）**
 - **让 20 个 agent 攒数据**：记忆闭环(P1–P3)全落地但 `journal`/教训库仍空，要真实交易日填充。
-  开 app 即自动跑(调度器)；**明早早盘桶(9:30)自动跑**。第一批 20 日结算约 **2026-08-13**。
+  开 app 即自动跑(调度器)；**下个交易日早盘桶(9:30)自动跑**。第一批 20 日结算约 **2026-08-13**。
   ⚠️ 数据面好 ≠ 必成交：07-16/17 早盘 AI **正确**拒绝逆势→0 成交，尾盘转好才成交 10 笔。**别为攒数据松风控。**
 - **舰队→提示词提炼(D，用户最终目标)**：等教训库有数据再做，见 `plan/2026-07-16-agent-evolution-design.md`。
 
@@ -319,13 +304,14 @@ curl -s 127.0.0.1:5000/api/agents               # agent 存档 + 教训汇总
   `CHASE_HIGH_POS=85` 方向 ✓(range_pos IC t=-4.9 显著负)，但 85 是**线性**惩罚上的任意切点(可考虑 80)；
   `STOP_LOSS_PCT=-10` 是风险纪律的合理中点(止损网格：越紧均值收益越低；-10 封住尾部 −58%→−10 只让 0.3% 均值)；
   `LOSS_CUT_PCT=-12` 是 −10 后 2% 缓冲；`STALE_DAYS=20` 与评估地平线对齐。
-  ⚠️ `vol`/`cum20` 近 60 日 IC 方向**翻转**（`direction()` 已自适应处理）。**唯一有牙**：`_PRESCREEN=600`
-  按 mcap 预筛可能漏掉因子偏爱的小盘反转股(见 🟢#2)。改阈值归 🟡。
+  ⚠️ `vol`/`cum20` 近 60 日 IC 方向**翻转**（`direction()` 已自适应处理）。`_PRESCREEN=600` 覆盖分析
+  (d4f749a)发现反转因子只在被丢的小盘有效、方向在保留的大盘翻转——**方向问题本会话已修**（cohort-aware
+  打分，见上「本会话 #5」）；是否改 `_PRESCREEN` 本身（扩池纳入小盘）仍归 🟡。
 - **纪律参数**（不需数据验证，但需用户认可）：`MAX_VOL=120`、`MAX_POS_PCT=30`、
   `MIN_CASH_PCT=10`、`VOL_FLOOR/CEIL=15/130`、`STOP_LOSS_PCT=-10`(已回测)、
   `LESSON_PCT=10`(教训判罪线=超额底部十分位，**用户 2026-07-16 已认可**，改前需重新征询；
   分布是 16 万样本的事实，「取底部 10%」是选择性取舍)。
-- **测试盲区（本会话缩小）**：`fees`/`portfolio`(现金扣减)/`paper_store`(撮合) **已补测**(58 断言)。
+- **测试盲区**：`fees`/`portfolio`(现金扣减)/`paper_store`(撮合) 已补测(58 断言)。
   仍无单测：`template_store` / `provenance` / `rules_store` / `profile_store` / `news_store` / `notes_store`。
 - **`DebateDecider` 默认不启用**（UI 可选）：先用 single 拿基线，用数据证明需要再切。
 - **launchd 定时全不挂**（用户决定）：agent「不开 app 就意味着那天不炒股」——但**只要 app 开着**，

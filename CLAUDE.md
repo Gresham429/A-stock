@@ -54,19 +54,20 @@ app.py 用显式 import 带回名字，路由调用点与 `app._X` 可达性不�
 ### Agent 与因子
 | 文件 | 职责 |
 |------|------|
-| `factor_lab.py` | **因子回测与失效监控**(`data/factors.db`)：`backtest`(299只×600日=162,014样本/20s，顺带产出 **`excess_dist` 超额分位分布**=判罪线唯一来源) + `rank_of`(超额→历史分位) + `summary`(IC/t值) + **`direction()`动态定方向** + `rolling_ic`/`decay_alert`/`flip_rate` + `refresh_if_stale` + `backtest_stops`(止损网格) |
+| `factor_lab.py` | **因子回测与失效监控**(`data/factors.db`)：`backtest`(299只×600日=162,014样本/20s，顺带产出 **`excess_dist` 超额分位分布**=判罪线唯一来源) + `rank_of`(超额→历史分位) + `summary`(IC/t值) + **`direction(cohort=)`动态定方向** + **`ic_cohort` 表 + `backtest_large`(大盘 cohort IC，按 Tencent 市值前 600 密采) + `scoring_directions(cohort)`**(cohort 无数据回退全池；打分对象是预筛后大盘池、方向可与全池反向) + `rolling_ic`/`decay_alert`/`flip_rate` + `refresh_if_stale`(顺带跑 backtest_large) + `backtest_stops`(止损网格)。⚠️ `codes_of()` 无 focus 按**代码号**排序非市值(PITFALLS#5b) |
 | `agent_store.py` | **Agent 持久层**(`data/agents.db`)：`agents`/`runs`(原文90天·结论365天) / **`lessons`(闭集9类)** / `pending`(限价挂单) / `conditions`(止损) / `claims`(时段原子占位) / `equity` / **`entries`(建仓留痕+冻结分位`x20_pctile`)** / **`journal`(P2 情节记忆·append-only：`journal_add`/`journal_of`/`journal_for_code`/`journal_staple_outcome`)** |
 | `agent_loop.py` | **日循环**：研判(`_market_block` 指数+K线结构+涨停跌停+板块强弱)→选股→**决策(可插拔 single/debate)**→风控(确定性硬门)→**挂单**→复盘(确定性失败检测)。`sweep_orders`/`sweep_conditions`/`current_slot` |
 | `outcome.py` | **结果结算**(纯函数)：`forward_returns`(自成交价, 按**K线根数**数交易日) + `bench_returns` + `excess`(扣 beta)。地平线**引用** `factor_lab.HORIZONS`(5/10/20) 不复制。**只算不判罪** |
 | `structure.py` | **K线结构摘要**(纯函数零网络)：`digest()` 出 MA5/20/60 + 近20日高低 + 最近3根 OHLC(带日期)；`fmt_stock`/`fmt_market` 成行喂 AI。**只给原料不下判断**——趋势由 AI 读均线自己判 |
 
 ### 测试（零依赖离线，`python3 tests/xxx.py` 直接跑；项目无 pytest）
-`test_universe_store.py`(9) 板块解析 · `test_screen_branches.py`(5) 选股三分支 ·
+`test_universe_store.py`(9) 板块解析 · `test_screen_branches.py`(7) 选股三分支+cohort方向 ·
 `test_agent_gates.py`(10) agent 门+挂单 · `test_factor_lab.py`(6) 因子方向 ·
+`test_factor_cohort.py`(6) cohort 方向(路由/回退/纯helper) ·
 `test_structure.py`(12) K线结构摘要 · `test_outcome.py`(12) 结果结算 ·
-`test_excess_dist.py`(14) 超额分布+判罪线 · `test_agent_memory.py`(13) 个体记忆+journal(P1/P2/P2c) ·
+`test_excess_dist.py`(14) 超额分布+判罪线 · `test_agent_memory.py`(15) 个体记忆+journal(P1/P2/P2c)+regime-view ·
 `test_sector_backfill.py`(13) 板块聚合口径 ·
-**`test_fees.py`(8) / `test_portfolio.py`(8) / `test_paper_store.py`(9) 钱数学(费率/现金/撮合)** —— **共 12 文件**
+**`test_fees.py`(8) / `test_portfolio.py`(8) / `test_paper_store.py`(9) 钱数学(费率/现金/撮合)** —— **共 13 文件**
 
 ## 数据源 & 坑（改代码前必读）
 
@@ -197,9 +198,10 @@ app.py 用显式 import 带回名字，路由调用点与 `app._X` 可达性不�
 
 ```bash
 python3 tests/test_universe_store.py     # 板块解析 9 例（改 parse_tags 必跑）
-python3 tests/test_screen_branches.py    # 选股三分支 5 例（改 _screen_rows 一带必跑）
+python3 tests/test_screen_branches.py    # 选股三分支+cohort方向 7 例（改 _screen_rows/_pa_score 必跑）
 python3 tests/test_agent_gates.py        # agent 门+挂单 10 例（改 run_day/幂等必跑）
 python3 tests/test_factor_lab.py         # 因子方向 6 例（改 direction/打分必跑）
+python3 tests/test_factor_cohort.py      # cohort 方向 6 例（改 direction cohort/backtest_large/scoring_directions 必跑）
 python3 tests/test_structure.py          # K线结构摘要 12 例（改 structure/决策提示词必跑）
 python3 tests/test_outcome.py            # 结果结算 12 例（改 outcome/地平线/超额必跑）
 python3 tests/test_excess_dist.py        # 超额分布+判罪线 14 例（改判罪/分布必跑）
@@ -208,7 +210,7 @@ python3 tests/test_sector_backfill.py    # 板块聚合口径（改 _agg_sector_
 python3 tests/test_fees.py               # 费率数学（改 fees.py 必跑）
 python3 tests/test_portfolio.py          # 持仓现金/盈亏三口径（改 portfolio.py 必跑）
 python3 tests/test_paper_store.py        # 撮合规则 整手/涨跌停/T+1（改 paper_store.py 必跑）
-# 全部零依赖、离线、不打网络。共 12 文件。
+# 全部零依赖、离线、不打网络。共 13 文件。
 # 改 agent 记忆(journal/冻结分位/house-view)后：改 agent_store/agent_loop/ai_blocks → 跑 test_agent_memory + test_excess_dist。
 
 # ⚠️ 改**决策提示词/数据面**后，必须实跑一个 debate 档（single 跑通≠debate 跑通，
@@ -271,7 +273,7 @@ curl -s 127.0.0.1:5000/api/agents               # agent 存档 + 教训汇总
 
 **分三类：🟢 可自主做(安全、无需用户签字) · 🟡 需用户签字才改 · ⏳ 卡时间。**
 用户 2026-07-18 凌晨明确：整理文档后新开会话自主推进优化、明早审阅。**🟡 类未经用户确认不要改。**
-每做完一项：补离线单测 → 跑全套件(12 文件) → 若改后端则重启 app 验 boot → 单独 commit 推送。
+每做完一项：补离线单测 → 跑全套件(13 文件) → 若改后端则重启 app 验 boot → 单独 commit 推送。
 
 🟢 **可自主执行（安全、加值、有测试兜底）** —— 2026-07-18 自主会话已全部完成 #1–#4
 1. ✅ **regime-view（P3 收尾）**（commit fee320f）：`agent_store.journal_for_regime` +
@@ -292,9 +294,18 @@ curl -s 127.0.0.1:5000/api/agents               # agent 存档 + 教训汇总
    不用 `networkidle`（本页持续轮询永不 idle）。playwright 已装入 miniconda（可 pip uninstall 回退）。
 
 🟡 **需用户签字才改（自主会话只分析列建议，别直接改）**
-- **阈值改动**：`CHASE_HIGH_POS` 85→80（range_pos 是线性惩罚、85 是任意切点）；纪律参数见下。
-- **#4 拆大文件**：`app.py`(1239)/`agent_loop.py`(1007) 超 <400 规则。**高风险重构、纯维护性收益**，
-  live 攒数据期不划算，建议延后；真做须独立分支 + 完整回滚方案(上次 app.py 拆分即如此)。
+- ✅ **cohort-aware 方向（原「让 _pa_score 方向跟池子走」，用户 2026-07-18 批准后已实现）**：
+  commit 5710387(底座)+e99749b(接线)。无 focus 全市场选股改用大盘 cohort 方向打分——
+  range_pos 大盘 +1(t5.87) vs 全池 −1，近高点大盘股形态分 +33。**只影响用户面全市场选股**
+  （agent 永远 focus、不受影响；excess_dist/判罪线/教训门未动）。方案+判定见
+  `plan/2026-07-18-cohort-aware-direction-plan.md`。**顺带挖出 codes_of() 无 focus 按代码号
+  排序的坑（PITFALLS#5b）**。⚠️ 未做：`sample_codes` 同坑（全池 IC 样本是代码分层非市值分层，
+  动它碰判罪线、留待用户定）。
+- **阈值改动**：`CHASE_HIGH_POS` 85→80（只用于 detect_failures 教训门、被 `bad('range_pos')` 门控，
+  非打分；85 是线性惩罚上的任意切点）；纪律参数见下。**建议保持 85**（降到 80 只多记追高教训）。
+- **#4 拆大文件**：`app.py`(1240)/`agent_loop.py`(1040) 超 <400 规则。**高风险重构、纯维护性收益**，
+  live 攒数据期不划算，建议延后；真做先拆 agent_loop（deciders→agent_deciders.py、风控/结算→
+  agent_risk.py，函数缝清晰无 Flask 路由风险），独立分支 + 完整回滚方案。
 
 ⏳ **卡时间（唯一主线，代码全就位）**
 - **让 20 个 agent 攒数据**：记忆闭环(P1–P3)全落地但 `journal`/教训库仍空，要真实交易日填充。

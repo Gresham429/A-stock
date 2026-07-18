@@ -7,6 +7,8 @@
 .vscode/
 .idea/
 *.code-workspace
+# 把仓库当 Obsidian vault 打开时的本地配置（每机器/每人不同）
+.obsidian/
 
 # ── 本地数据（应用自动生成）──
 watchlist.json

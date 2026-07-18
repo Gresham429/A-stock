@@ -60,6 +60,26 @@ def test_pa_score_guards():
     assert s is None or 0 <= s <= 100, f"分数越界: {s}"
 
 
+def test_pa_score_respects_cohort_dirs():
+    """cohort 修复核心：打分方向跟传入 dirs 走。range_pos 高时，−1(反转)给低分、+1(动量)给高分。
+
+    这正是「大盘池 range_pos=+1」修复的效果——同一只近高点大盘股不再被反转方向判低分。
+    """
+    m = {"vol": 50, "cum20": 5, "range_pos": 90}          # 近区间高点
+    neutral = {"vol": {"sign": 0}, "cum20": {"sign": 0}}  # 只让 range_pos 生效
+    s_rev = app._pa_score(m, {**neutral, "range_pos": {"sign": -1}})
+    s_mom = app._pa_score(m, {**neutral, "range_pos": {"sign": +1}})
+    assert s_rev is not None and s_mom is not None
+    assert s_mom > s_rev, f"方向未跟 dirs 走：动量应给近高点更高分 (mom={s_mom} rev={s_rev})"
+    assert abs(s_rev - 10.0) < 1e-6 and abs(s_mom - 90.0) < 1e-6, f"分值不对: rev={s_rev} mom={s_mom}"
+
+
+def test_pa_score_default_dirs_backward_compat():
+    """不传 dirs → 退回 factor_lab.directions()（向后兼容、不抛）。"""
+    s = app._pa_score({"vol": 50, "cum20": 5, "range_pos": 40})
+    assert s is None or 0 <= s <= 100
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

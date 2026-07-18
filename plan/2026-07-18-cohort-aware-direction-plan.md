@@ -46,8 +46,11 @@
 7. `_pa_score(m, dirs=None)`：dirs 为空 → `factor_lab.directions()`（向后兼容）；否则用传入 dirs。
 8. `screening._screen_rows` 无 focus（预筛后大盘池）：`dirs = factor_lab.scoring_directions('large')` 传入
    `_pa_score`。**focus 路径不变**（板块成分股混市值，用全池方向合理，且限爆炸半径）。
-9. `agent_loop.detect_failures`：按被买股的 cohort 选方向——`large_set=set(codes_of()[:LARGE_COHORT_N])`，
-   大盘买入用 `scoring_directions('large')`、否则全池。`bad(factor, code)` 据此选。→ 打分与教训同源、不矛盾。
+9. ~~`agent_loop.detect_failures` cohort 化~~ —— **实现时发现不需要，已放弃**：
+   `run_day:830` 在 focus 为空时**自动取当日最强板块**作 focus → **agent 永远走 focus 路径**
+   （全池方向打分），从不走无 focus 的大盘 cohort 打分。故大盘 cohort 打分只影响**用户面全市场选股**
+   （recommend_screen 不选板块），而它**没有配套教训门**。→ 不存在「打分鼓励、教训惩罚」的矛盾
+   （PITFALLS#2 不触发），detect_failures 无需改。**大幅缩小爆炸半径**。
 10. `refresh_if_stale`/boot：full backtest 重跑时**顺带** `backtest_large()`。`purge()` 也清 `ic_cohort`。
 
 ## 任务分解（TDD）
@@ -66,12 +69,11 @@
 - `refresh_if_stale` 末尾调 `backtest_large`；`purge()` 加 `DELETE FROM ic_cohort WHERE date<?`。
 - 测试：`_daily_ic_rows` 已在 Task1 测；backtest_large 网络部分走 Task4 live 集成验证（不进离线套件）。
 
-### Task 3 — screening + agent_loop 接线
-- `_pa_score(m, dirs=None)`；`_screen_rows` 无 focus 传 `scoring_directions('large')`。
-- `detect_failures` 按被买股 cohort 选方向。
-- 测试 `test_screen_branches`（已有，改 _pa_score 必跑）+ 新增 `test_pa_score_dirs`：
-  同一 m、range_pos 高，传全池(range_pos −1)得低分、传大盘(range_pos +1)得高分 → 证明方向真的跟 dirs 走。
-  `test_agent_gates` 里补：detect_failures 大盘买入高 range_pos + 大盘方向为正 → **不记**追高（一致性）。
+### Task 3 — screening 接线（agent_loop 无需改，见设计 item 9）
+- `_pa_score(m, dirs=None)`；`_screen_rows` 无 focus 传 `scoring_directions('large')`、focus 传全池。
+- **detect_failures 不改**（agent 永远 focus，不碰大盘 cohort 打分 → 无矛盾）。
+- 测试 `test_screen_branches` +2：`test_pa_score_respects_cohort_dirs`（range_pos 高、−1 得 10 分/+1 得 90 分
+  → 方向真跟 dirs 走）+ `test_pa_score_default_dirs_backward_compat`（不传 dirs 退回全池、不抛）。
 
 ### Task 4 — live 集成验证 + 回归
 - 全 12+1 离线套件绿。

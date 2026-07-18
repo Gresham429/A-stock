@@ -75,8 +75,12 @@ def _safe_kline(code: str, num: int = 70) -> list[dict]:
     return k
 
 
-def _pa_score(m: dict) -> float | None:
+def _pa_score(m: dict, dirs: dict | None = None) -> float | None:
     """形态初筛打分（0–100）。None = 形态不可分析，该股出局。
+
+    `dirs`：因子方向字典（调用方一次算好传入，省每股一次 DB 读）。为空则取**全池**方向
+    （向后兼容）。无 focus 全市场路径应传 `scoring_directions('large')`——打分对象是预筛后的
+    大盘池、方向可与全池相反（见 factor_lab / PITFALLS#5b）。
 
     这是**粗筛**，只决定谁值得占用送进 AI 的 36 个名额；真正的 PA 判断由 AI 依
     rules_store 的规则库做。
@@ -101,7 +105,8 @@ def _pa_score(m: dict) -> float | None:
         return None
     if not (VOL_FLOOR <= vol <= VOL_CEIL):  # 偏好+风控硬门，与预测无关
         return None
-    dirs = factor_lab.directions()
+    if dirs is None:
+        dirs = factor_lab.directions()
     live = [f for f in ("vol", "cum20", "range_pos")
             if dirs.get(f, {}).get("sign", 0) != 0 and m.get(f) is not None]
     if not live:  # 没有任何因子方向可信 -> 全体中性，交给 AI 判断
@@ -185,7 +190,8 @@ def _screen_rows(capital: float, focus: str = "") -> list[dict]:
     # 5000 只不预筛会取到各板块代码号最小的股而非龙头，扩池反成选垃圾。
     if focus and len(pool) <= _PA_RANK_MAX:
         metrics = _metrics_of(pool)
-        scored = [(c, metrics[c], _pa_score(metrics[c])) for c in pool]
+        dirs_full = factor_lab.directions()   # focus=某板块：成分股混市值，用全池方向
+        scored = [(c, metrics[c], _pa_score(metrics[c], dirs_full)) for c in pool]
         keep = [(c, m, s) for c, m, s in scored if s is not None]
         keep.sort(key=lambda x: x[2], reverse=True)
         chosen = keep[:_SCREEN_CAP_TOTAL]
@@ -202,7 +208,10 @@ def _screen_rows(capital: float, focus: str = "") -> list[dict]:
         cap_per_sub = 6 if focus and focus in subs_all else 3
         picked = _balanced_pick(pool, _SCREEN_CAP_TOTAL, cap_per_sub, smap)
         mmap = _metrics_of(picked)
-        score_map = {c: _pa_score(mmap[c]) for c in picked}
+        # 无 focus = 预筛后的**大盘池** → 用大盘 cohort 方向（range_pos 等在大盘可与全池反向，
+        # 见 PITFALLS#5b）；cohort 无数据自动回退全池。focus 但池>200 = 大板块成分股(混市值) → 全池。
+        dirs = factor_lab.scoring_directions("large") if not focus else factor_lab.directions()
+        score_map = {c: _pa_score(mmap[c], dirs) for c in picked}
     rows = []
     for c in picked:
         q, m = quotes.get(c, {}), mmap.get(c, _EMPTY_METRICS)

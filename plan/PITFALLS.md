@@ -152,6 +152,17 @@ _pa_score 按 vol 正向 IC 选出高波动股 → AI 听话买入
 **故：放弃统计验证策略优势，转向单笔失败诊断 + 因子回测。**
 **红线：绝不让优化器朝收益率进化提示词**——5–8 个样本只会拟合噪音，且标签被大盘 beta 污染（大盘涨时 AI 随便买都赚 → 优化器学到「AI 很棒」→ 你会**相信**它）。
 
+### 5b. `universe_store.codes_of()` **无 focus 时按代码号排序、不是市值**
+
+`codes_of()`（空 focus）SQL 是 `ORDER BY code`——**按股票代码号**升序；只有**带 focus** 那支才 `ORDER BY float_mcap DESC`。
+实测 `codes_of()[:600]` 与「真·流通市值 top-600（Tencent `float_mcap_yi`）」**仅 82/600 重合**——前者基本是「号码最小的 600 只」（多为深市主板中小盘），不是大盘。
+
+- **踩过（2026-07-18）**：`factor_lab.backtest_large` 初版用 `codes_of()[:600]` 取「大盘 cohort」，
+  得 range_pos 方向 **−1**；改用 Tencent `float_mcap_yi` 重排后得 **+1**——**方向恰好相反**。
+  凡要「按市值切 cohort / 预筛」的地方，**必须自己拉 quote 按 `float_mcap_yi` 重排**（与 `screening._screen_rows` 同法），别信 codes_of() 顺序。
+- **连带**：`factor_lab.sample_codes` 注释称「已按流通市值降序」分层抽样，实为**按代码号**分层——
+  全池 IC/`excess_dist` 的样本是代码分层、非市值分层（仍横跨全市场、大体可用，但不是宣称的市值分层）。**未修**（动它要碰判罪线/冻结分位，敏感）；记此以待。
+
 ---
 
 ## 二、会让你白干的

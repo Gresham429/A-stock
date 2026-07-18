@@ -52,6 +52,11 @@ BENCH_SYM = "sh000001"
 # 待验因子：只含**确定性、只吃日K**的分量。net20(资金) 因数据源只给 30 天，无法回测。
 FACTORS = ("vol", "cum20", "range_pos")
 
+# cohort-aware 方向：打分对象是预筛后的大盘池，其因子方向可与「小盘主导的全池」相反
+# （2026-07-18 覆盖分析：h=10 range_pos 全池 −1 vs 大盘 +1）。大盘 cohort = 按流通市值前 N。
+# **镜像 `screening._PRESCREEN`**：两者是同一条预筛边界，改一个要同步改另一个。
+LARGE_COHORT_N = 600
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ic_daily(
   date TEXT NOT NULL, factor TEXT NOT NULL, horizon INTEGER NOT NULL,
@@ -59,6 +64,14 @@ CREATE TABLE IF NOT EXISTS ic_daily(
   PRIMARY KEY (date, factor, horizon)
 );
 CREATE INDEX IF NOT EXISTS idx_ic_date ON ic_daily(date);
+-- cohort 逐日 IC：与 ic_daily 并存、互不干扰。只存非「全池」cohort（当前只有 'large'）。
+-- 打分/教训门按池子选方向读它；excess_dist/判罪线永远走全池(ic_daily)、不 cohort 化。
+CREATE TABLE IF NOT EXISTS ic_cohort(
+  date TEXT NOT NULL, factor TEXT NOT NULL, horizon INTEGER NOT NULL,
+  cohort TEXT NOT NULL, ic REAL, n INTEGER,
+  PRIMARY KEY (date, factor, horizon, cohort)
+);
+CREATE INDEX IF NOT EXISTS idx_iccohort_date ON ic_cohort(date);
 CREATE TABLE IF NOT EXISTS runs(
   id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT,
   stocks INTEGER, days INTEGER, samples INTEGER, note TEXT
@@ -216,6 +229,25 @@ def rank_of(horizon: int, x: float, dist: dict[int, dict[int, float]] | None = N
     return None
 
 
+def _daily_ic_rows(per_day: dict[str, dict[str, list]]) -> list[tuple]:
+    """每日横截面 IC → [(date, factor, horizon, ic, n)]。
+
+    纯函数、无网络无库——`backtest`(全池) 与 `backtest_large`(大盘 cohort) **共用同一口径**，
+    避免两处 IC 逻辑漂移。存哪张表由调用方决定（cohort 由调用方补）。
+    """
+    rows: list[tuple] = []
+    for date, d in per_day.items():
+        for f in FACTORS:
+            for h in HORIZONS:
+                xs, ys = d.get(f) or [], d.get(f"fwd{h}") or []
+                if len(xs) != len(ys):
+                    continue
+                ic = _spearman(xs, ys)
+                if ic is not None:
+                    rows.append((date, f, h, round(ic, 6), len(xs)))
+    return rows
+
+
 def backtest(n_stocks: int = 300, workers: int = 8) -> dict[str, Any]:
     """跑一次全量回测：抽样 → 拉日K → 逐日算因子与未来收益 → 每日横截面 IC → 落盘。
 
@@ -269,17 +301,8 @@ def backtest(n_stocks: int = 300, workers: int = 8) -> dict[str, Any]:
                     ex_pool[h].append(fwd - (b1 / b0 - 1) * 100)
             samples += 1
 
-    # 每日横截面 IC
-    rows = []
-    for date, d in per_day.items():
-        for f in FACTORS:
-            for h in HORIZONS:
-                xs, ys = d.get(f) or [], d.get(f"fwd{h}") or []
-                if len(xs) != len(ys):
-                    continue
-                ic = _spearman(xs, ys)
-                if ic is not None:
-                    rows.append((date, f, h, round(ic, 6), len(xs)))
+    # 每日横截面 IC（纯 helper，backtest_large 同口径复用）
+    rows = _daily_ic_rows(per_day)
     # 超额分位分布 —— 判罪线的唯一合法来源（见 excess_dist 表注释）
     now_ = datetime.now().isoformat(timespec="seconds")
     dist_rows = []
@@ -307,6 +330,66 @@ def backtest(n_stocks: int = 300, workers: int = 8) -> dict[str, Any]:
                 samples, len(rows))
     return {"ok": True, "stocks": len(series), "days": len(per_day),
             "samples": samples, "ic_rows": len(rows), "summary": summary()}
+
+
+def backtest_large(n: int = 200, workers: int = 8) -> dict[str, Any]:
+    """大盘 cohort（按流通市值前 `LARGE_COHORT_N`）的逐日 IC → `ic_cohort`（cohort='large'）。
+
+    与 `backtest()` **隔离**：另抽密集样本(~200)、独立一次网络、**不产 excess_dist**
+    （判罪线/冻结分位永远走全池）。IC 走同一个 `_daily_ic_rows` helper → 与全池同口径。
+    per_day 累积段与 `backtest()` 刻意重复（~12 行）：宁可小重复，也不重构 `backtest()`
+    去碰它与 excess_dist 交织的主循环。大盘池仅 ~600 只，密集抽 200 已出稳的横截面 IC。
+    """
+    init()
+    # ⚠️ cohort 必须与 `screening._screen_rows` 的预筛**同口径**：按 **Tencent float_mcap_yi
+    # 降序**取前 N。**不能用 codes_of()[:N]**——codes_of() 是按**股票代码号**排序、非市值
+    # （实测其 top-600 与真·市值 top-600 仅 82/600 重合），用它会得到「小号码股」而非大盘池，
+    # 方向甚至相反（PITFALLS）。故这里自己拉 quote 重排（~1.7s，与 prescreen 同法）。
+    codes_all = universe_store.codes_of()
+    try:
+        q = ds.tencent_quote(codes_all)
+    except Exception as e:  # noqa: BLE001 取行情失败则本轮不产出 cohort（打分回退全池）
+        logger.warning("大盘 cohort 取行情失败: %s", e)
+        return {"ok": False, "msg": "行情失败"}
+    ranked = sorted([c for c in codes_all if c in q],
+                    key=lambda c: (q.get(c, {}) or {}).get("float_mcap_yi", 0) or 0, reverse=True)
+    codes = ranked[:LARGE_COHORT_N]
+    if len(codes) < 30:
+        return {"ok": False, "msg": f"大盘池不足（{len(codes)}）"}
+    step = max(1, len(codes) // n)
+    picks = codes[::step][:n]
+    logger.info("大盘 cohort 回测：抽样 %d 只（市值前 %d 里密采），拉 %d 根日K…",
+                len(picks), LARGE_COHORT_N, KLINE_DAYS)
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        series = dict(ex.map(_series_of, picks))
+    series = {c: k for c, k in series.items() if len(k) > WARMUP + max(HORIZONS) + 21}
+    if not series:
+        return {"ok": False, "msg": "无有效日K"}
+    per_day: dict[str, dict[str, list]] = {}
+    for _code, kl in series.items():
+        closes = [float(k["close"]) for k in kl]
+        dates = [str(k["date"])[:10] for k in kl]
+        for t in range(WARMUP, len(closes) - max(HORIZONS)):
+            if closes[t] <= 0:
+                continue
+            f = factors_at(closes[: t + 1])       # 只用 t 及之前 —— 无未来函数
+            if any(v is None for v in f.values()):
+                continue
+            d = per_day.setdefault(dates[t], {})
+            for k_, v in f.items():
+                d.setdefault(k_, []).append(v)
+            for h in HORIZONS:
+                d.setdefault(f"fwd{h}", []).append((closes[t + h] / closes[t] - 1) * 100)
+    rows = _daily_ic_rows(per_day)
+    with _LOCK, _conn() as c:
+        c.executemany(
+            "INSERT INTO ic_cohort(date,factor,horizon,cohort,ic,n) VALUES(?,?,?,'large',?,?) "
+            "ON CONFLICT(date,factor,horizon,cohort) DO UPDATE SET ic=excluded.ic, n=excluded.n",
+            [(d, f, h, ic, nn) for (d, f, h, ic, nn) in rows])
+    purge()
+    logger.info("大盘 cohort 回测完成：%d 只 × %d 日 = %d 条 IC", len(series), len(per_day), len(rows))
+    return {"ok": True, "cohort": "large", "stocks": len(series),
+            "days": len(per_day), "ic_rows": len(rows)}
 
 
 def summary(days: int = 0) -> list[dict[str, Any]]:
@@ -397,8 +480,12 @@ def _t_of(ics: list[float]) -> tuple[float, float]:
     return m, (m / (sd / math.sqrt(n)) if sd > 0 else 0.0)
 
 
-def direction(factor: str, horizon: int = 10) -> dict[str, Any]:
+def direction(factor: str, horizon: int = 10, cohort: str = "all") -> dict[str, Any]:
     """因子当前方向 —— **动态调整的正确形式**。
+
+    cohort='all'（默认）读全池 `ic_daily`（5 个用户面 AI + 默认打分依赖，行为不变）；
+    其它 cohort（如 'large'）读 `ic_cohort` —— 打分对象是预筛后的大盘池、方向可与全池相反。
+
 
     规则（防抖 + 防噪音）：
       近 %d 日 |t| > %.1f  → 用近期方向（regime 已切换，且证据显著）
@@ -414,11 +501,16 @@ def direction(factor: str, horizon: int = 10) -> dict[str, Any]:
     regime 切向动量 regime。若无此机制，静态权重会持续押错方向。
     """
     with _conn() as c:
-        rows = [r["ic"] for r in c.execute(
-            "SELECT ic FROM ic_daily WHERE factor=? AND horizon=? ORDER BY date",
-            (factor, horizon))]
+        if cohort == "all":
+            rows = [r["ic"] for r in c.execute(
+                "SELECT ic FROM ic_daily WHERE factor=? AND horizon=? ORDER BY date",
+                (factor, horizon))]
+        else:
+            rows = [r["ic"] for r in c.execute(
+                "SELECT ic FROM ic_cohort WHERE factor=? AND horizon=? AND cohort=? ORDER BY date",
+                (factor, horizon, cohort))]
     if len(rows) < 20:
-        return {"factor": factor, "sign": 0, "basis": "数据不足", "t": 0.0}
+        return {"factor": factor, "sign": 0, "basis": "数据不足", "t": 0.0, "cohort": cohort}
     m_full, t_full = _t_of(rows)
     m_rec, t_rec = _t_of(rows[-RECENT_WINDOW:])
     if abs(t_rec) > T_THRESHOLD:
@@ -433,13 +525,32 @@ def direction(factor: str, horizon: int = 10) -> dict[str, Any]:
             "t": round(t_rec, 2)}
 
 
-def directions(horizon: int = 10) -> dict[str, dict[str, Any]]:
+def directions(horizon: int = 10, cohort: str = "all") -> dict[str, dict[str, Any]]:
     """所有因子的当前方向（供 _pa_score 调用；查不到即全 0 → 打分退回中性）。"""
     try:
-        return {f: direction(f, horizon) for f in FACTORS}
+        return {f: direction(f, horizon, cohort) for f in FACTORS}
     except sqlite3.Error as e:
         logger.warning("因子方向读取失败（打分退回中性）: %s", e)
-        return {f: {"factor": f, "sign": 0, "basis": "库不可用", "t": 0.0} for f in FACTORS}
+        return {f: {"factor": f, "sign": 0, "basis": "库不可用", "t": 0.0, "cohort": cohort}
+                for f in FACTORS}
+
+
+_NO_DATA_BASES = ("数据不足", "库不可用")
+
+
+def scoring_directions(cohort: str = "large", horizon: int = 10) -> dict[str, dict[str, Any]]:
+    """给「打分/教训门」用的方向：优先 cohort 的方向，**该 cohort 尚无 IC 数据时回退全池**。
+
+    区分两种「sign 0」：
+      · cohort 表**无数据**（冷启动、未跑 backtest_large）→ 回退全池，避免打分全体中性、shortlist 崩。
+      · cohort 有数据但**不显著** → 尊重 sign 0（数据说这只因子在此池中性、不该打分），**不回退**。
+    判据：cohort 各因子的 basis 若**全部**落在「数据不足/库不可用」，视作无数据 → 回退。
+    """
+    if cohort == "all":
+        return directions(horizon, cohort="all")
+    d = directions(horizon, cohort=cohort)
+    has_data = any(v.get("basis") not in _NO_DATA_BASES for v in d.values())
+    return d if has_data else directions(horizon, cohort="all")
 
 
 def purge(days: int = IC_KEEP_DAYS) -> int:
@@ -448,6 +559,7 @@ def purge(days: int = IC_KEEP_DAYS) -> int:
     with _LOCK, _conn() as c:
         before = c.total_changes
         c.execute("DELETE FROM ic_daily WHERE date < ?", (cutoff,))
+        c.execute("DELETE FROM ic_cohort WHERE date < ?", (cutoff,))
         return c.total_changes - before
 
 
@@ -566,6 +678,10 @@ def refresh_if_stale(n_stocks: int = 300) -> dict[str, Any]:
     r = backtest(n_stocks)
     if r.get("ok"):
         log_directions(before)
+        try:                                  # 顺带刷新大盘 cohort 方向（打分/教训门用）
+            r["cohort_large"] = backtest_large()
+        except Exception as e:  # noqa: BLE001 大盘 cohort 失败不该拖垮全池刷新（打分回退全池）
+            logger.warning("大盘 cohort 回测失败（打分回退全池）: %s", e)
     return r
 
 

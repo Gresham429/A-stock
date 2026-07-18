@@ -140,6 +140,7 @@ app.py 用显式 import 带回名字，路由调用点与 `app._X` 可达性不�
 
 | 特性 | 文档 |
 |------|------|
+| ⭐ **Agent 逻辑地图（权威·先读，系统核心/量化基座）** | `plan/2026-07-18-agent-logic-map.md`（pipeline/门/调度/决策/订单/结算判罪/记忆/量化接入点/红线，端到端） |
 | **索引：plan/ 全部文档** | `plan/README.md`（本会话加，按主题分组） |
 | 全市场股票池 + 板块日变化 | `plan/2026-07-15-full-market-universe-design.md` |
 | **盘中 agent 调度器**（长期挂机也每桶自动跑） | `plan/2026-07-17-intraday-agent-scheduler-design.md` |
@@ -155,6 +156,8 @@ app.py 用显式 import 带回名字，路由调用点与 `app._X` 可达性不�
 | 卡在数据源的待办 | `plan/BACKLOG.md` |
 
 ### 关键机制速查
+
+> 下面是速查条目；**agent 交易/学习闭环的端到端全景**见 `plan/2026-07-18-agent-logic-map.md`（权威）。
 
 - **AI 注入链**：`_tier_block()`(本金档) + `_fee_block()`(交易成本) + `_lesson_block()`(历史教训)
   + `_macro_block()`(全球宏观) + `_ai_web_context()`(规则库/新闻/笔记/联网) → 前置注入 **5 个 AI**。

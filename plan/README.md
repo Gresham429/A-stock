@@ -15,6 +15,7 @@
 ### Agent 与进化
 | 文档 | 一句话 |
 |------|--------|
+| ⭐ [2026-07-18-agent-logic-map](2026-07-18-agent-logic-map.md) | **权威·先读**：agent 交易/学习闭环端到端运行时全景（pipeline/门/调度/决策/订单/结算判罪/记忆/量化接入点/红线） |
 | [2026-07-16-agent-evolution-design](2026-07-16-agent-evolution-design.md) | Multi-Agent 模拟交易 + 失败归因驱动的提示词进化（总设计） |
 | [2026-07-16-outcome-driven-lessons-design](2026-07-16-outcome-driven-lessons-design.md) | 结果导向教训：从「买入时长得像错」到「事后证明错」（超额结算 + 判罪线来自分布） |
 | [2026-07-16-decision-data-plane-design](2026-07-16-decision-data-plane-design.md) | 决策数据面：给候选股补 K 线结构 + 真·大盘块，让提示词能满足自己注入的规则 |

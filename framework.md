@@ -68,14 +68,14 @@ flowchart TB
 
 **分层职责**（文件 → 一句话；详见 `CLAUDE.md`「文件地图」）：
 
-| 层 | 文件 | 职责 |
-|----|------|------|
-| **入口** | `app.py` · `templates/index.html` · `static/app.js` | Flask 62 路由 · UI+CSS · 全部前端逻辑 |
-| **共享辅助** | `screening.py` · `ai_blocks.py` | 选股/形态打分（cohort 方向）· 5 AI + agent 的注入块 |
-| **① 数据** | `datasources.py` · `universe_store.py` · `universe.py` · `news_store.py` · `notes_store.py` · `store.py` · `config.py` | 行情/K线/财报/新闻 + 全市场池+板块 + 自选/配置 |
-| **② 资金交易** | `fees.py` · `profile_store.py` · `portfolio.py` · `paper_store.py` | 费率单一源 · 多档画像 · 真实持仓(lot) · 模拟撮合 |
-| **③ AI 进化** | `llm.py` · `template_store.py` · `provenance.py` · `rules_store.py` · `ai_cache.py` · `websearch.py` | DeepSeek · 提示词版本化 · 溯源校验 · 规则库 · 缓存 · 联网 |
-| **④ Agent 核心** | `agent_loop.py` · `agent_store.py` · `factor_lab.py` · `outcome.py` · `structure.py` | 日循环+调度 · 持久层 · 因子/判罪线 · 结算 · K线结构 |
+| 层              | 文件                                                                                                                     | 职责                                       |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| **入口**         | `app.py` · `templates/index.html` · `static/app.js`                                                                    | Flask 62 路由 · UI+CSS · 全部前端逻辑            |
+| **共享辅助**       | `screening.py` · `ai_blocks.py`                                                                                        | 选股/形态打分（cohort 方向）· 5 AI + agent 的注入块    |
+| **① 数据**       | `datasources.py` · `universe_store.py` · `universe.py` · `news_store.py` · `notes_store.py` · `store.py` · `config.py` | 行情/K线/财报/新闻 + 全市场池+板块 + 自选/配置            |
+| **② 资金交易**     | `fees.py` · `profile_store.py` · `portfolio.py` · `paper_store.py`                                                     | 费率单一源 · 多档画像 · 真实持仓(lot) · 模拟撮合          |
+| **③ AI 进化**    | `llm.py` · `template_store.py` · `provenance.py` · `rules_store.py` · `ai_cache.py` · `websearch.py`                   | DeepSeek · 提示词版本化 · 溯源校验 · 规则库 · 缓存 · 联网 |
+| **④ Agent 核心** | `agent_loop.py` · `agent_store.py` · `factor_lab.py` · `outcome.py` · `structure.py`                                   | 日循环+调度 · 持久层 · 因子/判罪线 · 结算 · K线结构        |
 
 ## 3. 两条主数据流
 
@@ -86,6 +86,16 @@ flowchart TB
 守护线程每 5min tick → `agent_loop.run_all` 过三道门（交易日/时段/原子占位）→ 每 agent `run_day` 九步
 （结算旧仓 → 研判 → 选股 → 决策 LLM → 风控硬门 → 挂限价单 → 复盘记教训）→ 挂单下个 tick 回判成交
 → 建仓 5/10/20 日按超额结算、底部十分位判罪 → 教训+战绩喂回下次决策。
+
+**A 与 B 什么关系？——共享底座、不同用途**（关键：只有 agent 写回，版面消费）：
+
+![版面 vs Agent · 共享底座、不同用途](plan/diagrams/serving-vs-agent.svg)
+
+- **同源**：候选池 `_screen_rows`/`_pa_score`（vol·cum20·range_pos）+ 因子库 `factor_lab`（IC/方向/判罪线）+ 记忆教训库 `agent_store`。
+- **分叉**：① **决策脑**——版面 `llm.*` 给建议、不下单；agent `deciders` 出可执行意向→风控→挂单。
+  ② **记忆读法**——版面读**全舰队汇总**（house-view/regime-view/全体教训）；agent 读**自己的**（account 隔离）+ 全舰队只读层。
+  ③ **选股路径**——agent 永远带 focus（全池方向）；版面无 focus 全市场走大盘 cohort 方向（本会话 cohort 修复只动这条）。
+  ④ **学习闭环**——只有 agent 真交易→真结算→写回教训；版面是**消费者**、自己不学。
 
 ## 4. 关键设计取向（跨层的约定）
 

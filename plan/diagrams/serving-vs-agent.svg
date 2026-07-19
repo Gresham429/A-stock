@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 600" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">
+  <rect x="1" y="1" width="938" height="598" rx="16" fill="#fbfbfd" stroke="#e3e6ee"/>
+  <text x="34" y="42" font-size="20" font-weight="700" fill="#1b2030">版面服务 vs Agent 舰队 · 共享底座、不同用途</text>
+  <text x="34" y="64" font-size="12.5" fill="#6b7280">候选池 / 因子 / 教训库同源；决策 · 记忆 · 执行 · 学习分叉。只有 agent 写回，版面消费。</text>
+
+  <!-- ===== 版面 (消费者) ===== -->
+  <g>
+    <rect x="34" y="84" width="420" height="196" rx="11" fill="#f3f7ff" stroke="#5b7cc9"/>
+    <rect x="34" y="84" width="420" height="34" rx="11" fill="#5b7cc9"/>
+    <rect x="34" y="104" width="420" height="14" fill="#5b7cc9"/>
+    <text x="52" y="106" font-size="14.5" font-weight="700" fill="#fff">🖥 版面 · 用户服务</text>
+    <text x="440" y="106" font-size="12" font-weight="600" fill="#dbe6ff" text-anchor="end">消费者</text>
+    <g font-size="12.5" fill="#26324d">
+      <text x="52" y="146"><tspan font-weight="700" fill="#274690">决策</tspan>　llm.* 研判/选股/持仓/入场 → <tspan font-weight="700">给建议、不下单</tspan></text>
+      <text x="52" y="180"><tspan font-weight="700" fill="#274690">记忆</tspan>　读<tspan font-weight="700">全舰队汇总</tspan>：house-view(按票)</text>
+      <text x="86" y="200">/ regime-view(按行情) / 全体教训</text>
+      <text x="52" y="234"><tspan font-weight="700" fill="#274690">选股</tspan>　无 focus 全市场 → 大盘 cohort 方向</text>
+      <text x="52" y="264"><tspan font-weight="700" fill="#274690">闭环</tspan>　无（一次性建议，不学习）</text>
+    </g>
+  </g>
+
+  <!-- ===== Agent (生产者) ===== -->
+  <g>
+    <rect x="486" y="84" width="420" height="196" rx="11" fill="#eefaf3" stroke="#2f9e6f"/>
+    <rect x="486" y="84" width="420" height="34" rx="11" fill="#2f9e6f"/>
+    <rect x="486" y="104" width="420" height="14" fill="#2f9e6f"/>
+    <text x="504" y="106" font-size="14.5" font-weight="700" fill="#fff">🤖 Agent 舰队 · 模拟交易</text>
+    <text x="892" y="106" font-size="12" font-weight="600" fill="#d3f2e3" text-anchor="end">生产者·系统核心</text>
+    <g font-size="12.5" fill="#1e3a2e">
+      <text x="504" y="146"><tspan font-weight="700" fill="#1f7a54">决策</tspan>　deciders(single/debate) → 可执行意向</text>
+      <text x="538" y="166">→ 风控硬门 → 挂限价单</text>
+      <text x="504" y="196"><tspan font-weight="700" fill="#1f7a54">记忆</tspan>　读<tspan font-weight="700">自己的</tspan>(account 隔离) + 全舰队只读层</text>
+      <text x="504" y="226"><tspan font-weight="700" fill="#1f7a54">选股</tspan>　永远带 focus(最强板块) → 全池方向</text>
+      <text x="504" y="256"><tspan font-weight="700" fill="#1f7a54">闭环</tspan>　决策→挂单→回判→结算→判罪→教训</text>
+    </g>
+  </g>
+
+  <!-- ===== 共享底座 ===== -->
+  <text x="34" y="332" font-size="13" font-weight="700" fill="#8a6d1f">🔗 共享底座（同一套代码 / 数据）</text>
+  <g>
+    <rect x="34" y="344" width="872" height="150" rx="12" fill="#fbf6e9" stroke="#d9b24a"/>
+    <rect x="54" y="366" width="264" height="108" rx="9" fill="#fff" stroke="#e0cd91"/>
+    <text x="186" y="392" font-size="13" font-weight="700" fill="#7a5c12" text-anchor="middle">候选池生成</text>
+    <text x="186" y="414" font-size="11.5" fill="#6b6250" text-anchor="middle">screening._screen_rows</text>
+    <text x="186" y="432" font-size="11.5" fill="#6b6250" text-anchor="middle">_pa_score 打分</text>
+    <text x="186" y="456" font-size="11" fill="#9a8f74" text-anchor="middle">vol · cum20 · range_pos</text>
+
+    <rect x="338" y="366" width="264" height="108" rx="9" fill="#fff" stroke="#e0cd91"/>
+    <text x="470" y="392" font-size="13" font-weight="700" fill="#7a5c12" text-anchor="middle">因子库</text>
+    <text x="470" y="414" font-size="11.5" fill="#6b6250" text-anchor="middle">factor_lab</text>
+    <text x="470" y="432" font-size="11.5" fill="#6b6250" text-anchor="middle">IC · 方向 · cohort</text>
+    <text x="470" y="456" font-size="11" fill="#9a8f74" text-anchor="middle">判罪线 excess_dist(超额分布)</text>
+
+    <rect x="622" y="366" width="264" height="108" rx="9" fill="#fff" stroke="#e0cd91"/>
+    <text x="754" y="392" font-size="13" font-weight="700" fill="#7a5c12" text-anchor="middle">记忆 · 教训库</text>
+    <text x="754" y="414" font-size="11.5" fill="#6b6250" text-anchor="middle">agent_store</text>
+    <text x="754" y="432" font-size="11.5" fill="#6b6250" text-anchor="middle">journal · lessons · entries</text>
+    <text x="754" y="456" font-size="11" fill="#9a8f74" text-anchor="middle">冻结分位 · house-view · regime</text>
+  </g>
+
+  <!-- ===== 箭头 ===== -->
+  <!-- 版面 ← 底座（只读，灰）-->
+  <path d="M244 344 L244 280" stroke="#8a93a6" stroke-width="2" fill="none" marker-end="url(#grey)"/>
+  <text x="252" y="316" font-size="11.5" fill="#6b7280">读（只读）</text>
+  <!-- Agent ← 底座（读，绿）-->
+  <path d="M636 344 L636 280" stroke="#2f9e6f" stroke-width="2" fill="none" marker-end="url(#green)"/>
+  <text x="644" y="316" font-size="11.5" fill="#1f7a54">读</text>
+  <!-- Agent → 底座（写回教训，金，加粗）-->
+  <path d="M756 280 L756 344" stroke="#d98a1f" stroke-width="2.6" fill="none" marker-end="url(#gold)"/>
+  <text x="764" y="316" font-size="11.5" font-weight="700" fill="#b56f12">写回：教训 / journal / entries</text>
+
+  <text x="34" y="524" font-size="12.5" fill="#4a5568"><tspan font-weight="700" fill="#b56f12">关键循环：</tspan>只有 agent 真交易→真结算→<tspan font-weight="700">写回</tspan>教训；版面把这些集体经验<tspan font-weight="700">读出来</tspan>给你建议、自己不学。</text>
+  <text x="34" y="548" font-size="12.5" fill="#4a5568"><tspan font-weight="700" fill="#274690">同源：</tspan>候选池(_screen_rows) + 因子(factor_lab) + 教训库(agent_store)。<tspan font-weight="700" fill="#1f7a54">　分叉：</tspan>决策脑 · 记忆读法 · 是否执行 · 是否学习。</text>
+  <text x="34" y="572" font-size="11" fill="#9aa1af">注：本会话 cohort 方向修复只改「版面无 focus 选股」这条；agent 永远 focus、不受影响。详见 plan/2026-07-18-agent-logic-map.md</text>
+
+  <defs>
+    <marker id="grey" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="#8a93a6"/></marker>
+    <marker id="green" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="#2f9e6f"/></marker>
+    <marker id="gold" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="#d98a1f"/></marker>
+  </defs>
+</svg>

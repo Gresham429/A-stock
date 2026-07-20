@@ -862,6 +862,7 @@ async function loadPortfolio(){
       <td class="acts">
         ${LLM?`<button class="mini ai" onclick="folioAdvice('${h.code}')">🤖 何时卖</button>`:''}
         <button class="mini" onclick="openDetail('${h.code}')">深挖</button>
+        <button class="mini buy" onclick="addLot('${h.code}','${(h.name||h.code)}',${h.price||0})" title="给这只再买一笔（加仓·追加 lot，自动加权平均成本）">＋加仓</button>
         <button class="mini danger" onclick="delHolding('${h.code}','${(h.name||h.code)}')">清仓</button>
       </td>
     </tr>
@@ -895,6 +896,20 @@ async function addHolding(){
   if(!j.ok){alert(j.msg||'记录失败');return;}
   ['h_code','h_shares','h_cost','h_date'].forEach(id=>document.getElementById(id).value='');
   loadPortfolio();
+}
+/* 持仓行「＋加仓」：预填买入表单（代码 + 现价作默认成本），滚到表单、聚焦股数，让你确认后记一笔。
+   走的还是 /api/portfolio/add（同代码追加一笔 lot、自动加权平均、按成交额+费扣现金）——只是省去重打代码。 */
+function addLot(code, name, price){
+  document.getElementById('h_code').value = code;
+  document.getElementById('h_cost').value = price ? (''+price) : '';
+  document.getElementById('h_shares').value = '';
+  document.getElementById('h_date').value = '';
+  const form = document.querySelector('.folioForm');
+  if(form){
+    form.scrollIntoView({behavior:'smooth', block:'center'});
+    form.classList.add('flash'); setTimeout(()=>form.classList.remove('flash'), 1200);
+  }
+  const sh = document.getElementById('h_shares'); if(sh) sh.focus();
 }
 async function delHolding(code,name){
   if(!confirm(`确认从持仓移除 ${name}（${code}）？（只删记录，不影响你的真实账户）`))return;

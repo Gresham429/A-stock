@@ -117,6 +117,9 @@
   .mini:hover{color:var(--txt);border-color:var(--gold-dim)}
   .mini.ai{color:var(--gold);border-color:var(--gold-dim)}
   .mini.danger:hover{color:var(--up);border-color:var(--up)}
+  .mini.buy{color:var(--up)} .mini.buy:hover{border-color:var(--up)}
+  .folioForm.flash{border-radius:8px;animation:flashbg 1.2s ease}
+  @keyframes flashbg{0%{background:var(--gold-dim)}100%{background:transparent}}
   .advrow{display:none} .advrow.open{display:table-row}
   .advrow td{background:var(--bg2);padding:0 12px}
   /* 逐笔明细（外层合并、点 ▸ 展开） */
@@ -486,7 +489,7 @@
     <input id="h_cost" class="w-num" placeholder="成本价 如 34.5" inputmode="decimal">
     <input id="h_date" class="w-date" placeholder="买入日 2026-07-10">
     <button class="btn ai" onclick="addHolding()">＋ 记录买入</button>
-    <span class="scr-cap-hint">同一只再录=<b>加仓追加一笔</b>（自动加权平均成本）；改错了先「清仓」再重录</span>
+    <span class="scr-cap-hint">新代码=<b>建仓</b>，同一只再录=<b>加仓</b>追加一笔（自动加权平均成本）；持仓行点「<b>＋加仓</b>」会自动带入代码与现价。改错了先「清仓」再重录</span>
   </div>
   <div class="tablecard">
     <table><thead><tr>

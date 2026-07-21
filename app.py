@@ -528,11 +528,17 @@ def watchlist_remove():
 # ── 持仓 ──────────────────────────────────────────────────────────────────
 @app.route("/api/portfolio")
 def portfolio_list():
-    """持仓 + 实时盈亏 + 组合汇总。"""
+    """持仓 + 实时盈亏 + 组合汇总（含可用现金 / 累计已实现盈亏 / 总资产）+ 已实现流水。"""
     codes = portfolio.codes()
     quotes = ds.tencent_quote(codes) if codes else {}
     rows = portfolio.with_pnl(quotes)
-    return jsonify({"holdings": rows, "summary": portfolio.summary(rows), "updated": _now()})
+    s = portfolio.summary(rows)
+    cash = float((profile_store.get_active() or {}).get("cash") or 0)
+    s["cash"] = round(cash, 2)
+    s["realized_total"] = portfolio.realized_total()
+    s["total_assets"] = round(cash + s.get("market_value", 0), 2)   # 现金 + 持仓市值
+    return jsonify({"holdings": rows, "summary": s,
+                    "realized": portfolio.realized(), "updated": _now()})
 
 
 @app.route("/api/portfolio/add", methods=["POST"])
@@ -577,6 +583,32 @@ def portfolio_remove():
             price = None
     return jsonify({"ok": True, "holdings": portfolio.remove(code, price),
                     "sold_at": price})
+
+
+@app.route("/api/portfolio/reduce", methods=["POST"])
+def portfolio_reduce():
+    """减仓/卖出：{code, shares, sell_price}。FIFO 扣 lot、现金加回净收入、记一条已实现盈亏。
+
+    sell_price='market' 用当前市价。卖满该只=清仓变现。超卖/无持仓 → 400。
+    """
+    b = request.json or {}
+    code = ds.normalize(b.get("code", ""))
+    q = ds.tencent_quote([code]) if code else {}
+    raw = b.get("sell_price")
+    if raw == "market":
+        raw = (q.get(code, {}) or {}).get("price")
+    try:
+        shares = float(b.get("shares", 0))
+        price = float(raw)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "msg": "股数/卖价必须是数字"}), 400
+    try:
+        holdings = portfolio.reduce(code, shares, price,
+                                    name=(q.get(code, {}) or {}).get("name", ""))
+    except ValueError as e:
+        return jsonify({"ok": False, "msg": str(e)}), 400
+    return jsonify({"ok": True, "holdings": holdings, "sold_at": round(price, 3),
+                    "realized_total": portfolio.realized_total()})
 
 
 @app.route("/api/portfolio/reconcile")

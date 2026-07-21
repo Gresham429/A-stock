@@ -140,6 +140,83 @@ def test_summary_aggregates():
     ck(abs(s["pnl_amount"] - 200) < 1e-9 and s["count"] == 1, "汇总毛盈亏/数量错")
 
 
+def test_reduce_fifo_single_lot_partial():
+    """减仓(FIFO)：卖部分 → lot 扣减、现金加回「卖额−卖出费」、记一条已实现(落袋净)。"""
+    fake = _setup(cash=100000.0)
+    sched = fake._sched
+    portfolio.add("600000", 100, 10.0, "2026-06-01")
+    cash_after_buy = fake._cash
+    portfolio.reduce("600000", 40, 12.0, name="甲")
+    h = portfolio.load()[0]
+    ck(h["shares"] == 60, f"卖 40 后应剩 60，实得 {h['shares']}")
+    sell_fee = fees.total("sell", 40 * 12.0, sched)
+    ck(abs(fake._cash - (cash_after_buy + 40 * 12.0 - sell_fee)) < 0.01,
+       f"现金应加回卖额−卖出费，实得 {fake._cash}")
+    buy_fee_full = fees.total("buy", 100 * 10.0, sched)
+    exp_net = (40 * 12.0 - 40 * 10.0) - (40 / 100) * buy_fee_full - sell_fee   # 落袋净
+    tr = portfolio.realized()[-1]
+    ck(abs(tr["realized_net"] - round(exp_net, 2)) < 0.01,
+       f"已实现净(落袋)应 {round(exp_net,2)}，实得 {tr['realized_net']}")
+    ck(abs(portfolio.realized_total() - round(exp_net, 2)) < 0.01, "累计已实现错")
+
+
+def test_reduce_fifo_consumes_oldest_first():
+    """FIFO：先卖最早买入的 lot；跨两笔时先清早的、再动晚的。"""
+    fake = _setup(cash=1000000.0)
+    sched = fake._sched
+    portfolio.add("600000", 100, 10.0, "2026-06-01")   # 早
+    portfolio.add("600000", 200, 20.0, "2026-06-02")   # 晚
+    portfolio.reduce("600000", 150, 25.0, name="甲")    # 消 100@10 全 + 50@20
+    h = portfolio.load()[0]
+    ck(len(h["lots"]) == 1 and h["shares"] == 150, f"应剩 1 笔 150 股，实得 {h['lots']}")
+    ck(abs(h["cost_price"] - 20.0) < 1e-9, f"剩余应是 20 元那笔、均价 20，实得 {h['cost_price']}")
+    consumed_cost = 100 * 10.0 + 50 * 20.0
+    bf1 = fees.total("buy", 100 * 10.0, sched)
+    bf2 = fees.total("buy", 200 * 20.0, sched)
+    alloc = (100 / 100) * bf1 + (50 / 200) * bf2
+    sell_fee = fees.total("sell", 150 * 25.0, sched)
+    exp_net = (150 * 25.0 - consumed_cost) - alloc - sell_fee
+    ck(abs(portfolio.realized()[-1]["realized_net"] - round(exp_net, 2)) < 0.01,
+       f"FIFO 跨笔已实现净应 {round(exp_net,2)}，实得 {portfolio.realized()[-1]['realized_net']}")
+
+
+def test_reduce_full_is_liquidation():
+    """卖满全部股数 = 清仓变现：持仓移除、记一条流水。"""
+    _setup(cash=100000.0)
+    portfolio.add("600000", 100, 10.0, "2026-06-01")
+    portfolio.reduce("600000", 100, 12.0, name="甲")
+    ck(portfolio.load() == [], "卖满应清仓")
+    ck(len(portfolio.realized()) == 1, "应记一条流水")
+
+
+def test_reduce_rejects_oversell():
+    """超卖（卖出股数 > 持有）→ raise ValueError，持仓/现金/流水都不动。"""
+    fake = _setup(cash=100000.0)
+    portfolio.add("600000", 100, 10.0)
+    cash_before = fake._cash
+    raised = False
+    try:
+        portfolio.reduce("600000", 200, 12.0)
+    except ValueError:
+        raised = True
+    ck(raised, "超卖应 raise ValueError")
+    ck(portfolio.load()[0]["shares"] == 100, "超卖后持仓不应变")
+    ck(fake._cash == cash_before, "超卖后现金不应变")
+    ck(portfolio.realized() == [], "超卖不应记流水")
+
+
+def test_realized_total_accumulates():
+    """累计已实现 = Σ各笔 realized_net；多笔卖出各记一条。"""
+    _setup(cash=1000000.0)
+    portfolio.add("600000", 100, 10.0, "2026-06-01")
+    portfolio.add("600001", 100, 30.0, "2026-06-01")
+    portfolio.reduce("600000", 100, 12.0)   # 赚
+    portfolio.reduce("600001", 100, 25.0)   # 亏
+    ck(len(portfolio.realized()) == 2, "两笔卖出应两条流水")
+    manual = round(sum(t["realized_net"] for t in portfolio.realized()), 2)
+    ck(abs(portfolio.realized_total() - manual) < 0.01, "累计已实现应=Σ各笔")
+
+
 if __name__ == "__main__":
     for k, v in sorted(globals().items()):
         if k.startswith("test_") and callable(v):

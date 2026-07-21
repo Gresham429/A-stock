@@ -833,15 +833,21 @@ async function loadPortfolio(){
   let j; try{ j=await (await fetch('/api/portfolio')).json(); }catch(e){return;}
   const s=j.summary||{}, hs=j.holdings||[];
   const ag=document.getElementById('assetGrid');
+  const card=(lab,big,cls,sub)=>`<div class="assetCard${cls?' hl':''}"><div class="lab">${lab}</div><div class="big ${cls}">${big}</div><div class="sub ${cls}">${sub}</div></div>`;
+  // 现金/已实现/总资产始终显示（哪怕空仓）——这是「考虑总现金」要看的
+  let cards=
+      card('总资产', fmtInt(s.total_assets)+'元','','可用现金 + 持仓市值')
+     +card('可用现金', fmtInt(s.cash)+'元','','买扣卖加')
+     +card('累计已实现', (s.realized_total>=0?'+':'')+fmtInt(s.realized_total)+'元', clr(s.realized_total), '卖出落袋净·历史累计');
   if(s.count){
-    const card=(lab,big,cls,sub)=>`<div class="assetCard${cls?' hl':''}"><div class="lab">${lab}</div><div class="big ${cls}">${big}</div><div class="sub ${cls}">${sub}</div></div>`;
     const brPct = (s.cost_value>0) ? (s.pnl_broker/s.cost_value*100) : null;
-    ag.innerHTML=
+    cards+=
       card('总市值', fmtInt(s.market_value)+'元','','成本 '+fmtInt(s.cost_value)+'元')
-     +card('持仓盈亏', (s.pnl_broker>=0?'+':'')+fmtInt(s.pnl_broker)+'元', clr(s.pnl_broker), (brPct!=null?sgn(brPct)+brPct.toFixed(2)+'%':'—')+' · 毛 '+sgn(s.pnl_amount)+fmtInt(s.pnl_amount)+' · 离场成本按股单列')
+     +card('持仓盈亏', (s.pnl_broker>=0?'+':'')+fmtInt(s.pnl_broker)+'元', clr(s.pnl_broker), (brPct!=null?sgn(brPct)+brPct.toFixed(2)+'%':'—')+' · 未实现 · 毛 '+sgn(s.pnl_amount)+fmtInt(s.pnl_amount))
      +card('当日盈亏', (s.today_pnl>=0?'+':'')+fmtInt(s.today_pnl)+'元', clr(s.today_pnl), s.today_pnl_pct!=null?sgn(s.today_pnl_pct)+s.today_pnl_pct+'%':'—')
      +card('持仓', s.count+' 只','','分散度');
-  }else ag.innerHTML='<div class="assetCard" style="grid-column:1/-1"><div class="lab">暂无持仓</div><div class="sub muted" style="margin-top:8px">在下方表单录入「代码 + 股数 + 成本价」，即可看总盈亏与当日盈亏，并让 AI 给卖出建议。</div></div>';
+  }else cards+='<div class="assetCard" style="grid-column:1/-1"><div class="sub muted" style="padding:6px 2px">暂无持仓。下方录入买入；对持仓用「减仓」卖出——卖出记入「累计已实现」并加回现金。</div></div>';
+  ag.innerHTML=cards;
   const tb=document.getElementById('folioRows');
   tb.innerHTML = hs.length ? hs.map(h=>{
     const nlot=(h.lots_view||[]).length;
@@ -863,6 +869,7 @@ async function loadPortfolio(){
         ${LLM?`<button class="mini ai" onclick="folioAdvice('${h.code}')">🤖 何时卖</button>`:''}
         <button class="mini" onclick="openDetail('${h.code}')">深挖</button>
         <button class="mini buy" onclick="addLot('${h.code}','${(h.name||h.code)}',${h.price||0})" title="给这只再买一笔（加仓·追加 lot，自动加权平均成本）">＋加仓</button>
+        <button class="mini sell" onclick="sellLot('${h.code}','${(h.name||h.code)}',${h.price||0},${h.shares||0})" title="卖出部分/全部（FIFO 先进先出，记已实现盈亏、现金加回）">减仓</button>
         <button class="mini danger" onclick="delHolding('${h.code}','${(h.name||h.code)}')">清仓</button>
       </td>
     </tr>
@@ -884,6 +891,20 @@ async function loadPortfolio(){
     row.firstElementChild.innerHTML = FOLIO_ADV[code].html
       || '<div class="paneempty small"><span class="spin"></span> '+MODEL+' 分析何时卖/加/止损…</div>';
   });
+  // 已实现盈亏流水（卖出记录）——「总亏损/总现金」的账本
+  const rb=document.getElementById('realizedBox');
+  if(rb){
+    const rl=j.realized||[];
+    if(rl.length){
+      const tr=rl.slice().reverse().slice(0,20).map(t=>`<tr>
+        <td>${t.date||'—'}</td>
+        <td class="nm2">${esc(t.name||t.code)} <span class="c">${t.code}</span></td>
+        <td>${fmtInt(t.shares)}</td><td>${fmt(t.sell_price)}</td><td>${fmtInt(t.sell_amount)}</td>
+        <td class="${clr(t.realized_net)}"><b>${sgn(t.realized_net)}${fmtInt(t.realized_net)}</b></td></tr>`).join('');
+      rb.innerHTML=`<div class="subh2">交易流水 · 已实现盈亏（落袋净：卖额−成本−买入费−卖出费）　累计 <b class="${clr(s.realized_total)}">${sgn(s.realized_total)}${fmtInt(s.realized_total)} 元</b></div>
+        <div class="tablecard"><table class="realtab"><thead><tr><th>卖出日</th><th style="text-align:left">名称</th><th>股数</th><th>卖价</th><th>卖出额</th><th>已实现净</th></tr></thead><tbody>${tr}</tbody></table></div>`;
+    }else rb.innerHTML='';
+  }
 }
 async function addHolding(){
   const code=document.getElementById('h_code').value.trim();
@@ -912,8 +933,23 @@ function addLot(code, name, price){
   const sh = document.getElementById('h_shares'); if(sh) sh.focus();
 }
 async function delHolding(code,name){
-  if(!confirm(`确认从持仓移除 ${name}（${code}）？（只删记录，不影响你的真实账户）`))return;
+  if(!confirm(`确认从持仓移除 ${name}（${code}）？（只删记录、不动现金、不记已实现盈亏——用于「记错了」。真卖出请用「减仓」）`))return;
   await fetch('/api/portfolio/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code})});
+  loadPortfolio();
+}
+/* 持仓行「减仓」：FIFO 卖出部分/全部 → 现金加回净收入、记一条已实现盈亏(落袋净)。卖满=清仓变现。 */
+async function sellLot(code,name,price,held){
+  const sh=prompt(`卖出 ${name}（${code}）多少股？最多 ${fmtInt(held)}（填满=清仓变现）`, held);
+  if(sh===null) return;
+  const n=parseFloat(sh);
+  if(!(n>0)||n>held){alert('股数无效（需 >0 且不超过持有）');return;}
+  const p=prompt(`卖出价（每股，元）？现价 ${price}`, price||'');
+  if(p===null) return;
+  const pr=parseFloat(p);
+  if(!(pr>0)){alert('卖价无效');return;}
+  const j=await (await fetch('/api/portfolio/reduce',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({code,shares:n,sell_price:pr})})).json();
+  if(!j.ok){alert(j.msg||'减仓失败');return;}
   loadPortfolio();
 }
 function folioAdvice(code){   // 「🤖 何时卖」按钮：展开/收起切换

@@ -118,8 +118,11 @@
   .mini.ai{color:var(--gold);border-color:var(--gold-dim)}
   .mini.danger:hover{color:var(--up);border-color:var(--up)}
   .mini.buy{color:var(--up)} .mini.buy:hover{border-color:var(--up)}
+  .mini.sell{color:var(--muted)} .mini.sell:hover{color:var(--gold);border-color:var(--gold-dim)}
   .folioForm.flash{border-radius:8px;animation:flashbg 1.2s ease}
   @keyframes flashbg{0%{background:var(--gold-dim)}100%{background:transparent}}
+  .subh2{font-size:13px;font-weight:600;margin:18px 0 8px}
+  .realtab .nm2{text-align:left} .realtab .nm2 .c{color:var(--muted);font-size:11px}
   .advrow{display:none} .advrow.open{display:table-row}
   .advrow td{background:var(--bg2);padding:0 12px}
   /* 逐笔明细（外层合并、点 ▸ 展开） */
@@ -498,7 +501,8 @@
       <th data-tip="当日盈亏=股数×(现价-昨收)">当日 ⓘ</th><th>买入日</th><th></th>
     </tr></thead><tbody id="folioRows"></tbody></table>
   </div>
-  <div class="legend"><span class="muted">「持仓」只是本地记录，方便算盈亏和让 AI 结合你的成本给卖出/止损建议；不连券商、不影响真实账户。</span></div>
+  <div id="realizedBox"></div>
+  <div class="legend"><span class="muted">「持仓」只是本地记录，方便算盈亏和让 AI 结合你的成本给卖出/止损建议；不连券商、不影响真实账户。「减仓」按 FIFO 卖出、记已实现盈亏并加回现金；「清仓」只删记录不动现金（用于记错）。</span></div>
 </div>
 
 <!-- 深挖抽屉 -->

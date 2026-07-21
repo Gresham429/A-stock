@@ -102,9 +102,24 @@ def _read_raw() -> dict[str, list]:
     return {pid: [_migrate_holding(h) for h in hs] for pid, hs in by.items()}
 
 
-def _write_all(by_pid: dict[str, list]) -> None:
+def _read_realized() -> dict[str, list]:
+    """整份 {pid: [已实现交易]} 卖出盈亏流水；无则空。与 by_profile 同文件、互不干扰。"""
+    if not PORTFOLIO_PATH.exists():
+        return {}
+    try:
+        data = json.loads(PORTFOLIO_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return data.get("realized", {}) if isinstance(data, dict) else {}
+
+
+def _write_all(by_pid: dict[str, list], realized: dict[str, list] | None = None) -> None:
+    """写 {by_profile, realized}。realized 省略 → 保留磁盘上已有的（add/remove 不清空流水）。"""
+    if realized is None:
+        realized = _read_realized()
     PORTFOLIO_PATH.write_text(
-        json.dumps({"by_profile": by_pid}, ensure_ascii=False, indent=2), encoding="utf-8")
+        json.dumps({"by_profile": by_pid, "realized": realized}, ensure_ascii=False, indent=2),
+        encoding="utf-8")
 
 
 def _derive(h: dict[str, Any]) -> dict[str, Any]:
@@ -162,6 +177,76 @@ def remove(code: str, sell_price: float | None = None) -> list[dict[str, Any]]:
         amount = shares * float(sell_price)
         _adjust_cash(+amount - fees.total("sell", amount, profile_store.fee_schedule()))
     return load()
+
+
+def reduce(code: str, shares: float, sell_price: float, name: str = "",
+           sell_date: str = "") -> list[dict[str, Any]]:
+    """减仓/卖出（**FIFO 先进先出**）：卖出 `shares` 股 @ `sell_price`。
+
+    · 现金 += 卖出额 − 卖出费（走 fees：含最低佣金 + 印花 + 过户）。
+    · FIFO 扣 lot：先消**最早买入**的那几笔；卖满该只即清仓。
+    · 记一条**已实现盈亏**到流水（落袋净口径，与持仓面板 pnl_net 一致）：
+      已实现净 =（卖额 − FIFO 成本）− 分摊的已付买入费 − 卖出费。
+    超卖 / 无持仓 / 非正数 → raise ValueError（调用方转 400）。
+    """
+    shares = float(shares)
+    sell_price = float(sell_price)
+    if shares <= 0 or sell_price <= 0:
+        raise ValueError("卖出股数与卖价需大于 0")
+    allp = _read_raw()
+    hs = allp.get(_pid(), [])
+    h = next((x for x in hs if x.get("code") == code), None)
+    if not h:
+        raise ValueError(f"未持有 {code}")
+    lots = h.get("lots") or []
+    held = sum(float(l.get("shares") or 0) for l in lots)
+    if shares > held + 1e-9:
+        raise ValueError(f"卖出 {shares:g} 股超过持有 {held:g} 股")
+    sched = profile_store.fee_schedule()
+    # FIFO：按 (买入日, 原顺序) 升序消费——先卖最早买入的
+    order = sorted(range(len(lots)), key=lambda i: (lots[i].get("date") or "", i))
+    remaining, consumed_cost, alloc_buy_fee = shares, 0.0, 0.0
+    for i in order:
+        if remaining <= 1e-9:
+            break
+        lot = lots[i]
+        ls, lc = float(lot.get("shares") or 0), float(lot.get("cost") or 0)
+        take = min(remaining, ls)
+        if take <= 0:
+            continue
+        consumed_cost += take * lc
+        lot_buy_fee = fees.total("buy", round(ls * lc, 2), sched)  # 本笔独立最低佣金
+        alloc_buy_fee += (take / ls) * lot_buy_fee if ls else 0.0  # 按卖出比例分摊已付买入费
+        lot["shares"] = ls - take
+        remaining -= take
+    h["lots"] = [l for l in lots if float(l.get("shares") or 0) > 1e-9]
+    sell_amount = shares * sell_price
+    sell_fee = fees.total("sell", round(sell_amount, 2), sched)
+    realized_gross = sell_amount - consumed_cost
+    realized_net = realized_gross - alloc_buy_fee - sell_fee
+    allp[_pid()] = ([x for x in hs if x.get("code") != code] if not h["lots"] else hs)
+    _adjust_cash(sell_amount - sell_fee)          # 卖出加回可用现金
+    ledger = _read_realized()
+    ledger.setdefault(_pid(), []).append({
+        "date": sell_date or _today(), "code": code, "name": name,
+        "shares": shares, "sell_price": sell_price,
+        "cost_basis": round(consumed_cost, 2), "sell_amount": round(sell_amount, 2),
+        "sell_fee": round(sell_fee, 2), "buy_fee_alloc": round(alloc_buy_fee, 2),
+        "realized_gross": round(realized_gross, 2), "realized_net": round(realized_net, 2),
+    })
+    _write_all(allp, ledger)
+    return load()
+
+
+def realized(pid: int | None = None) -> list[dict[str, Any]]:
+    """当前(或指定)画像的已实现盈亏流水（按记录顺序：早→晚）。"""
+    key = str(pid) if pid is not None else _pid()
+    return list(_read_realized().get(key, []))
+
+
+def realized_total(pid: int | None = None) -> float:
+    """累计已实现盈亏（Σ realized_net，落袋净口径）。"""
+    return round(sum(float(t.get("realized_net") or 0) for t in realized(pid)), 2)
 
 
 def codes() -> list[str]:

@@ -834,9 +834,12 @@ async function loadPortfolio(){
   const s=j.summary||{}, hs=j.holdings||[];
   const ag=document.getElementById('assetGrid');
   const card=(lab,big,cls,sub)=>`<div class="assetCard${cls?' hl':''}"><div class="lab">${lab}</div><div class="big ${cls}">${big}</div><div class="sub ${cls}">${sub}</div></div>`;
-  // 现金/已实现/总资产始终显示（哪怕空仓）——这是「考虑总现金」要看的
+  // 现金/收益/总资产始终显示（哪怕空仓）——这是「考虑总现金」要看的
+  const totRet=(s.realized_total||0)+(s.pnl_broker||0);   // 总收益 = 已实现(落袋净) + 未实现(持仓盈亏)
   let cards=
       card('总资产', fmtInt(s.total_assets)+'元','','可用现金 + 持仓市值')
+     +card('总收益', (totRet>=0?'+':'')+fmtInt(totRet)+'元', clr(totRet),
+           '已实现 '+sgn(s.realized_total)+fmtInt(s.realized_total)+' · 未实现 '+sgn(s.pnl_broker)+fmtInt(s.pnl_broker))
      +card('可用现金', fmtInt(s.cash)+'元','','买扣卖加')
      +card('累计已实现', (s.realized_total>=0?'+':'')+fmtInt(s.realized_total)+'元', clr(s.realized_total), '卖出落袋净·历史累计');
   if(s.count){

@@ -40,7 +40,7 @@ app.py 用显式 import 带回名字，路由调用点与 `app._X` 可达性不�
 |------|------|
 | `fees.py` | **交易成本单一事实源**：`FeeSchedule`(佣金[可议价可免最低]+印花千0.5[仅卖出]+过户万0.1) + `round_trip`/`breakeven_pct` + `for_ai()`。**费率存画像，不硬编码** |
 | `profile_store.py` | 多档投资画像(`data/profiles.db`)：现金+风险偏好+**费率表**；5 档 TIERS 按总资产落档 + `RISK_GUIDE` + `block_for_ai` |
-| `portfolio.py` | 持仓(按画像隔离 + 多笔 lot 模型)。**现金=可用现金**(买扣卖加) + `cash_reconcile` + 逐笔 `lots_view`(每笔买入费/市值/盈亏，展开用) |
+| `portfolio.py` | 持仓(按画像隔离 + 多笔 lot 模型)。**现金=可用现金**(买扣卖加) + `cash_reconcile` + 逐笔 `lots_view` + **`reduce`(减仓/卖出·FIFO 先进先出→现金加回+记已实现盈亏)** + **`realized`/`realized_total`(已实现盈亏流水·落袋净)** |
 | `paper_store.py` | 模拟撮合(`data/paper.db`)：整手/涨跌停/T+1/**费率可传入**(agent 多账户各用各的) |
 
 ### AI 与进化
@@ -115,6 +115,9 @@ app.py 用显式 import 带回名字，路由调用点与 `app._X` 可达性不�
   别再把卖出费加回主盈亏（那样比券商更悲观、用户困惑）。
 - **AI 决策层 = 保本涨幅走往返**（买+卖都算，`fees.breakeven_pct`）。因为买进这一笔**早晚要卖**，
   决策时不算卖出费会推荐赚不回手续费的价差。**两套口径服务不同目的，不要统一。**
+- **已实现盈亏（卖出后）= 落袋净**（`portfolio.reduce` 记流水，2026-07-21 加）：`(卖额 − FIFO 成本)
+  − 分摊的已付买入费 − 卖出费`。与「持仓盈亏（未实现）」并列显示，累计 `realized_total` 进资产总览。
+  **减仓 FIFO 先进先出**；「清仓」按钮只删记录不动现金（记错用），**真卖出走「减仓」**。
 
 **异步渲染必须带请求令牌**：多个慢请求写同一 DOM 目标时，用单调计数器
 （`recSeq`/`detailSeq`/`mktSeq`/`secSeq`/`agSeq`）——发起即 `++`，`await` 回来后

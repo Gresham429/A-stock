@@ -25,14 +25,14 @@
 后者是系统核心，后续量化都基于它。
 
 **两个前端路由**（本会话新增分栏）：`/` = **选股自动化**（原看板）· `/review` = **复盘自动化模块**
-（A股短线情绪复盘，**建设中**：情绪硬指标 + DeepSeek 研判 + 可发布文稿）。二者共用底座数据/DeepSeek、
-独立页面、顶部切换、不共用主页。
+（A股短线情绪复盘：情绪硬指标 + DeepSeek 研判 + 可发布文稿，收盘后自动生成）。二者共用底座数据/DeepSeek、
+独立页面、顶部切换、不共用主页。`review/` 包 = fetch/metrics/store/llm_review/pipeline/run_daily。
 
 ## 2. 架构分层
 
 ```mermaid
 flowchart TB
-  UI["前端 · 零构建<br/>/ 选股: index.html + app.js<br/>/review 复盘: review.html + review.js (建设中)"]
+  UI["前端 · 零构建<br/>/ 选股: index.html + app.js<br/>/review 复盘: review.html + review.js"]
   subgraph BE["后端 · Flask (app.py, 65 路由)"]
     APP[app.py 路由]
     SCR[screening.py 选股/形态打分]
@@ -74,7 +74,7 @@ flowchart TB
 
 | 层              | 文件                                                                                                                     | 职责                                       |
 | -------------- | ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
-| **入口**         | `app.py` · `templates/index.html` · `static/app.js`                                                                    | Flask 65 路由 · 选股 UI + 复盘 UI(/review, 建设中)            |
+| **入口**         | `app.py` · `templates/index.html` · `static/app.js`                                                                    | Flask 65 路由 · 选股 UI + 复盘 UI(/review)            |
 | **共享辅助**       | `screening.py` · `ai_blocks.py`                                                                                        | 选股/形态打分（cohort 方向）· 5 AI + agent 的注入块    |
 | **① 数据**       | `datasources.py` · `universe_store.py` · `universe.py` · `news_store.py` · `notes_store.py` · `store.py` · `config.py` | 行情/K线/财报/新闻 + 全市场池+板块 + 自选/配置            |
 | **② 资金交易**     | `fees.py` · `profile_store.py` · `portfolio.py` · `paper_store.py`                                                     | 费率单一源 · 多档画像 · 真实持仓(lot) · 模拟撮合          |

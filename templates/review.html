@@ -103,9 +103,9 @@
     <div class="brand"><h1><span class="dot"></span>复盘台</h1><div class="sub">Daily Review · 短线情绪复盘</div></div>
     <div class="tools">
       <span class="chip">🤖 DeepSeek v4-pro</span>
-      <span class="chip build">🚧 建设中 · 数据待接入</span>
+      <span class="chip build" id="statusChip">🚧 尚无数据</span>
       <span class="stamp" id="stamp">—</span>
-      <button class="btn" disabled title="数据接入后可用">↻ 生成今日复盘</button>
+      <button class="btn" id="genBtn" title="拉取最近已收盘日并跑复盘（约 1~2 分钟）">↻ 生成今日复盘</button>
     </div>
   </header>
 
@@ -118,9 +118,9 @@
   <section class="phasebar">
     <div class="ph-h">
       <span class="ph-t">🌡 市场情绪档位</span>
-      <span class="ph-note">收盘后自动定位当前处在情绪周期的哪一档、第几天 · <b class="muted">待数据接入</b></span>
+      <span class="ph-note" id="phNote">收盘后自动定位当前处在情绪周期的哪一档、第几天 · <b class="muted">待数据接入</b></span>
     </div>
-    <div class="phase-steps">
+    <div class="phase-steps" id="phaseSteps">
       <div class="ps"><b>冰点</b>退无可退</div>
       <div class="ps"><b>修复</b>缩量试探</div>
       <div class="ps"><b>发酵</b>赚钱效应扩散</div>
@@ -131,7 +131,7 @@
 
   <!-- 情绪硬指标（纯计算、数据源直出、不经过 AI —— 复盘看板的九成） -->
   <div class="sectitle">情绪硬指标 <span class="tag2">硬指标 · 纯计算</span></div>
-  <div class="mgrid">
+  <div class="mgrid" id="mgrid">
     <div class="mcard"><div class="mc-h"><span class="mc-name">赚钱效应</span><span class="wip">待接入</span></div>
       <div class="mc-val">—</div><div class="mc-desc">昨日涨停股今日<b>中位数</b>表现 / 翻红率 / 再涨停率</div></div>
     <div class="mcard"><div class="mc-h"><span class="mc-name">晋级率</span><span class="wip">待接入</span></div>
@@ -153,30 +153,30 @@
   <!-- AI 明日关注点 -->
   <div class="sectitle">AI · 明日关注点 <span class="tag2 blue">AI · DEEPSEEK</span></div>
   <div class="bigcard ai">
-    <div class="ai-row">
+    <div class="ai-row" id="aiSlots">
       <div class="ai-slot"><div class="s-lbl">情绪档位</div><div class="s-body">五档定位 + 依据的几个读数</div></div>
       <div class="ai-slot"><div class="s-lbl">关注方向 ×2–5</div><div class="s-body">方向 + 逻辑 + 风险（只到板块层面）</div></div>
       <div class="ai-slot"><div class="s-lbl">风险提示</div><div class="s-body">需警惕的信号</div></div>
       <div class="ai-slot"><div class="s-lbl">明日验证条件</div><div class="s-body">带今日基准值与阈值，次日自动对账</div></div>
     </div>
-    <div class="cardfoot"><span class="small muted">五个短线分析师（情绪 / 资金 / 题材 / 龙虎榜 / 龙头）→ 复盘裁判收敛</span><span class="wip">DeepSeek 接入后生成</span></div>
+    <div class="cardfoot"><span class="small muted">复盘裁判读全部硬指标收敛（DeepSeek v4-pro，温度 0.15）· 多分析师 fan-out 为二期增强</span></div>
   </div>
 
   <!-- 复盘文稿 -->
   <div class="sectitle">复盘文稿 <span class="tag2 grn">可发布</span></div>
   <div class="bigcard">
-    <div class="art">
+    <div class="art" id="artBody">
       <div class="ln w1"></div><div class="ln w2"></div><div class="ln w3"></div><div class="ln w4"></div>
     </div>
     <div class="cardfoot">
-      <span class="small muted">收盘后自动整理成一篇可直接发布的复盘</span>
-      <button class="btn" disabled>复制 / 导出</button>
+      <span class="small muted" id="artNote">收盘后自动整理成一篇可直接发布的复盘</span>
+      <button class="btn" id="copyBtn" disabled>复制全文</button>
     </div>
   </div>
 
   <div class="disc">
     <b>说明：</b>复盘为对公开盘面数据的客观整理、统计与<b>市场层面</b>研判 —— 不推荐个股、不预测涨跌、不给买卖时机；个股仅作客观陈述。所有 AI 产出<b>仅供参考，不构成投资建议</b>。<br>
-    <span class="muted">本页为「复盘自动化」模块的建设中骨架：布局与指标口径已定，情绪硬指标、AI 研判与文稿的数据接入进行中。</span>
+    <span class="muted">情绪硬指标（纯计算）+ AI 研判 + 文稿，每交易日收盘后自动生成；此处展示最近一场，可点右上「生成今日复盘」重跑。</span>
   </div>
 </div>
 <script src="/static/review.js"></script>

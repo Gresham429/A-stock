@@ -122,15 +122,29 @@ def _leader_text(m: dict, leaders: list) -> str:
     return "\n".join(lines)
 
 
+def _capital_text(sector_flow: list) -> str:
+    if not sector_flow:
+        return "板块资金流无数据。"
+    lines = ["板块主力净流入前列（亿元，实时快照 / 收盘后即当日定盘）："]
+    for s in sector_flow[:12]:
+        lines.append(f"· {s['name']} 主力净流入 {s['main_net_yi']}亿 · 涨跌 "
+                     f"{s['change_pct']}% · 5日 {s['net5_yi']}亿 · 领涨 {s['leader']}")
+    return "\n".join(lines)
+
+
 def run_analysts(metrics: dict, counts: dict, date: str,
-                 lhb: Optional[list] = None, leaders: Optional[list] = None) -> list[dict]:
+                 lhb: Optional[list] = None, leaders: Optional[list] = None,
+                 sector_flow: Optional[list] = None) -> list[dict]:
     """多角色分析师 fan-out（flash 模型，各读一面出研判）→ 喂给裁判收敛。
-    4 角色：情绪面 / 题材热点 / 龙虎榜游资 / 龙头梯队（资金面=板块资金流缺源，二期补）。
+    vibe 5 角色顺序：情绪面 / 资金面 / 题材热点 / 龙虎榜游资 / 龙头梯队。
+    资金面仅在有 sector_flow（仅最新场次，避免历史重跑取到实时值）时纳入。
     未配 key 返回 []；单个失败降级为 stub 不拖垮整体。"""
     if not config.llm_enabled():
         return []
-    facets = [
-        ("sentiment", "情绪面", _metrics_text(metrics, counts, date)),
+    facets = [("sentiment", "情绪面", _metrics_text(metrics, counts, date))]
+    if sector_flow:
+        facets.append(("capital", "资金面", _capital_text(sector_flow)))
+    facets += [
         ("theme", "题材热点", _theme_text(metrics)),
         ("dragon", "龙虎榜游资", _dragon_text(lhb or [])),
         ("leader", "龙头梯队", _leader_text(metrics, leaders or [])),

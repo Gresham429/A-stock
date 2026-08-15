@@ -83,7 +83,10 @@ def run_review(date: Optional[str] = None, force: bool = False,
     if with_ai:
         leaders = [{"name": s["name"], "boards": s["limit_days"]}
                    for s in sorted(zt, key=lambda x: x["limit_days"], reverse=True)[:8]]
-        analysts = llm_review.run_analysts(m, counts, target, lhb=lhb, leaders=leaders)
+        # 板块资金流是实时快照（无历史）——仅在跑最新场次(date=None)时用，避免历史重跑取到实时值
+        sector = fetch.sector_flow("concept", 15) if date is None else None
+        analysts = llm_review.run_analysts(m, counts, target, lhb=lhb,
+                                           leaders=leaders, sector_flow=sector)
         focus = llm_review.judge(m, counts, target, analyst_reports=analysts)
         art = llm_review.article(m, counts, target, focus)
         if focus or art or analysts:

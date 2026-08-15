@@ -81,14 +81,90 @@ def _metrics_text(m: dict, counts: dict, date: str) -> str:
     return "\n".join(lines)
 
 
-def judge(metrics: dict, counts: dict, date: str) -> Optional[dict]:
-    """复盘裁判：读全部硬指标 → 结构化『明日关注点』。失败/未配 key 返回 None。"""
+_FLASH = getattr(llm, "FLASH_MODEL", "deepseek-v4-flash")
+
+
+def _theme_text(m: dict) -> str:
+    tt = m.get("theme_tree", {})
+    top = tt.get("top") or []
+    if not top:
+        return "今日无题材串数据。"
+    s = "题材热点（按涨停家数）：" + "、".join(f"{d['theme']}({d['count']})" for d in top[:10])
+    cont = tt.get("continuation")
+    if cont:
+        hot = sorted(cont.items(), key=lambda kv: -kv[1])[:5]
+        s += "\n昨日题材今延续率：" + "、".join(f"{k} {v}%" for k, v in hot)
+    return s
+
+
+def _dragon_text(lhb: list) -> str:
+    if not lhb:
+        return "今日全市场龙虎榜无数据。"
+    top = sorted(lhb, key=lambda x: -(x.get("net_buy_wan") or 0))[:12]
+    lines = ["全市场龙虎榜净买额前列（万元）："]
+    for r in top:
+        lines.append(f"· {r.get('name')} 净买 {r.get('net_buy_wan')} 万 · 涨跌 "
+                     f"{r.get('change_pct')}% · {str(r.get('reason', ''))[:22]}")
+    return "\n".join(lines)
+
+
+def _leader_text(m: dict, leaders: list) -> str:
+    ld, cp, sq = m.get("ladder", {}), m.get("consec_premium", {}), m.get("seal_quality", {})
+    lines = [
+        f"连板梯队：{ld.get('tiers')} · 最高 {ld.get('highest')} 板"
+        + (f" · ⚠断层缺 {ld.get('gaps')} 板" if ld.get("gaps") else " · 连续"),
+        f"连板溢价：中位 {cp.get('median')}% · 翻红率 {cp.get('red_rate')}%（{cp.get('n')} 只）",
+        f"封板质量：从未开板率 {sq.get('never_broken_rate')}% · 早盘封 {sq.get('opening')}"
+        f" · 均炸板 {sq.get('avg_broken_times')} 次",
+    ]
+    if leaders:
+        lines.append("高标个股（连板）：" + "、".join(f"{x['name']}({x['boards']}板)" for x in leaders[:8]))
+    return "\n".join(lines)
+
+
+def run_analysts(metrics: dict, counts: dict, date: str,
+                 lhb: Optional[list] = None, leaders: Optional[list] = None) -> list[dict]:
+    """多角色分析师 fan-out（flash 模型，各读一面出研判）→ 喂给裁判收敛。
+    4 角色：情绪面 / 题材热点 / 龙虎榜游资 / 龙头梯队（资金面=板块资金流缺源，二期补）。
+    未配 key 返回 []；单个失败降级为 stub 不拖垮整体。"""
+    if not config.llm_enabled():
+        return []
+    facets = [
+        ("sentiment", "情绪面", _metrics_text(metrics, counts, date)),
+        ("theme", "题材热点", _theme_text(metrics)),
+        ("dragon", "龙虎榜游资", _dragon_text(lhb or [])),
+        ("leader", "龙头梯队", _leader_text(metrics, leaders or [])),
+    ]
+    out = []
+    for key, title, data in facets:
+        prompt = (f"{_BOUNDARY}\n\n你是短线复盘的『{title}』分析师，只从『{title}』角度、"
+                  f"据以下数据客观研判（≤220 字，有观点有依据，点明对明日情绪的含义），"
+                  f"不荐个股、不给买卖点：\n\n{data}")
+        try:
+            rep = llm._chat([{"role": "user", "content": prompt}], json_mode=False,
+                            temperature=0.15, max_tokens=2500, model=_FLASH).strip()
+        except llm.LLMError as e:
+            logger.warning("分析师 %s 失败，降级 stub: %s", key, e)
+            rep = f"[⚠️ {title}分析失败：{e}]"
+        out.append({"key": key, "title": title, "report": rep})
+    return out
+
+
+def judge(metrics: dict, counts: dict, date: str,
+          analyst_reports: Optional[list] = None) -> Optional[dict]:
+    """复盘裁判：收敛分析师分面研判（或直读硬指标）→ 结构化『明日关注点』。失败/未配 key 返回 None。"""
     if not config.llm_enabled():
         logger.info("未配 DeepSeek key，跳过 AI 研判")
         return None
+    if analyst_reports:
+        reports = "\n\n".join(f"【{a['title']}】{a['report']}" for a in analyst_reports)
+        basis = ("以下是短线分析师团队对今日盘面的分面研判（据此收敛，附读数供复核）：\n\n"
+                 + reports + "\n\n【关键读数复核】\n" + _metrics_text(metrics, counts, date))
+    else:
+        basis = ("以下是某交易日 A 股短线打板情绪的硬指标（纯计算、数据源直出）：\n\n"
+                 + _metrics_text(metrics, counts, date))
     prompt = (
-        f"{_BOUNDARY}\n\n以下是某交易日 A 股短线打板情绪的硬指标（纯计算、数据源直出）：\n\n"
-        f"{_metrics_text(metrics, counts, date)}\n\n"
+        f"{_BOUNDARY}\n\n{basis}\n\n"
         "请据此收敛成一份『明日关注点』，只输出 JSON，字段：\n"
         f'- emotion_phase: 从 {list(_PHASES)} 选一个情绪档位\n'
         "- market_oneliner: 一句话概括当前盘面（≤40字）\n"

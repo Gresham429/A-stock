@@ -33,7 +33,22 @@
     renderPhase(m, focus);
     renderMetrics(m);
     renderAI(focus);
+    renderAnalysts(ai.analysts);
     renderArticle(ai.article);
+  }
+
+  function renderAnalysts(analysts) {
+    const el = $("analystRow");
+    if (!el) return;
+    if (!analysts || !analysts.length) {
+      el.innerHTML = `<div class="mcard"><div class="mc-desc">本场未生成分析师研判（未配 DeepSeek key 或调用失败）。</div></div>`;
+      return;
+    }
+    el.innerHTML = analysts.map((a) =>
+      `<div class="mcard" style="border-left-color:var(--gold)">` +
+      `<div class="mc-h"><span class="mc-name">${esc(a.title)}</span></div>` +
+      `<div class="mc-desc" style="color:var(--txt);line-height:1.65;margin-top:8px">${esc(a.report)}</div></div>`
+    ).join("");
   }
 
   // 情绪档位条：高亮 AI 选中的档位 + 周期第几天 + 一句话

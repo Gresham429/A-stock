@@ -78,13 +78,16 @@ def run_review(date: Optional[str] = None, force: bool = False,
     counts = {"zt": len(zt), "zb": len(zb), "dt": len(dt),
               "yzt": len(yzt), "theme": len(theme), "lhb": len(lhb)}
 
-    # ── AI（可降级）──
+    # ── AI（可降级）：4 角色分析师 → 裁判收敛 → 文稿 ──
     ai = None
     if with_ai:
-        focus = llm_review.judge(m, counts, target)
+        leaders = [{"name": s["name"], "boards": s["limit_days"]}
+                   for s in sorted(zt, key=lambda x: x["limit_days"], reverse=True)[:8]]
+        analysts = llm_review.run_analysts(m, counts, target, lhb=lhb, leaders=leaders)
+        focus = llm_review.judge(m, counts, target, analyst_reports=analysts)
         art = llm_review.article(m, counts, target, focus)
-        if focus or art:
-            ai = {"focus": focus, "article": art}
+        if focus or art or analysts:
+            ai = {"focus": focus, "article": art, "analysts": analysts}
 
     envelope = {
         "schema_version": SCHEMA_VERSION,

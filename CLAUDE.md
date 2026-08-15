@@ -8,7 +8,7 @@
 一个**本地运行**的 A 股看板：多股对比 + 点击深挖（含多周期行情图：分时+K线蜡烛(可选 MA5/10/20/60/120/240)）+ 顶部大盘研判条 + 全市场两级选股 + 持仓盈亏 + DeepSeek AI 推荐/建议（结果落盘缓存带时间戳）+ 近1年新闻/政策库 + 私域笔记 + 交易规则库（价格行为体系 + A股制度特性，可增删改、注入 AI）+ **投资画像本金分级玩法** + **公司叙事(做过/在做/要做)** + **AI 溯源与依据校验** + **全球宏观→板块指向** + 模拟盘 + 名词解释。
 纯本地 Flask 后端代理各数据源，前端零构建（HTML+CSS+原生 JS）。**为什么不是托管网页**：深挖/加股票/调 AI/联网搜索都要实时外部请求，而托管型 Artifact 的 CSP 禁止一切外部请求，做不到。
 
-## 复盘自动化模块（`/review`，建设中）
+## 复盘自动化模块（`/review`）
 
 本会话(2026-08-15)新增的**第二个前端路由**，与选股看板 `/` 分栏、独立页面、顶部切换、**不共用主页**。
 定位：**A股短线情绪「每日复盘」**——收盘后自动出一份盘面复盘，加速每日盘面研判。
@@ -33,7 +33,7 @@ python app.py                        # http://127.0.0.1:5000
 
 ## 文件地图
 
-**入口**：`app.py`(Flask 路由，65 个) · `templates/index.html`(选股 UI+CSS，路由 `/`) · `static/app.js`(选股前端逻辑) · **`templates/review.html`+`static/review.js`(复盘自动化模块，路由 `/review`，建设中)**
+**入口**：`app.py`(Flask 路由，65 个) · `templates/index.html`(选股 UI+CSS，路由 `/`) · `static/app.js`(选股前端逻辑) · **`templates/review.html`+`static/review.js`+`review/`(复盘自动化模块，路由 `/review`)**
 **app.py 的共享辅助已抽出**(2026-07-16，消除 agent_loop 的 `import app` 循环依赖)：
 `screening.py`(选股/形态初筛：`_screen_rows`/`_pa_score`/`_safe_kline`/`_safe_metrics`…) ·
 `ai_blocks.py`(AI 注入块：`_tier_block`/`_fee_block`/`_lesson_block`/`_agent_blocks`/**`_stock_house_view`**…)。

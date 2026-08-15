@@ -1,6 +1,6 @@
 # 观察台 · A-Share Watchdesk
 
-一个**本地运行**的 A 股看板：多股对比 + 点击深挖（研报/龙虎榜/解禁/资金流/**多周期行情图：分时+K线蜡烛，可选 MA5/10/20/60/120/240**）+ 随时增删自选股 + **持仓盈亏跟踪** + **顶部大盘研判条** + **全市场两级选股** + **DeepSeek AI 每日推荐与买卖时机建议**（结果落盘缓存、带时间戳）+ **近1年新闻/政策库** + **私域笔记** + **交易规则库（价格行为体系，可增删改，注入 AI）** + **每个名词的新手解释**。
+一个**本地运行**的 A 股看板：多股对比 + 点击深挖（研报/龙虎榜/解禁/资金流/**多周期行情图：分时+K线蜡烛，可选 MA5/10/20/60/120/240**）+ 随时增删自选股 + **持仓盈亏跟踪** + **顶部大盘研判条** + **全市场两级选股** + **DeepSeek AI 每日推荐与买卖时机建议**（结果落盘缓存、带时间戳）+ **近1年新闻/政策库** + **私域笔记** + **交易规则库（价格行为体系，可增删改，注入 AI）** + **每个名词的新手解释**。**另含复盘自动化模块（`/review`）**：A 股短线情绪**每日复盘**——情绪硬指标（纯计算）+ **5 角色分析师 → 复盘裁判**（DeepSeek）+ 可发布文稿，收盘后自动生成。
 
 > 为什么是本地应用而非托管网页？深挖、加股票、调 AI 都需要**实时外部请求**，而托管型 Artifact 有严格 CSP 禁止一切外部请求。本地 Flask 后端代理即可。
 
@@ -27,6 +27,54 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com
 
 - **`/` 选股自动化**（原看板）：多股对比 / 深挖 / 全市场选股 / 持仓盈亏 / AI 推荐与买卖建议。
 - **`/review` 复盘自动化**（新模块）：A 股短线情绪复盘——涨停/连板/炸板/情绪周期/题材热点等**情绪硬指标**（纯计算）+ **DeepSeek 研判**（明日关注点）+ **可发布复盘文稿**，每交易日收盘后自动生成（批处理入口 `python -m review.run_daily`）。顶部可在两页间切换。
+
+### 复盘模块 · 每日运行
+
+- **看**：浏览器开 `/review`，点右上「↻ 生成今日复盘」手动生成，或由定时任务自动出。
+- **命令行 / 定时器批处理**：
+  ```bash
+  python -m review.run_daily            # 复盘最近已收盘交易日（约 1~2 分钟）
+  python -m review.run_daily 20260814   # 指定日期
+  python -m review.run_daily --force    # 已生成也重跑
+  python -m review.run_daily --no-ai    # 只算硬指标、不调 DeepSeek
+  python -m review.backfill 3           # 情绪周期回填近 3 个月（首次跑一次即可）
+  ```
+- 结果落 `data/review/<date>.json`（已 gitignore），`/review` 自动读最新一份。
+
+## 部署到服务器
+
+本地跑法见上；要 7×24 挂服务器、每交易日自动出复盘，按下面配。
+
+**1. 装依赖 + 配 key + 起服务**
+```bash
+pip install -r requirements.txt          # 只依赖 flask
+echo 'DEEPSEEK_API_KEY=sk-xxxx' >> .env   # DeepSeek key（AI 研判/文稿必需；不配则只出硬指标）
+python app.py                             # 绑 127.0.0.1:5000
+```
+
+**2. 时区（务必）**：服务器设 `Asia/Shanghai`，否则交易日/收盘判定全错。
+```bash
+sudo timedatectl set-timezone Asia/Shanghai
+```
+
+**3. 反向代理 + 访问控制**：app 只绑 `127.0.0.1`，别直接对公网开。前置 nginx（TLS）+ Basic Auth 或 IP 白名单（内部团队用）。
+
+**4. 每日复盘定时任务**：交易日**收盘后**（建议晚上、等龙虎榜定稿）自动跑一次。cron 示例（工作日 19:30，非交易日脚本会自动跳过）：
+```bash
+30 19 * * 1-5  cd /path/to/A-stock && /usr/bin/python3 -m review.run_daily >> ~/review.log 2>&1
+```
+> 更稳可用 systemd timer（带失败重试/告警）。退出码：`0`=成功/已存在，`3`=体检闸失败（核心数据缺）。
+
+**5. 情绪周期首次回填**（一次性）：`python -m review.backfill 3`。
+
+### ⚠️ 部署前必测：数据源对服务器 IP 的可用性
+
+打板数据主要走**东财**，东财对**机房/住宅 IP 有风控**（`RemoteDisconnected` / 空返回），**换 IP 表现会变**。上线前用真实服务器 IP 先实测一次：
+```bash
+python -m review.run_daily     # 看 status=done、涨停/龙虎榜/板块资金流能否取到
+```
+- **打板四池 / 龙虎榜取不到** → 复盘核心数据缺（体检闸会拒绝生成）；换网络或配代理。
+- **板块资金流取不到** → 资金面分析师自动降级（5 角色 → 4），不影响主流程。
 
 ## 功能
 
@@ -79,7 +127,8 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com
 | 波动率/资金流 | 新浪 MoneyFlow | 含每日收盘价，一份数据两用 |
 | 研报/龙虎榜/解禁 | 东财 reportapi + datacenter | 走 `em_get` 串行限流 |
 | 新闻/政策库 | 财联社 + 东财 7×24 + 个股新闻 + 研报 | 落 SQLite，滚动近 1 年 |
-| AI 分析 | DeepSeek `deepseek-v4-pro`（推理，温度 0.15）/ `v4-flash`（笔记结构化） | OpenAI 兼容 HTTP，密钥来自 `.env` |
+| AI 分析 | DeepSeek `deepseek-v4-pro`（推理，温度 0.15）/ `v4-flash`（笔记结构化/复盘分析师） | OpenAI 兼容 HTTP，密钥来自 `.env` |
+| 复盘打板数据 | 东财 push2ex（涨停/炸板/跌停/昨涨停四池）+ 同花顺（题材串/涨停深史）+ 东财 datacenter（龙虎榜）+ 东财 clist（板块资金流）| `/review` 用；纯 urllib + 限流重试 |
 
 ## 文件结构
 
@@ -100,14 +149,15 @@ A-stock/
 ├── universe.py         # 全市场候选池（两级：一级板块→二级细分→龙头）
 ├── store.py            # 自选股持久化
 ├── config.py           # 读取 .env（DeepSeek + 博查密钥，不硬编码）
+├── review/             # 复盘模块包：fetch(打板四池/题材/龙虎榜/板块资金)·metrics(情绪硬指标纯函数)·store(落盘)·llm_review(5角色+裁判+文稿)·pipeline·run_daily(批处理)·backfill(情绪周期回填)
 ├── templates/index.html# 选股看板结构 + 样式（深色终端风，路由 /）
-├── templates/review.html# 复盘自动化模块页（独立路由 /review，建设中）
+├── templates/review.html# 复盘看板页（独立路由 /review）
 ├── templates/prompts/  # 蒸馏后的系统提示词/框架（归档参考）
 ├── static/app.js       # 选股页前端逻辑（对比/深挖/行情/大盘/持仓/AI+缓存/新闻/笔记/规则/名词）
-├── static/review.js    # 复盘页前端（骨架，建设中）
+├── static/review.js    # 复盘页前端（渲染 情绪硬指标 / AI 研判 / 文稿）
 ├── .env                # DeepSeek + 博查 密钥（gitignore，勿提交）
 ├── .gitignore
-├── data/               # news.db / notes.db / rules.db / paper.db（本地库，gitignore）
+├── data/               # news/notes/rules/paper.db + review/（复盘落盘）（本地库，gitignore）
 ├── ai_cache.json       # AI 结果缓存（自动生成，gitignore）
 ├── watchlist.json / portfolio.json   # 本地数据（自动生成）
 └── requirements.txt

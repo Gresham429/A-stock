@@ -41,39 +41,40 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com
   ```
 - 结果落 `data/review/<date>.json`（已 gitignore），`/review` 自动读最新一份。
 
-## 部署到服务器
+## 部署（本地 macOS · 三步即可）
 
-本地跑法见上；要 7×24 挂服务器、每交易日自动出复盘，按下面配。
+面向本地 macOS：**开着 app 就自动出复盘**，不用配 cron / launchd。
 
-**1. 装依赖 + 配 key + 起服务**
+**① 装依赖（一次）**——macOS 自带 `python3`（需 3.10+，`python3 --version` 确认）：
 ```bash
-pip install -r requirements.txt          # 只依赖 flask
-echo 'DEEPSEEK_API_KEY=sk-xxxx' >> .env   # DeepSeek key（AI 研判/文稿必需；不配则只出硬指标）
-python app.py                             # 绑 127.0.0.1:5000
+cd A-stock
+python3 -m pip install -r requirements.txt      # 只依赖 flask
 ```
 
-**2. 时区（务必）**：服务器设 `Asia/Shanghai`，否则交易日/收盘判定全错。
+**② 填 DeepSeek key**——在项目根建 `.env`（已 gitignore，不进 git）：
 ```bash
-sudo timedatectl set-timezone Asia/Shanghai
+echo 'DEEPSEEK_API_KEY=sk-你的key' > .env
 ```
+> 不填也能跑，只是没有 AI 研判/文稿（硬指标照常）。key 在 [platform.deepseek.com](https://platform.deepseek.com) 申请。
 
-**3. 反向代理 + 访问控制**：app 只绑 `127.0.0.1`，别直接对公网开。前置 nginx（TLS）+ Basic Auth 或 IP 白名单（内部团队用）。
-
-**4. 每日复盘定时任务**：交易日**收盘后**（建议晚上、等龙虎榜定稿）自动跑一次。cron 示例（工作日 19:30，非交易日脚本会自动跳过）：
+**③ 启动**：
 ```bash
-30 19 * * 1-5  cd /path/to/A-stock && /usr/bin/python3 -m review.run_daily >> ~/review.log 2>&1
+python3 app.py
 ```
-> 更稳可用 systemd timer（带失败重试/告警）。退出码：`0`=成功/已存在，`3`=体检闸失败（核心数据缺）。
+浏览器开 **http://127.0.0.1:5000**，左上角切「选股自动化 / 复盘自动化」。（⚠️ 用 `127.0.0.1`，别用 `localhost`——localhost 会撞 macOS AirPlay 的 5000 端口。）
 
-**5. 情绪周期首次回填**（一次性）：`python -m review.backfill 3`。
+**就这样，之后全自动**：
+- **复盘每天自动出**：只要 app 开着，**每个交易日 18:30 自动生成当日复盘**（等龙虎榜定稿；想改时刻，启动前设 `export REVIEW_AUTO_TIME=19:00`）。也可随时到 `/review` 点右上「↻ 生成今日复盘」手动出。
+- **情绪周期开箱即用**：首次启动**后台自动回填近 3 个月**（约 15 秒），无需手动。
 
-### ⚠️ 部署前必测：数据源对服务器 IP 的可用性
+### 想关掉 app 也每天自动跑？（可选）
 
-打板数据主要走**东财**，东财对**机房/住宅 IP 有风控**（`RemoteDisconnected` / 空返回），**换 IP 表现会变**。上线前用真实服务器 IP 先实测一次：
-```bash
-python -m review.run_daily     # 看 status=done、涨停/龙虎榜/板块资金流能否取到
-```
-- **打板四池 / 龙虎榜取不到** → 复盘核心数据缺（体检闸会拒绝生成）；换网络或配代理。
+上面「开着 app 就自动跑」对本地日常够用。若想**关着 app 也定时出复盘**，用 macOS launchd 挂个定时任务跑批处理入口 `python3 -m review.run_daily`——装法照仓库 `launchd/` 里新闻任务（`launchctl bootstrap`，见下文「自动抓取新闻库」）。
+
+### ⚠️ 一个数据源提醒（换网络/换机都适用）
+
+打板数据主要走**东财**，东财对部分 IP 有风控（偶发 `RemoteDisconnected` / 空返回，取数已内置限流+退避重试）。表现随网络/IP 变：
+- **打板四池 / 龙虎榜取不到** → 复盘核心数据缺，体检闸会拒绝生成（不出错误复盘）；换网络或稍后重试。
 - **板块资金流取不到** → 资金面分析师自动降级（5 角色 → 4），不影响主流程。
 
 ## 功能

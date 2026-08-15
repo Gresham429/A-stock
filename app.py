@@ -103,6 +103,12 @@ def index() -> str:
     return render_template("index.html")
 
 
+@app.route("/review")
+def review() -> str:
+    """复盘自动化模块（独立页面，不与选股看板共用主页）。"""
+    return render_template("review.html")
+
+
 @app.route("/api/config")
 def api_config():
     """前端据此决定是否显示 AI 功能。"""

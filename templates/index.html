@@ -35,6 +35,11 @@
   .brand .dot{width:9px;height:9px;border-radius:50%;background:var(--up);box-shadow:0 0 12px var(--up);animation:pulse 2.4s infinite}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
   .brand .sub{font-family:var(--mono);font-size:10.5px;color:var(--gold);letter-spacing:3px;margin-top:5px;text-transform:uppercase}
+  /* 顶层路由切换：选股自动化 / 复盘自动化（两页共用同一份样式） */
+  .navswitch{display:inline-flex;gap:4px;background:var(--panel);border:1px solid var(--line2);border-radius:11px;padding:4px;margin:16px 0 2px}
+  .navswitch a{display:flex;align-items:center;gap:7px;font-size:13.5px;font-weight:700;color:var(--muted);text-decoration:none;padding:8px 16px;border-radius:8px;font-family:var(--sans);transition:color .15s,background .15s}
+  .navswitch a:hover{color:var(--txt)}
+  .navswitch a.on{background:linear-gradient(135deg,#3a2a08,#241a06);color:var(--gold);box-shadow:inset 0 0 0 1px var(--gold-dim)}
   .tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
   .chip{font-family:var(--mono);font-size:11px;color:var(--muted);border:1px solid var(--line2);
     border-radius:20px;padding:5px 11px}
@@ -434,6 +439,11 @@
       <button class="btn" onclick="load();loadPortfolio()">↻ 刷新</button>
     </div>
   </header>
+
+  <nav class="navswitch">
+    <a href="/" class="on">📈 选股自动化</a>
+    <a href="/review">🔁 复盘自动化</a>
+  </nav>
 
   <!-- 博查联网搜索 到期/失效提醒 -->
   <div id="webWarn" class="webwarn" style="display:none">

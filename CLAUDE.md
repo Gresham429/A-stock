@@ -8,6 +8,18 @@
 一个**本地运行**的 A 股看板：多股对比 + 点击深挖（含多周期行情图：分时+K线蜡烛(可选 MA5/10/20/60/120/240)）+ 顶部大盘研判条 + 全市场两级选股 + 持仓盈亏 + DeepSeek AI 推荐/建议（结果落盘缓存带时间戳）+ 近1年新闻/政策库 + 私域笔记 + 交易规则库（价格行为体系 + A股制度特性，可增删改、注入 AI）+ **投资画像本金分级玩法** + **公司叙事(做过/在做/要做)** + **AI 溯源与依据校验** + **全球宏观→板块指向** + 模拟盘 + 名词解释。
 纯本地 Flask 后端代理各数据源，前端零构建（HTML+CSS+原生 JS）。**为什么不是托管网页**：深挖/加股票/调 AI/联网搜索都要实时外部请求，而托管型 Artifact 的 CSP 禁止一切外部请求，做不到。
 
+## 复盘自动化模块（`/review`，建设中）
+
+本会话(2026-08-15)新增的**第二个前端路由**，与选股看板 `/` 分栏、独立页面、顶部切换、**不共用主页**。
+定位：**A股短线情绪「每日复盘」**——收盘后自动出一份盘面复盘（甲方内部提效用）。
+
+- **现状 = 纯前端骨架**：`templates/review.html` + `static/review.js`，三区占位（**情绪硬指标** / **AI 明日关注点** / **可发布文稿**），全标「建设中·待接入」；后端数据/AI **尚未接**。
+- **目标 pipeline**（收盘后定时批处理跑一次、落盘，前端只读 latest）：
+  `取数+体检闸 → 纯算情绪硬指标(赚钱效应/晋级率/连板梯队/情绪周期/题材热点/亏钱效应/封板质量) → DeepSeek 5 分析师+复盘裁判 → 生成文稿 → 落盘 → /review 渲染`。九成是硬指标纯计算、秒出；AI 只在研判+文稿两块。
+- **边界**：复盘=客观事实整理，只到板块层面、不荐个股、不给买卖点（与选股/agent 的建议口径分开）。
+- **数据策略**：复用 A-stock 不封IP源 + `a-stock-data` 技能的打板端点（涨停/连板/炸板/跌停四池 + 昨日定稿 + 题材串），**不引 akshare**；指标数学与正确性闸（定稿vs实时/制度10-20-30cm/覆盖率）照搬成熟口径。**详细设计 + 数据缺口分析在本地 `复盘方案/`（含商业信息，不进公开仓库）。**
+- **部署目标**：上**服务器**（web 常驻只读 + 每日批处理定时器 + 锁 `Asia/Shanghai` + 最简鉴权）。⚠️ 头号风险：**打板四池只有东财系端点，云机房 IP 可能封更狠，上线前须用真实服务器 IP 实测能否取到**。
+
 ## 快速开始
 
 ```bash
@@ -19,7 +31,7 @@ python app.py                        # http://127.0.0.1:5000
 
 ## 文件地图
 
-**入口**：`app.py`(Flask 路由，62 个) · `templates/index.html`(UI+CSS) · `static/app.js`(全部前端逻辑)
+**入口**：`app.py`(Flask 路由，65 个) · `templates/index.html`(选股 UI+CSS，路由 `/`) · `static/app.js`(选股前端逻辑) · **`templates/review.html`+`static/review.js`(复盘自动化模块，路由 `/review`，建设中)**
 **app.py 的共享辅助已抽出**(2026-07-16，消除 agent_loop 的 `import app` 循环依赖)：
 `screening.py`(选股/形态初筛：`_screen_rows`/`_pa_score`/`_safe_kline`/`_safe_metrics`…) ·
 `ai_blocks.py`(AI 注入块：`_tier_block`/`_fee_block`/`_lesson_block`/`_agent_blocks`/**`_stock_house_view`**…)。
@@ -91,7 +103,7 @@ app.py 用显式 import 带回名字，路由调用点与 `app._X` 可达性不�
 
 ## AI 配置（DeepSeek + 博查）
 
-- **DeepSeek**：`deepseek-v4-pro`（该账号**只有** v4-pro / v4-flash 可用）。是**推理模型**——`max_tokens` 同时覆盖「思考+正文」，太小会导致思考耗尽、正文返回空。已设 daily=8000 / position=5000 / screen=9000 / market_overview=6000，**别调小**。**温度统一 0.15**（`_chat` 默认值，求严谨理性、少发散）；`_DISCLAIMER` 强制「只据给定数据、不编造、不预测方向」。OpenAI 兼容 `POST /chat/completions`，支持 `response_format:{type:json_object}`，零 SDK（纯 urllib）。
+- **DeepSeek**：`deepseek-v4-pro`（该账号**只有** v4-pro / v4-flash 可用）。是**推理模型**——`max_tokens` 同时覆盖「思考+正文」，太小会导致思考耗尽、正文返回空。已设 daily=8000 / position=5000 / screen=9000 / market_overview=6000，**别调小**。**温度统一 0.15**（`_chat` 默认值，求严谨理性、少发散）；`_DISCLAIMER` 强制「只据给定数据、不编造、不预测方向」。OpenAI 兼容 `POST /chat/completions`，支持 `response_format:{type:json_object}`，零 SDK（纯 urllib）。**官网核对(2026-08-15)**：`deepseek-v4-pro` 别名自动指向最新正式快照 **Pro-0813**（1M 上下文/384K 输出/推理模型），`deepseek-v4-flash`=Flash-0731 → **已是最新正式 pro，模型串无需改**；复盘模块接 LLM 时沿用同一套。
 - **博查（可选，B 方案）**：`POST api.bochaai.com/v1/web-search`，Bearer 鉴权，body `{query,freshness,summary,count}`，成功响应 `webPages.value[].{name,url,siteName,snippet,summary}`，错误体 `{"code":"401","message":"Invalid API KEY"}`。
   - **变量名**：`.env` 里用 `BOCHAAI_API_KEY`（博查惯例，README/`.env` 以此为准）；`config` 也兼容 `BOCHA_API_KEY`（`os.environ.get("BOCHA_API_KEY") or os.environ.get("BOCHAAI_API_KEY")`）。
   - **到期提醒**：`websearch._classify()` 把 401→key 无效/过期、402/403/余额→余额不足、429→限流；`/api/websearch/status?probe=1` 主动探测；前端启动时探测，失效则顶部红条 + 芯片 `🌐联网⚠`。
@@ -261,8 +273,15 @@ curl -s 127.0.0.1:5000/api/agents               # agent 存档 + 教训汇总
 
 ## 当前状态 / 待办
 
-**代码全部已推 GitHub(main)，工作区干净。13 个测试文件、离线全过。app 单进程在跑(最新代码)。**
-本会话(2026-07-18)7 个 commit：4 项 🟢 自主优化(regime-view · 选股偏差分析 · debate 校验 · DOM 验证) + **cohort-aware 方向修复**(3 commit)。
+**主线 `main` 干净、13 个测试离线全过；本会话新增的复盘模块在分支 `feat/review-module`（commit `2be73d8`，未合并 main、未推送——待用户定）。app 单进程在跑。**
+
+### 本会话(2026-08-15)：复盘自动化模块起步 + 文档同步
+- **新增 `/review` 复盘模块（纯前端骨架）**——见上「复盘自动化模块」节。三区占位、后端未接、供甲方评审方向。
+- **DeepSeek 官网核对**：选股用的 `deepseek-v4-pro` 已是最新正式 pro（Pro-0813），代码无需改。
+- **文档同步**：`README.md` / `framework.md` / 本文 已加复盘模块与两路由；复盘详细设计/数据缺口在本地 `复盘方案/`（不进公开仓库）。
+- **🔴 下一步**：打板四池取数 spike（头号风险，云机房 IP 能否取到）→ 移植情绪指标(纯函数) → 接 DeepSeek 5分析师+裁判+文稿 → `/api/review/latest` → 前端渲染。
+
+> 上一会话(2026-07-18)7 个 commit：4 项 🟢 自主优化(regime-view · 选股偏差分析 · debate 校验 · DOM 验证) + **cohort-aware 方向修复**(3 commit)。
 
 ### 本会话做了什么（给下个会话的时间线，2026-07-18）
 

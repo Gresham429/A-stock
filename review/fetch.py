@@ -33,23 +33,33 @@ _ssl_ctx.verify_mode = ssl.CERT_NONE
 
 
 def _get_json(url: str, params: dict, referer: str, throttle: bool = False,
-              timeout: int = 15) -> Optional[dict]:
-    """GET → JSON。throttle=True 时走东财节流。失败返回 None（调用方按需降级）。"""
-    if throttle:
-        wait = _EM_MIN_INTERVAL - (time.time() - _last_em_call[0])
-        if wait > 0:
-            time.sleep(wait + random.uniform(0.1, 0.4))
+              timeout: int = 15, retries: int = 2) -> Optional[dict]:
+    """GET → JSON。throttle=True 走东财节流。瞬态失败（RemoteDisconnected/超时/连接重置）
+    退避重试 retries 次——东财 clist 系对住宅 IP 偶发风控（PITFALLS#14），重试常能过。
+    仍失败返回 None（调用方按需降级）。"""
     full = url + "?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(full, headers={"User-Agent": _UA, "Referer": referer})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout, context=_ssl_ctx) as resp:
-            return json.loads(resp.read().decode("utf-8", "ignore"))
-    except Exception as e:  # noqa: BLE001 — 数据源不稳定，统一降级
-        logger.warning("取数失败 %s: %s", url.split("/")[-1], e)
-        return None
-    finally:
+    ep = url.split("/")[-1]
+    for attempt in range(retries + 1):
         if throttle:
-            _last_em_call[0] = time.time()
+            wait = _EM_MIN_INTERVAL - (time.time() - _last_em_call[0])
+            if wait > 0:
+                time.sleep(wait + random.uniform(0.1, 0.4))
+        req = urllib.request.Request(full, headers={"User-Agent": _UA, "Referer": referer})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=_ssl_ctx) as resp:
+                data = json.loads(resp.read().decode("utf-8", "ignore"))
+            if throttle:
+                _last_em_call[0] = time.time()
+            return data
+        except Exception as e:  # noqa: BLE001 — 数据源不稳定，重试后统一降级
+            if throttle:
+                _last_em_call[0] = time.time()
+            if attempt < retries:
+                logger.info("取数重试 %s（第 %d 次）：%s", ep, attempt + 1, e)
+                time.sleep(0.7 * (attempt + 1) + random.uniform(0.1, 0.5))
+                continue
+            logger.warning("取数失败 %s（重试 %d 次仍失败）：%s", ep, retries, e)
+            return None
 
 
 def _fmt_hms(t: Any) -> str:
@@ -223,6 +233,32 @@ def dragon_tiger(date_dash: str) -> Optional[list[dict]]:
         "change_pct": round(float(r.get("CHANGE_RATE") or 0), 2),
         "close": r.get("CLOSE_PRICE") or 0,
     } for r in rows]
+
+
+# ── 板块资金流（实时快照，无 date 参数）──────────────────────────────
+def sector_flow(kind: str = "concept", top: int = 15) -> Optional[list[dict]]:
+    """板块主力净流入（东财 push2 clist）。**实时快照、无历史**——收盘后当天取即当日定盘；
+    历史重跑会取到当时实时值（故 pipeline 仅在最新场次调用）。按主力净流入降序。
+    kind: 'concept'(概念 m:90+t:3) / 'industry'(行业 m:90+t:2)。net 单位亿元。"""
+    fs = "m:90+t:3" if kind == "concept" else "m:90+t:2"
+    d = _get_json("https://push2.eastmoney.com/api/qt/clist/get",
+                  {"pn": 1, "pz": max(top, 20), "po": 1, "np": 1, "fltt": 2, "invt": 2,
+                   "fid": "f62", "fs": fs, "fields": "f12,f14,f3,f62,f164,f128"},
+                  referer="https://quote.eastmoney.com/", throttle=True)
+    if d is None:
+        return None
+    items = (d.get("data") or {}).get("diff") or []
+    if isinstance(items, dict):
+        items = list(items.values())
+    out = []
+    for it in items[:top]:
+        out.append({
+            "name": it.get("f14", ""), "change_pct": it.get("f3"),
+            "main_net_yi": round((it.get("f62") or 0) / 1e8, 2),
+            "net5_yi": round((it.get("f164") or 0) / 1e8, 2),
+            "leader": it.get("f128", ""),
+        })
+    return out
 
 
 # ── 交易日解析（只复盘已收盘定稿场次）────────────────────────────────

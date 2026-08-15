@@ -195,8 +195,9 @@ def _split_tags(reason: str) -> list[str]:
 
 # ── 情绪周期（需历史序列）────────────────────────────────────────────
 def cycle_position(history: list[dict]) -> dict:
-    """情绪周期定位：近 N 日 (涨停家数 + 最高连板 + (1-炸板率)) 归一均值曲线，
-    定位本轮低点与「第几天」。history=[{date,zt_count,max_height,break_rate}...] 旧→新。
+    """情绪周期定位：近 N 日 (涨停家数 + 最高连板) 归一均值曲线，定位本轮低点与「第几天」。
+    history=[{date,zt_count,max_height}...] 旧→新（同花顺单源、深 3 个月）。
+    2 因子：炸板率因深历史无源不入周期（仍单列在硬指标卡，走东财近 15 日）。
     样本 < 3 时返回 available=False。"""
     if len(history) < 3:
         return {"available": False, "reason": "历史样本不足（需累积 ≥3 交易日）"}
@@ -208,9 +209,8 @@ def cycle_position(history: list[dict]) -> dict:
         return [(v - lo) / (hi - lo) for v in vals]
 
     zt = _mm([h["zt_count"] for h in history])
-    mh = _mm([h["max_height"] for h in history])
-    br = _mm([h["break_rate"] for h in history])
-    scores = [round((zt[i] + mh[i] + (1 - br[i])) / 3, 3) for i in range(len(history))]
+    mh = _mm([h.get("max_height", 0) for h in history])
+    scores = [round((zt[i] + mh[i]) / 2, 3) for i in range(len(history))]
     trough_idx = min(range(len(scores)), key=lambda i: scores[i])
     day_n = len(scores) - trough_idx  # 距低点第几天（含当日）
     rising = scores[-1] > scores[trough_idx]

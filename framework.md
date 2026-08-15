@@ -26,7 +26,7 @@
 
 **两个前端路由**（本会话新增分栏）：`/` = **选股自动化**（原看板）· `/review` = **复盘自动化模块**
 （A股短线情绪复盘：情绪硬指标 + DeepSeek 研判 + 可发布文稿，收盘后自动生成）。二者共用底座数据/DeepSeek、
-独立页面、顶部切换、不共用主页。`review/` 包 = fetch/metrics/store/llm_review/pipeline/run_daily。
+独立页面、顶部切换、不共用主页。`review/` 包 = fetch/metrics/store/llm_review/pipeline/run_daily/backfill。
 
 ## 2. 架构分层
 

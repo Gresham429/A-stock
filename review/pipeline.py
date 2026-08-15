@@ -64,9 +64,16 @@ def run_review(date: Optional[str] = None, force: bool = False,
     lhb = lhb or []
 
     # ── 硬指标（纯计算）──
-    hist = store.history(10, before=target)
+    today_b = metrics.breadth(zt, zb, dt)
+    th_boards = [t.get("boards", 0) for t in theme]  # 当日快照用同花顺，与回填同源
+    today_snap = {"date": target,
+                  "zt_count": len(theme) if theme else today_b["zt_count"],
+                  "max_height": max(th_boards, default=today_b["max_height"]),
+                  "break_rate": today_b["break_rate"]}
+    hist = store.history(10, before=target) + [today_snap]  # 含当日作为周期曲线末点
     prev_theme = store.prev_theme(target)
     m = metrics.compute_all(zt, zb, dt, yzt, theme, history=hist, prev_theme=prev_theme)
+    store.hist_upsert(target, today_snap)                   # 持久化，供次日/回填共用
 
     counts = {"zt": len(zt), "zb": len(zb), "dt": len(dt),
               "yzt": len(yzt), "theme": len(theme), "lhb": len(lhb)}

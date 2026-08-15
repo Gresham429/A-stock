@@ -14,6 +14,7 @@ import datetime
 import json
 import logging
 import random
+import re
 import ssl
 import time
 import urllib.parse
@@ -161,6 +162,19 @@ def yzt_pool(date: str) -> Optional[list[dict]]:
 
 
 # ── 同花顺涨停原因题材串 ──────────────────────────────────────────────
+def _ths_boards(it: dict) -> int:
+    """同花顺连板数：high_days_value 高 16 位即板数（首板 0x10001→1、2板 0x20002→2）；
+    退化解析 high_days 字符串（'首板'→1、'N天M板'→M）。"""
+    v = it.get("high_days_value")
+    if isinstance(v, int) and v > 0:
+        return v >> 16
+    hd = str(it.get("high_days") or "")
+    if "首板" in hd:
+        return 1
+    m = re.findall(r"(\d+)板", hd)
+    return int(m[-1]) if m else (1 if hd else 0)
+
+
 def theme_reasons(date: str) -> Optional[list[dict]]:
     """同花顺涨停揭秘：reason=题材串（'+' 分隔），high_days=几天几板，
     seal_rate=封板率，first_time=首封 HH:MM:SS（源为 Unix 秒）。"""
@@ -184,8 +198,8 @@ def theme_reasons(date: str) -> Optional[list[dict]]:
             "price": it.get("latest"), "pct": it.get("change_rate"),
             "reason": it.get("reason_type", "") or "", "board_type": it.get("limit_up_type", ""),
             "seal_rate": it.get("limit_up_suc_rate"), "break_times": it.get("open_num") or 0,
-            "high_days": it.get("high_days", ""), "first_time": first,
-            "is_again": it.get("is_again_limit"),
+            "high_days": it.get("high_days", ""), "boards": _ths_boards(it),
+            "first_time": first, "is_again": it.get("is_again_limit"),
         })
     return out
 

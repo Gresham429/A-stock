@@ -17,7 +17,9 @@ logger = logging.getLogger(__name__)
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REVIEW_DIR = os.path.join(_ROOT, "data", "review")
 _LATEST = os.path.join(REVIEW_DIR, "latest.json")
+HISTORY_FILE = os.path.join(REVIEW_DIR, "history.json")  # 每日情绪快照序列（供 cycle_position）
 KEEP_DAYS = 365
+HIST_CAP = 400
 
 
 def _ensure_dir() -> None:
@@ -95,21 +97,36 @@ def dates() -> list[str]:
     return sorted(out, reverse=True)
 
 
+def hist_load() -> dict:
+    """读情绪历史序列 {date: {zt_count,max_height,break_rate}}。"""
+    if not os.path.exists(HISTORY_FILE):
+        return {}
+    try:
+        with open(HISTORY_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def hist_upsert(date: str, snap: dict) -> None:
+    """写入/更新某交易日情绪快照到 history.json（容量上限 HIST_CAP）。"""
+    _ensure_dir()
+    h = hist_load()
+    h[date] = {"zt_count": snap.get("zt_count", 0),
+               "max_height": snap.get("max_height", 0),
+               "break_rate": snap.get("break_rate", 0)}
+    if len(h) > HIST_CAP:
+        for d in sorted(h)[:-HIST_CAP]:
+            del h[d]
+    _atomic_write(HISTORY_FILE, h)
+
+
 def history(n: int = 10, before: Optional[str] = None) -> list[dict]:
-    """近 n 个交易日的情绪序列（旧→新），供 cycle_position。
-    before=YYYYMMDD 时只取该日(含)之前的历史（避免把当日算进「历史」）。"""
-    ds = [d for d in sorted(dates()) if (before is None or d <= before)]
+    """近 n 个交易日情绪序列（旧→新），**严格早于 before**（不含当日；当日由 pipeline 追加为曲线末点）。"""
+    h = hist_load()
+    ds = sorted(d for d in h if (before is None or d < before))
     ds = ds[-n:]
-    out = []
-    for d in ds:
-        env = load(d)
-        if not env:
-            continue
-        br = (env.get("metrics") or {}).get("breadth") or {}
-        out.append({"date": d, "zt_count": br.get("zt_count", 0),
-                    "max_height": br.get("max_height", 0),
-                    "break_rate": br.get("break_rate", 0)})
-    return out
+    return [{"date": d, **h[d]} for d in ds]
 
 
 def prev_theme(before: str) -> Optional[list[dict]]:

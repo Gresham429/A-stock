@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -1321,10 +1322,61 @@ def _universe_boot() -> None:
         logger.warning("全市场池预热失败（不影响其余功能）: %s", e)
 
 
+# ── 复盘自动化：应用内每日调度（本地部署零配置——开着 app 即自动出复盘，无需 cron/launchd）──
+_REVIEW_AUTO_TIME = os.environ.get("REVIEW_AUTO_TIME", "18:30")  # 交易日到此时刻后自动跑一次
+_review_sched_state = {"last_auto": None}
+
+
+def _parse_hhmm(s: str) -> tuple[int, int]:
+    try:
+        h, m = s.split(":")
+        return int(h), int(m)
+    except (ValueError, AttributeError):
+        return 18, 30
+
+
+def _review_scheduler() -> None:
+    """守护线程：交易日到点（默认 18:30，等龙虎榜定稿）自动生成当日复盘，每日一次、幂等。
+    只需开着 app，无需 cron/launchd。绝不因单次异常退出。可用 REVIEW_AUTO_TIME 改时刻。"""
+    while True:
+        try:
+            now = datetime.now(ZoneInfo("Asia/Shanghai"))
+            today = now.strftime("%Y%m%d")
+            th, tm = _parse_hhmm(_REVIEW_AUTO_TIME)
+            due = (now.hour, now.minute) >= (th, tm)
+            if (news_store.is_trading_day(now.date()) and due
+                    and _review_sched_state["last_auto"] != today
+                    and not _review_job["running"]):
+                with _review_lock:
+                    if not _review_job["running"]:
+                        _review_sched_state["last_auto"] = today
+                        _review_job.update(running=True, error=None, finished_at=None)
+                        threading.Thread(target=_run_review_bg, args=(None, False),
+                                         daemon=True).start()
+                        logger.info("复盘调度：交易日 %s 到点(%s)，自动生成当日复盘",
+                                    today, _REVIEW_AUTO_TIME)
+        except Exception as e:  # noqa: BLE001 调度器绝不能因单次心跳异常而停摆
+            logger.warning("复盘调度心跳异常（下次继续）：%s", e)
+        time.sleep(600)
+
+
+def _review_boot() -> None:
+    """复盘启动预热：情绪周期历史为空则后台回填近 3 个月 + 启动每日调度器。不阻塞启动。"""
+    try:
+        import review.backfill as _rb
+        if len(review_svc.store.hist_load()) < 5:
+            logger.info("情绪周期历史为空，后台回填近 3 个月…（同花顺，约 15s）")
+            _rb.backfill(3)
+    except Exception as e:  # noqa: BLE001 回填失败不影响其余功能
+        logger.warning("情绪周期回填失败（不影响其余）：%s", e)
+    threading.Thread(target=_review_scheduler, daemon=True).start()
+
+
 if __name__ == "__main__":
     if news_store.stats()["total"] == 0:  # 首次运行：后台一次性回填新闻库(不阻塞启动)
         threading.Thread(target=news_store.backfill, daemon=True).start()
         logger.info("首次运行：后台回填新闻库…（1–2 季度，约几分钟）")
     threading.Thread(target=_universe_boot, daemon=True).start()
+    threading.Thread(target=_review_boot, daemon=True).start()   # 复盘：首启回填情绪周期 + 每日自动调度
     logger.info("A股观察台启动 -> http://127.0.0.1:5000")
     app.run(host="127.0.0.1", port=5000, debug=False)

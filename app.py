@@ -40,6 +40,7 @@ import paper_store
 import portfolio
 import profile_store
 import provenance
+import review as review_svc  # 复盘自动化模块（取数/指标/AI/落盘）；别名避开下方 def review() 视图
 import rules_store
 import store
 import template_store
@@ -101,6 +102,63 @@ def _overview_rows(codes: list[str]) -> list[dict]:
 @app.route("/")
 def index() -> str:
     return render_template("index.html")
+
+
+@app.route("/review")
+def review() -> str:
+    """复盘自动化模块（独立页面，不与选股看板共用主页）。"""
+    return render_template("review.html")
+
+
+# ── 复盘自动化模块 API（/review 页面数据 + 手动重跑）──────────────────
+_review_job = {"running": False, "error": None, "finished_at": None, "date": None}
+_review_lock = threading.Lock()
+
+
+def _run_review_bg(date: str | None, force: bool) -> None:
+    """后台跑一场复盘（取数+指标+AI 约 30~90s，不阻塞 web 请求）。"""
+    try:
+        r = review_svc.run_review(date, force=force)
+        _review_job["error"] = r.get("error")
+        _review_job["date"] = r.get("target_date")
+    except Exception as e:  # noqa: BLE001 后台任务异常绝不能拖垮进程
+        logger.exception("复盘后台任务失败")
+        _review_job["error"] = str(e)
+    finally:
+        _review_job["running"] = False
+        _review_job["finished_at"] = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%H:%M:%S")
+
+
+@app.route("/api/review/latest")
+def api_review_latest():
+    """最近一份复盘（或 ?date=YYYYMMDD 指定历史场次）。"""
+    date = request.args.get("date")
+    env = review_svc.store.load(date) if date else review_svc.latest_review()
+    return jsonify(env or {"empty": True})
+
+
+@app.route("/api/review/dates")
+def api_review_dates():
+    return jsonify({"dates": review_svc.review_dates()})
+
+
+@app.route("/api/review/status")
+def api_review_status():
+    return jsonify(_review_job)
+
+
+@app.route("/api/review/run", methods=["POST"])
+def api_review_run():
+    """手动触发一场复盘（后台线程、单飞）。前端轮询 /api/review/status 与 /latest。"""
+    body = request.get_json(silent=True) or {}
+    with _review_lock:
+        if _review_job["running"]:
+            return jsonify({"status": "running", "date": _review_job["date"]})
+        _review_job.update(running=True, error=None, finished_at=None)
+        threading.Thread(target=_run_review_bg,
+                         args=(body.get("date"), bool(body.get("force"))),
+                         daemon=True).start()
+    return jsonify({"status": "started"})
 
 
 @app.route("/api/config")

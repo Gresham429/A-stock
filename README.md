@@ -23,6 +23,11 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com
 
 改 key 后重启后端生效。若 `.env` 未配置，AI 按钮自动隐藏，其余功能照常。
 
+### 两个页面（路由）
+
+- **`/` 选股自动化**（原看板）：多股对比 / 深挖 / 全市场选股 / 持仓盈亏 / AI 推荐与买卖建议。
+- **`/review` 复盘自动化**（新模块）：A 股短线情绪复盘——涨停/连板/炸板/情绪周期/题材热点等**情绪硬指标**（纯计算）+ **DeepSeek 研判**（明日关注点）+ **可发布复盘文稿**，每交易日收盘后自动生成（批处理入口 `python -m review.run_daily`）。顶部可在两页间切换。
+
 ## 功能
 
 | 区域 | 能力 |
@@ -95,9 +100,11 @@ A-stock/
 ├── universe.py         # 全市场候选池（两级：一级板块→二级细分→龙头）
 ├── store.py            # 自选股持久化
 ├── config.py           # 读取 .env（DeepSeek + 博查密钥，不硬编码）
-├── templates/index.html# 看板结构 + 样式（深色终端风）
+├── templates/index.html# 选股看板结构 + 样式（深色终端风，路由 /）
+├── templates/review.html# 复盘自动化模块页（独立路由 /review，建设中）
 ├── templates/prompts/  # 蒸馏后的系统提示词/框架（归档参考）
-├── static/app.js       # 前端逻辑（对比/深挖/行情/大盘/持仓/AI+缓存/新闻/笔记/规则/名词）
+├── static/app.js       # 选股页前端逻辑（对比/深挖/行情/大盘/持仓/AI+缓存/新闻/笔记/规则/名词）
+├── static/review.js    # 复盘页前端（骨架，建设中）
 ├── .env                # DeepSeek + 博查 密钥（gitignore，勿提交）
 ├── .gitignore
 ├── data/               # news.db / notes.db / rules.db / paper.db（本地库，gitignore）

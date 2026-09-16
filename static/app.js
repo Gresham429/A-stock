@@ -1531,22 +1531,29 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeDrawer();close
 const HZ_CN = {short:'短线', mid:'中线', long:'长线'};
 const DEC_CN = {new:'新增', keep:'维持', revise:'修改', withdraw:'撤销'};
 const TRG_CN = {none:'', stop_hit:'止损触发', target_hit:'目标达成', expired:'周期到期', thesis_broken:'新信息推翻'};
+const STANCE_CN = {buy:'买入', watch:'观望', avoid:'回避', sell:'卖出'};
 let picksSeq = 0;
+let picksPoll = null, picksPollN = 0;
 
-function fmtRange(lo, hi){ return (lo==null&&hi==null) ? '-' : (lo===hi||hi==null ? `${lo}` : `${lo}-${hi}`); }
+function fmtRange(lo, hi){
+  if(lo==null&&hi==null) return '-';
+  if(lo==null) return `${hi}`;
+  if(hi==null||lo===hi) return `${lo}`;
+  return `${lo}-${hi}`;
+}
 function fmtOutcome(r){
   if(r.max_up==null) return '';
   let s = `最高${r.max_up>0?'+':''}${r.max_up}% 最低${r.max_dn}%`;
-  if(r.touched && r.touched!=='none') s += ` 碰到${({entry:'买点',exit:'卖点',stop:'止损'})[r.touched]||r.touched}`;
+  if(r.touched && r.touched!=='none') s += ` 碰到${esc(({entry:'买点',exit:'卖点',stop:'止损'})[r.touched]||r.touched)}`;
   return s;
 }
 function pickCard(r){
-  const dec = DEC_CN[r.decision]||r.decision, trg = TRG_CN[r.trigger]||'';
-  return `<div class="pickCard" onclick="showChain('${r.code}','public')">
-    <div class="nm">${r.name} <span class="tag">${r.code}</span> <span class="stance-${r.stance}">${r.stance}</span></div>
-    <div class="lv"><span>买 ${fmtRange(r.entry_lo,r.entry_hi)}</span><span>卖 ${fmtRange(r.exit_lo,r.exit_hi)}</span><span>止 ${r.stop??'-'}</span><span>到 ${r.valid_until||'-'}</span></div>
-    <div>${r.thesis||''}</div>
-    <div class="tag">本次${dec}${trg?'（'+trg+'）':''} ${fmtOutcome(r)}</div>
+  const dec = esc(DEC_CN[r.decision]||r.decision), trg = TRG_CN[r.trigger]||'';
+  return `<div class="pickCard" onclick="showChain('${esc(r.code)}','public')">
+    <div class="nm">${esc(r.name)} <span class="tag">${esc(r.code)}</span> <span class="stance-${esc(r.stance)}">${esc(STANCE_CN[r.stance]||'')}</span></div>
+    <div class="lv"><span>买 ${esc(fmtRange(r.entry_lo,r.entry_hi))}</span><span>卖 ${esc(fmtRange(r.exit_lo,r.exit_hi))}</span><span>止 ${esc(r.stop??'-')}</span><span>到 ${esc(r.valid_until||'-')}</span></div>
+    <div>${esc(r.thesis||'')}</div>
+    <div class="tag">本次${dec}${trg?'（'+esc(trg)+'）':''} ${esc(fmtOutcome(r))}</div>
   </div>`;
 }
 async function loadPicks(){
@@ -1557,12 +1564,12 @@ async function loadPicks(){
     document.getElementById('picksGen').textContent = pub.generated_at ? `生成于 ${pub.generated_at}` : '尚未生成';
     document.getElementById('picksCols').innerHTML = ['short','mid','long'].map(h=>{
       const rows = (pub.calls||[]).filter(r=>r.horizon===h);
-      return `<div class="picksCol"><h4>${HZ_CN[h]}</h4>${rows.length ? rows.map(pickCard).join('') : '<div class="tag">暂无</div>'}</div>`;
+      return `<div class="picksCol"><h4>${esc(HZ_CN[h])}</h4>${rows.length ? rows.map(pickCard).join('') : '<div class="tag">暂无</div>'}</div>`;
     }).join('');
-    document.getElementById('picksWlRows').innerHTML = (wl.calls||[]).map(r=>`<tr onclick="showChain('${r.code}','watchlist')">
-      <td>${r.name}<br><span class="tag">${r.code}</span></td><td>${HZ_CN[r.horizon]||r.horizon}</td>
-      <td class="stance-${r.stance}">${r.stance}</td><td>${fmtRange(r.entry_lo,r.entry_hi)}</td><td>${fmtRange(r.exit_lo,r.exit_hi)}</td>
-      <td>${r.stop??'-'}</td><td>${r.valid_until||'-'}</td><td>${DEC_CN[r.decision]||''}${TRG_CN[r.trigger]?'（'+TRG_CN[r.trigger]+'）':''}</td><td>${fmtOutcome(r)}</td></tr>`).join('')
+    document.getElementById('picksWlRows').innerHTML = (wl.calls||[]).map(r=>`<tr onclick="showChain('${esc(r.code)}','watchlist')">
+      <td>${esc(r.name)}<br><span class="tag">${esc(r.code)}</span></td><td>${esc(HZ_CN[r.horizon]||r.horizon)}</td>
+      <td class="stance-${esc(r.stance)}">${esc(STANCE_CN[r.stance]||'')}</td><td>${esc(fmtRange(r.entry_lo,r.entry_hi))}</td><td>${esc(fmtRange(r.exit_lo,r.exit_hi))}</td>
+      <td>${esc(r.stop??'-')}</td><td>${esc(r.valid_until||'-')}</td><td>${esc(DEC_CN[r.decision]||'')}${TRG_CN[r.trigger]?'（'+esc(TRG_CN[r.trigger])+'）':''}</td><td>${esc(fmtOutcome(r))}</td></tr>`).join('')
       || '<tr><td colspan="9" class="tag">还没有自选股买卖点，点「刷新自选股买卖点」生成</td></tr>';
   }catch(e){ console.warn('picks load', e); }
 }
@@ -1575,11 +1582,15 @@ async function showChain(code, scope){
 async function runPicks(kind){
   const url = kind==='public' ? '/api/picks/run_public' : '/api/picks/run';
   const j = await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(r=>r.json()).catch(()=>({}));
-  document.getElementById('picksGen').textContent = j.status==='started' ? '生成中（约 1 到 2 分钟）' : (j.status==='running' ? '已在生成' : (j.msg||j.error||''));
+  document.getElementById('picksGen').textContent = j.status==='started' ? '生成中（约 1 到 2 分钟）' : (j.status==='running' ? '已在生成' : (j.msg||j.error||'刷新失败'));
+  if(picksPoll){ clearInterval(picksPoll); picksPoll=null; }
   if(j.status==='started'){
-    const poll = setInterval(async ()=>{
+    picksPollN = 0;
+    picksPoll = setInterval(async ()=>{
+      picksPollN++;
+      if(picksPollN>60){ clearInterval(picksPoll); picksPoll=null; document.getElementById('picksGen').textContent='生成超时，稍后刷新'; return; }
       const s = await fetch('/api/picks/status').then(r=>r.json()).catch(()=>null);
-      if(s && !s.public_running && !s.watchlist_running){ clearInterval(poll); loadPicks(); }
+      if(s && !s.public_running && !s.watchlist_running){ clearInterval(picksPoll); picksPoll=null; loadPicks(); }
     }, 5000);
   }
 }

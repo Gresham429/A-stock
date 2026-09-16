@@ -12,6 +12,10 @@ import picks_store
 
 logger = logging.getLogger(__name__)
 
+# 推理模型的 max_tokens 同时覆盖思考与正文；30 只候选加候选价位与记忆块的提示词较长，
+# 9000 实测被思考耗尽（finish_reason=length、正文为空）。
+PICKS_MAX_TOKENS = 20000
+
 # _ask 的失败原因用线程局部存储：公共三周期与各账号自选股可能在不同线程里并发跑
 # （picks_pipeline.tick 逐用户 for 循环、picks_routes._spawn 的后台线程），模块级
 # 全局变量会被并发的另一路运行覆盖，读到的可能是别人那次的错误。
@@ -151,7 +155,7 @@ def horizon_picks(horizon: str, candidates: list[dict[str, Any]], levels: dict[s
 {_RULES}
 {_SCHEMA}
 calls 恰好 5 条，horizon 填 {horizon}。"""
-    parsed = _ask(prompt, 9000)
+    parsed = _ask(prompt, PICKS_MAX_TOKENS)
     names = {r["code"]: r["name"] for r in candidates}
     out = validate_calls(parsed, levels, {r["code"] for r in candidates}, names)
     for r in out:
@@ -172,6 +176,6 @@ def watchlist_points(rows: list[dict[str, Any]], levels: dict[str, dict], memory
 {_RULES}
 {_SCHEMA}
 calls 覆盖全部自选股，每只一条。"""
-    parsed = _ask(prompt, 9000)
+    parsed = _ask(prompt, PICKS_MAX_TOKENS)
     names = {r["code"]: r["name"] for r in rows}
     return validate_calls(parsed, levels, {r["code"] for r in rows}, names)

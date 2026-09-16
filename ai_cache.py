@@ -22,7 +22,11 @@ import userctx
 
 logger = logging.getLogger(__name__)
 
-_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_cache.json")
+# 缓存文件放 data/ 下：服务器上代码目录归 root 且 systemd 沙箱只放行 data/，
+# 原来放仓库根目录时原子写的 .tmp 文件落不下去，缓存一直失效，每次刷新都重算大盘研判
+# （2026-09-16 实测一天烧掉 41 次调用）。仓库根目录的旧文件只读一次作迁移。
+_CACHE_FILE = userctx.shared_path("ai_cache.json")
+_LEGACY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_cache.json")
 _LOCK = threading.Lock()
 
 # 各类型 TTL（秒）：个股/每日/选股 30 分钟，大盘 5 分钟
@@ -52,11 +56,13 @@ def _key(kind: str, inputs: Any) -> str:
 
 
 def _load() -> dict[str, Any]:
-    try:
-        with open(_CACHE_FILE, encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, ValueError):
-        return {}
+    for path in (_CACHE_FILE, _LEGACY_FILE):
+        try:
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+        except (FileNotFoundError, ValueError):
+            continue
+    return {}
 
 
 def _save(data: dict[str, Any]) -> None:

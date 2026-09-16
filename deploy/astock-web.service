@@ -32,7 +32,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 # ……只有数据目录和 AI 缓存文件可写；代码目录归 root、进程改不了自己的代码
-ReadWritePaths=/opt/astock/data /opt/astock/ai_cache.json
+ReadWritePaths=/opt/astock/data
 PrivateDevices=true
 ProtectKernelTunables=true
 ProtectKernelModules=true

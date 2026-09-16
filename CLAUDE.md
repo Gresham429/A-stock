@@ -463,7 +463,7 @@ agent 不自动跑。服务器 IP 上东财端点全通（含家里被封的 cli
 ### 本地数据文件（全部 gitignore）
 
 公共 `data/`: `news.db` `universe.db` `factors.db` `templates.db` `auth.db` `usage.db` `review/`
-`picks_public.db` `.em_last_call` `.picks-running-*`；根目录 `ai_cache.json`（键带 uid）。
+`picks_public.db` `ai_cache.json`（键带 uid，2026-09-16 从根目录搬进 data/，旧文件只读一次作迁移）`.em_last_call` `.picks-running-*`。
 个人 `data/users/<uid>/`: `watchlist.json` `portfolio.json`(按画像隔离+lot 模型) `notes.db` `rules.db`
 `paper.db` `profiles.db` `agents.db` `picks.db` `.init.lock` `.picks-running`。舰队只读站长目录里的
 `agents.db`/`paper.db`/`profiles.db`。

@@ -197,12 +197,11 @@ scp data/agents.db aliyun_ecs:~/ \
 |---|---|---|---|
 | `/opt/astock` 代码 | `root:astock` | 去掉组/其他写位 | 应用进程改不了自己的代码；被攻破也无法植入后门等下次重启 |
 | `data/` | `astock:astock` | 700 | 所有人的持仓和笔记，只有应用账号能进 |
-| `ai_cache.json` | `astock:astock` | 600 | AI 输出缓存，应用要写；不存在会先 touch |
 | `.env` | `root:astock` | 640 | systemd 以 root 读 `EnvironmentFile`，`config.py` 由 `astock` 进程读，其他账号读不到。不能是 600：那样 `astock` 进程读不到 key |
 | `deploy/` | `root:root` | 755 | 里面的脚本会被 root 执行，切断「应用被攻破后改 deploy.sh 再等 root 执行」这条提权链 |
 | `/var/backups/astock` | `astock:astock` | 700 | `backup.sh` 以 `astock` 身份跑 |
 
-两个 systemd unit 的 `ReadWritePaths` 也只放 `/opt/astock/data` 和 `/opt/astock/ai_cache.json`，
+两个 systemd unit 的 `ReadWritePaths` 也只放 `/opt/astock/data`（AI 缓存 `ai_cache.json` 也在 data/ 下），
 文件系统其余部分对进程只读。
 
 跑完之后你不能再直接 rsync 进 `/opt/astock` 了。后续更新一律用

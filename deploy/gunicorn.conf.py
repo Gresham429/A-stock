@@ -43,3 +43,8 @@ max_requests = 0
 max_requests_jitter = 0
 
 proc_name = "astock-web"
+
+# gunicorn 26 起会在 $HOME/.gunicorn 建一个控制 socket；服务以 astock 身份跑、家目录
+# /opt/astock 归 root 不可写，会每次启动报 Permission denied。用不上，关掉。
+# 旧版 gunicorn 没有这个设置，读配置时会忽略未知名字。
+control_socket_disable = True

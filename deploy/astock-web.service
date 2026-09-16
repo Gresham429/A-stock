@@ -27,8 +27,10 @@ RestartSec=5
 # 这一段是纯收益：不影响功能，但把「一个 RCE」和「整台机器沦陷」隔开。
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=strict          # 整个文件系统只读……
-ProtectHome=true              # ……/home /root 直接不可见
+# ProtectSystem=strict 整个文件系统只读，ProtectHome 让 /home /root 不可见。
+# systemd 不支持行尾注释，注释必须单独成行，否则整行被忽略（2026-09-16 实测）。
+ProtectSystem=strict
+ProtectHome=true
 # ……只有数据目录和 AI 缓存文件可写；代码目录归 root、进程改不了自己的代码
 ReadWritePaths=/opt/astock/data /opt/astock/ai_cache.json
 PrivateDevices=true

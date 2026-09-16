@@ -707,6 +707,10 @@
 // 多用户改造：在页头显示当前账号和今天还剩多少次 AI 分析。
 // 把余额显式摆出来，是为了让「今天的 AI 用完了」变成看得见的状态，
 // 而不是等到点下去才收到一个 429。
+// 同时包一层 window.fetch：会话过期时后端对 /api/* 只回 401 JSON，不会自己跳转，
+// 页面上原有的几十个 fetch 调用点不必逐个改——统一在这里带 next 跳去登录；
+// 429（限流）和 403（权限不够、跨站被拒）则把后端给的原因在角标处亮 5 秒，
+// 比让请求静默失败好找。
 (function () {
   const put = (id, txt, cls) => {
     const el = document.getElementById(id);
@@ -714,11 +718,42 @@
     el.textContent = txt;
     if (cls) el.classList.add(cls);
   };
+  let noticeTimer = 0;
+  const notice = (txt) => {
+    const el = document.getElementById('quotachip');
+    if (!el) return;
+    const keep = el.dataset.keep === undefined ? el.textContent : el.dataset.keep;
+    el.dataset.keep = keep;
+    el.textContent = txt;
+    el.style.color = 'var(--up)';   // 页面没有 .chip.warn 样式，脚本自包含，直接内联
+    clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => {
+      el.textContent = el.dataset.keep;
+      delete el.dataset.keep;
+      el.style.color = '';
+    }, 5000);
+  };
+  const rawFetch = window.fetch.bind(window);
+  window.fetch = (input, init) => rawFetch(input, init).then(resp => {
+    if (resp.status !== 401 && resp.status !== 403 && resp.status !== 429) return resp;
+    resp.clone().json().then(d => {
+      if (resp.status === 401 && d && d.code === 'auth_required') {
+        location.href = '/login?next=' + encodeURIComponent(location.pathname);
+      } else if ((resp.status === 429 || resp.status === 403) && d && (d.error || d.msg)) {
+        // 429 的文案在 error；403 两种来源：auth 的同源/管理员门用 error，
+        // app.py 的舰队写权限门用 msg。都走同一套角标显示。
+        notice(d.error || d.msg);
+      }
+    }).catch(() => {});
+    return resp;
+  });
   fetch('/api/me').then(r => r.ok ? r.json() : null).then(d => {
     if (d) put('mechip', '👤 ' + (d.display_name || d.uid));
   }).catch(() => {});
   const refreshQuota = () => fetch('/api/usage').then(r => r.ok ? r.json() : null).then(d => {
     if (!d) return;
+    const el = document.getElementById('quotachip');
+    if (el && el.dataset.keep !== undefined) return;   // 提示亮着时别覆盖
     const left = Math.max(0, d.ai_limit - d.ai_used);
     put('quotachip', `AI ${left}/${d.ai_limit}`, left > 0 ? 'ok' : null);
   }).catch(() => {});

@@ -51,7 +51,7 @@ const clr=v=> v>0?'up':v<0?'down':'flat';
 const sgn=v=> v>0?'+':'';
 const fmt=(v,d=2)=> v==null||v===''?'—':Number(v).toFixed(d);
 const fmtInt=v=> v==null?'—':Math.round(v).toLocaleString();
-const esc=s=> (s==null?'':String(s)).replace(/[<>&]/g,m=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[m]));
+const esc=s=> (s==null?'':String(s)).replace(/[<>&"']/g,m=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[m]));
 // AI 结果的时间戳/缓存 meta 行 + 强制刷新按钮（onclick 传重新请求的调用串）
 function aiMeta(j,onclick){
   const when=j.analyzed_at?j.analyzed_at.replace('T',' ').slice(0,16):(j.updated||'');
@@ -1526,9 +1526,79 @@ async function placeOrder(){
 }
 
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeDrawer();closeGloss();closeRec();closeNews();closeNotes();closeRules();closePaper();closeProfiles();}});
+
+// ── 三周期推荐 + 自选股买卖点（/api/picks/*） ──
+const HZ_CN = {short:'短线', mid:'中线', long:'长线'};
+const DEC_CN = {new:'新增', keep:'维持', revise:'修改', withdraw:'撤销'};
+const TRG_CN = {none:'', stop_hit:'止损触发', target_hit:'目标达成', expired:'周期到期', thesis_broken:'新信息推翻'};
+const STANCE_CN = {buy:'买入', watch:'观望', avoid:'回避', sell:'卖出'};
+let picksSeq = 0;
+let picksPoll = null, picksPollN = 0;
+
+function fmtRange(lo, hi){
+  if(lo==null&&hi==null) return '-';
+  if(lo==null) return `${hi}`;
+  if(hi==null||lo===hi) return `${lo}`;
+  return `${lo}-${hi}`;
+}
+function fmtOutcome(r){
+  if(r.max_up==null) return '';
+  let s = `最高${r.max_up>0?'+':''}${r.max_up}% 最低${r.max_dn}%`;
+  if(r.touched && r.touched!=='none') s += ` 碰到${({entry:'买点',exit:'卖点',stop:'止损'})[r.touched]||r.touched}`;
+  return s;
+}
+function pickCard(r){
+  const dec = esc(DEC_CN[r.decision]||r.decision), trg = TRG_CN[r.trigger]||'';
+  return `<div class="pickCard" onclick="showChain('${esc(r.code)}','public')">
+    <div class="nm">${esc(r.name)} <span class="tag">${esc(r.code)}</span> <span class="stance-${esc(r.stance)}">${esc(STANCE_CN[r.stance]||'')}</span></div>
+    <div class="lv"><span>买 ${esc(fmtRange(r.entry_lo,r.entry_hi))}</span><span>卖 ${esc(fmtRange(r.exit_lo,r.exit_hi))}</span><span>止 ${esc(r.stop??'-')}</span><span>到 ${esc(r.valid_until||'-')}</span></div>
+    <div>${esc(r.thesis||'')}</div>
+    <div class="tag">本次${dec}${trg?'（'+esc(trg)+'）':''} ${esc(fmtOutcome(r))}</div>
+  </div>`;
+}
+async function loadPicks(){
+  const gen = ++picksSeq;
+  try{
+    const [pub, wl] = await Promise.all([fetch('/api/picks/public').then(r=>r.json()), fetch('/api/picks/watchlist').then(r=>r.json())]);
+    if(gen!==picksSeq) return;
+    document.getElementById('picksGen').textContent = pub.generated_at ? `生成于 ${pub.generated_at}` : '尚未生成';
+    document.getElementById('picksCols').innerHTML = ['short','mid','long'].map(h=>{
+      const rows = (pub.calls||[]).filter(r=>r.horizon===h);
+      return `<div class="picksCol"><h4>${esc(HZ_CN[h])}</h4>${rows.length ? rows.map(pickCard).join('') : '<div class="tag">暂无</div>'}</div>`;
+    }).join('');
+    document.getElementById('picksWlRows').innerHTML = (wl.calls||[]).map(r=>`<tr onclick="showChain('${esc(r.code)}','watchlist')">
+      <td>${esc(r.name)}<br><span class="tag">${esc(r.code)}</span></td><td>${esc(HZ_CN[r.horizon]||r.horizon)}</td>
+      <td class="stance-${esc(r.stance)}">${esc(STANCE_CN[r.stance]||'')}</td><td>${esc(fmtRange(r.entry_lo,r.entry_hi))}</td><td>${esc(fmtRange(r.exit_lo,r.exit_hi))}</td>
+      <td>${esc(r.stop??'-')}</td><td>${esc(r.valid_until||'-')}</td><td>${esc(DEC_CN[r.decision]||'')}${TRG_CN[r.trigger]?'（'+esc(TRG_CN[r.trigger])+'）':''}</td><td>${esc(fmtOutcome(r))}</td></tr>`).join('')
+      || '<tr><td colspan="9" class="tag">还没有自选股买卖点，点「刷新自选股买卖点」生成</td></tr>';
+  }catch(e){ console.warn('picks load', e); }
+}
+async function showChain(code, scope){
+  const j = await fetch(`/api/picks/chain/${code}?scope=${scope}`).then(r=>r.json());
+  const el = document.getElementById('picksChain');
+  el.style.display = 'block';
+  el.textContent = (j.chain||[]).map(r=>`${r.created_at} ${HZ_CN[r.horizon]||r.horizon} ${r.stance} 买${fmtRange(r.entry_lo,r.entry_hi)} 卖${fmtRange(r.exit_lo,r.exit_hi)} 止${r.stop??'-'} ${DEC_CN[r.decision]||''}${TRG_CN[r.trigger]?'（'+TRG_CN[r.trigger]+'）':''} ${fmtOutcome(r)}\n  ${r.thesis||''}`).join('\n') || '无记录';
+}
+async function runPicks(kind){
+  const url = kind==='public' ? '/api/picks/run_public' : '/api/picks/run';
+  const j = await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(r=>r.json()).catch(()=>({}));
+  document.getElementById('picksGen').textContent = j.status==='started' ? '生成中（约 1 到 2 分钟）' : (j.status==='running' ? '已在生成' : (j.msg||j.error||'刷新失败'));
+  if(j.status==='started'||j.status==='running'){
+    if(picksPoll){ clearInterval(picksPoll); picksPoll=null; }
+    picksPollN = 0;
+    picksPoll = setInterval(async ()=>{
+      picksPollN++;
+      if(picksPollN>60){ clearInterval(picksPoll); picksPoll=null; document.getElementById('picksGen').textContent='生成超时，稍后刷新'; return; }
+      const s = await fetch('/api/picks/status').then(r=>r.json()).catch(()=>null);
+      if(s && !s.public_running && !s.watchlist_running){ clearInterval(picksPoll); picksPoll=null; loadPicks(); }
+    }, 5000);
+  }
+}
+
 initTooltips();
 loadConfig();
 load();
 loadPortfolio();
 loadMarket();   // 顶部大盘研判条
+loadPicks();    // 三周期推荐 + 自选股买卖点
 toggleAuto();   // 默认开启自动刷新（30s）

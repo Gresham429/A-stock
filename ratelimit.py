@@ -62,6 +62,7 @@ AI_PREFIXES = (
     "/api/recommend/",        # daily / position / entry / screen 全在下面
     "/api/notes/structure",
     "/api/review/run",
+    "/api/picks/run",         # 手动触发选股/观点账本，覆盖 run 与 run_public
 )
 AI_PATTERNS = ("/api/agents/run_all",)     # /api/agents/<id>/run 由下面的函数单独判
 

@@ -71,6 +71,11 @@ def _shared_boot() -> None:
     userctx.spawn(web._universe_boot)
     userctx.spawn(web._review_boot)
 
+    import picks_pipeline
+    import picks_routes
+    # 三周期选股 + 各账号自选股买卖点：交易日 16:00 全量、09:05 短线
+    userctx.spawn(picks_pipeline.loop_forever, auth.list_uids, picks_routes._market_ctx)
+
 
 def _run_fleet_agents() -> None:
     """在站长上下文里跑一轮 agent 日循环。全站只有这一套舰队。"""

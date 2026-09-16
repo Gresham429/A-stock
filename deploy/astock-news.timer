@@ -1,0 +1,18 @@
+# 放到 /etc/systemd/system/astock-news.timer
+# 与本地 launchd/com.astock.news.plist 同一组时刻（北京时间）：
+# 交易日 08:40 / 11:40 / 14:00 / 15:30 / 20:30；非交易日只有 20:30 那次真抓
+# （fetch_news.py 自己门控：非交易日且 18 点前直接跳过）。
+[Unit]
+Description=A股观察台 · 新闻库增量抓取定时器
+
+[Timer]
+OnCalendar=*-*-* 08:40:00
+OnCalendar=*-*-* 11:40:00
+OnCalendar=*-*-* 14:00:00
+OnCalendar=*-*-* 15:30:00
+OnCalendar=*-*-* 20:30:00
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

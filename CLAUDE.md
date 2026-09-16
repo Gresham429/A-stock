@@ -51,7 +51,7 @@ Secure、http 下登不上。
 | `auth.py` / `auth_password.py` | 账号表、服务端会话（存 sha256(token)）、`before_request` 全局闸门（默认全关，白名单 `/login` `/logout` `/healthz` `/static/`）、Origin 同源校验（回环来源信 X-Forwarded-Host）、安全响应头、`/login` `/logout` `/healthz` `/api/me`；密码 scrypt、失败按用户名与 ip 两键锁定 |
 | `ratelimit.py` | 每分钟总请求、AI 最小间隔、AI 日预算（每人 + 全站）、heavy 桶按请求计数；`allow_llm`/`record_ai_call` 是真实计费点（见约定）；库 `data/usage.db`；`/api/usage` |
 | `astockctl.py` | 账号与用量 CLI：`adduser`/`passwd`/`disable`/`enable`/`kick`/`users`/`usage`/`status` |
-| `deploy/` | 阿里云部署：`bootstrap.sh`(首次一键) · `deploy.sh`(服务器侧幂等) · `push.sh`(更新) · `fix_perms.sh`(权限单一源) · 两个 systemd 单元 · `gunicorn.conf.py` · `backup.sh` · `harden_ssh.sh` · `migrate_to_multiuser.py` · `env.example` · `README-deploy.md`(步骤权威) · `mcp/`(让 Claude 桌面端操作服务器的 MCP server，六个固定动作) |
+| `deploy/` | 阿里云部署：`bootstrap.sh`(首次一键) · `deploy.sh`(服务器侧幂等) · `push.sh`(更新) · `fix_perms.sh`(权限单一源) · systemd 单元 web / scheduler / `astock-news.timer`(每天五次 `fetch_news.py`，同本地 launchd) · `gunicorn.conf.py` · `backup.sh` · `harden_ssh.sh` · `migrate_to_multiuser.py` · `env.example` · `README-deploy.md`(步骤权威) · `mcp/`(让 Claude 桌面端操作服务器的 MCP server，六个固定动作) |
 **app.py 的共享辅助已抽出**(2026-07-16，消除 agent_loop 的 `import app` 循环依赖)：
 `screening.py`(选股/形态初筛：`_screen_rows`/`_pa_score`/`_safe_kline`/`_safe_metrics`…) ·
 `ai_blocks.py`(AI 注入块：`_tier_block`/`_fee_block`/`_lesson_block`/`_agent_blocks`/**`_stock_house_view`**…)。

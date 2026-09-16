@@ -1,0 +1,35 @@
+# 放到 /etc/systemd/system/astock-news.service
+# 新闻库增量抓取（L2）。本地 macOS 用 launchd 每天五次调 fetch_news.py，服务器上
+# 由同名 timer 触发本单元，时刻与 launchd 一致；交易日门控在 fetch_news.py 里。
+[Unit]
+Description=A股观察台 · 新闻库增量抓取 (fetch_news.py)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=astock
+Group=astock
+WorkingDirectory=/opt/astock
+EnvironmentFile=-/opt/astock/.env
+Environment="ASTOCK_ENV=production"
+Environment="TZ=Asia/Shanghai"
+Environment="PATH=/opt/astock/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/opt/astock/.venv/bin/python3 fetch_news.py
+Nice=10
+TimeoutStartSec=1800
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/astock/data
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+RestrictSUIDSGID=true
+MemoryMax=400M

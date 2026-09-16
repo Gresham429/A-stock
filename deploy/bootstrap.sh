@@ -123,7 +123,7 @@ fi
 # ── 4. 执行部署 ──────────────────────────────────────────────────────────────
 say "4/4  在服务器上执行部署"
 echo "  deploy.sh 会：装依赖、设时区、建不可登录的 astock 账号、建 venv、设权限、"
-echo "  装两个 systemd 服务、配 ufw。幂等，可重复跑。"
+echo "  装 systemd 服务（web / scheduler / 新闻抓取 timer）、配 ufw。幂等，可重复跑。"
 ask "开始？" || die "已退出。代码已经在服务器上了，你可以随时手动跑：
   ssh $HOST 'sudo bash $APP_DIR/deploy/deploy.sh'"
 

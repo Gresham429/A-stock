@@ -116,7 +116,7 @@ python3 app.py                      # 之后 http://127.0.0.1:5000 会先跳到 
 
 ### 1. 买机器
 
-2 核 2G 够用，系统选 Ubuntu 22.04。两个 systemd unit 的内存上限是 web 1200M +
+2 核 2G 够用，系统选 Ubuntu 22.04（20.04 也行，deploy.sh 会自动装 python3.10）。两个 systemd unit 的内存上限是 web 1200M +
 scheduler 600M，合计不超过 2G，就是按这个机型配的；换 4G 机器的话可以把两个
 `MemoryMax` 都放大一倍。盘至少 40G：新闻库和板块日线是按天累积的。
 
@@ -182,7 +182,9 @@ scp data/agents.db aliyun_ecs:~/ \
 
 `deploy.sh` 会装依赖（`requirements.txt` + `deploy/requirements-server.txt`）、
 设时区、建不可登录的 `astock` 系统账号、建 venv、生成 `ASTOCK_SECRET_KEY`、
-设权限、装两个 systemd 服务、配 ufw、自检。幂等，可重复跑。
+设权限、装 systemd 服务（web、scheduler，以及每天五次触发 `fetch_news.py` 的 `astock-news.timer`，
+时刻同本地 launchd：08:40 / 11:40 / 14:00 / 15:30 / 20:30，非交易日只有晚间那次真抓）、配 ufw、自检。
+幂等，可重复跑。系统 python3 低于 3.10（Ubuntu 20.04 是 3.8）时会从 deadsnakes 装 python3.10 单独建 venv，不动系统 python。
 
 权限规则集中在 `deploy/fix_perms.sh`，`deploy.sh`、`push.sh` 和 MCP 的 `astock_push`
 都调它，三处不会各改各的：

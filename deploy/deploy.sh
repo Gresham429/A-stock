@@ -27,7 +27,24 @@ if command -v apt-get >/dev/null; then
 else
   yum install -y -q python3 python3-pip sqlite curl rsync >/dev/null
 fi
-ok "python3 $(python3 -V 2>&1 | cut -d' ' -f2) / sqlite3 $(sqlite3 --version | cut -d' ' -f1)"
+# 代码用了 zoneinfo 与 3.10 语法。Ubuntu 20.04 自带 3.8，这种情况从 deadsnakes 装 3.10
+# 单独放着，不动系统的 python3（其它服务可能依赖它）。
+PYBIN=python3
+if python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'; then
+  ok "python3 $(python3 -V 2>&1 | cut -d' ' -f2) / sqlite3 $(sqlite3 --version | cut -d' ' -f1)"
+elif command -v python3.10 >/dev/null; then
+  PYBIN=python3.10
+  ok "系统 python3 过旧，用已有的 python3.10 / sqlite3 $(sqlite3 --version | cut -d' ' -f1)"
+elif command -v apt-get >/dev/null; then
+  apt-get install -y -qq software-properties-common >/dev/null
+  add-apt-repository -y ppa:deadsnakes/ppa >/dev/null 2>&1
+  apt-get update -qq
+  apt-get install -y -qq python3.10 python3.10-venv python3.10-distutils >/dev/null
+  PYBIN=python3.10
+  ok "系统 python3 $(python3 -V 2>&1 | cut -d' ' -f2) 过旧，已从 deadsnakes 装 python3.10 / sqlite3 $(sqlite3 --version | cut -d' ' -f1)"
+else
+  echo "需要 Python >= 3.10，系统只有 $(python3 -V 2>&1)，请先手动安装"; exit 1
+fi
 
 say "2/9 时区"
 # 限流日预算、交易日判断、复盘文件名都按北京时间算。systemd unit 里已钉了
@@ -48,8 +65,13 @@ else
 fi
 
 say "4/9 Python 虚拟环境"
+# venv 若是旧解释器建的（比如系统 3.8），推倒重建；pip 缓存不进 venv，代价只是重装 flask+gunicorn
+if [ -x "$PY" ] && ! "$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'; then
+  warn "现有 venv 是 $("$PY" -V 2>&1)，重建为 $($PYBIN -V 2>&1)"
+  rm -rf "$APP_DIR/.venv"
+fi
 if [ ! -x "$PY" ]; then
-  python3 -m venv "$APP_DIR/.venv"
+  "$PYBIN" -m venv "$APP_DIR/.venv"
 fi
 "$APP_DIR/.venv/bin/pip" install -q --upgrade pip
 # 依赖以仓库里的两个清单为准：requirements.txt 是应用本身的，
@@ -81,10 +103,14 @@ bash "$APP_DIR/deploy/fix_perms.sh"
 say "7/9 systemd 服务"
 cp "$APP_DIR/deploy/astock-web.service"       /etc/systemd/system/
 cp "$APP_DIR/deploy/astock-scheduler.service" /etc/systemd/system/
+cp "$APP_DIR/deploy/astock-news.service"      /etc/systemd/system/
+cp "$APP_DIR/deploy/astock-news.timer"        /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now astock-web astock-scheduler >/dev/null 2>&1 || true
+# 新闻库增量抓取：timer 每天五次触发 oneshot 单元（时刻同本地 launchd）
+systemctl enable --now astock-news.timer >/dev/null 2>&1 || true
 sleep 3
-for s in astock-web astock-scheduler; do
+for s in astock-web astock-scheduler astock-news.timer; do
   if systemctl is-active --quiet "$s"; then ok "$s 运行中"
   else warn "$s 未启动 —— 看日志：journalctl -u $s -n 50 --no-pager"; fi
 done

@@ -29,23 +29,31 @@ if command -v apt-get >/dev/null; then
 else
   yum install -y -q python3 python3-pip sqlite curl rsync >/dev/null
 fi
-# 代码用了 zoneinfo 与 3.10 语法。Ubuntu 20.04 自带 3.8，这种情况从 deadsnakes 装 3.10
-# 单独放着，不动系统的 python3（其它服务可能依赖它）。
+# 代码用了 zoneinfo 与 3.10 语法。Ubuntu 20.04 自带 3.8，这种情况用 Miniconda 在
+# $APP_DIR/.venv 建一个 python3.10 环境（目录布局和 venv 一样：bin/python3、bin/pip，
+# systemd 单元和其它脚本不用改）。不走 deadsnakes PPA：launchpad 在国内机器上
+# 经常拉不到索引。Miniconda 装在 /opt/miniconda3，只用来建这一个环境。
 PYBIN=python3
+USE_CONDA=0
 if python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'; then
   ok "python3 $(python3 -V 2>&1 | cut -d' ' -f2) / sqlite3 $(sqlite3 --version | cut -d' ' -f1)"
 elif command -v python3.10 >/dev/null; then
   PYBIN=python3.10
   ok "系统 python3 过旧，用已有的 python3.10 / sqlite3 $(sqlite3 --version | cut -d' ' -f1)"
-elif command -v apt-get >/dev/null; then
-  apt-get install -y -qq software-properties-common >/dev/null
-  add-apt-repository -y ppa:deadsnakes/ppa >/dev/null 2>&1
-  apt-get update -qq || warn "apt-get update 有源失败，继续"
-  apt-get install -y -qq python3.10 python3.10-venv python3.10-distutils >/dev/null
-  PYBIN=python3.10
-  ok "系统 python3 $(python3 -V 2>&1 | cut -d' ' -f2) 过旧，已从 deadsnakes 装 python3.10 / sqlite3 $(sqlite3 --version | cut -d' ' -f1)"
 else
-  echo "需要 Python >= 3.10，系统只有 $(python3 -V 2>&1)，请先手动安装"; exit 1
+  USE_CONDA=1
+  CONDA_DIR="${ASTOCK_CONDA_DIR:-/opt/miniconda3}"
+  if [ ! -x "$CONDA_DIR/bin/conda" ]; then
+    # 国内机器先试清华镜像，不通再回官方
+    for u in https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh \
+             https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh; do
+      curl -fsSL -m 600 "$u" -o /tmp/miniconda.sh && break
+    done
+    [ -s /tmp/miniconda.sh ] || { echo "Miniconda 安装包下载失败"; exit 1; }
+    bash /tmp/miniconda.sh -b -p "$CONDA_DIR" >/dev/null
+    rm -f /tmp/miniconda.sh
+  fi
+  ok "系统 python3 $(python3 -V 2>&1 | cut -d' ' -f2) 过旧，用 Miniconda（$CONDA_DIR）建 3.10 环境 / sqlite3 $(sqlite3 --version | cut -d' ' -f1)"
 fi
 
 say "2/9 时区"
@@ -73,12 +81,21 @@ if [ -x "$PY" ] && ! "$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3,
   rm -rf "$APP_DIR/.venv"
 fi
 if [ ! -x "$PY" ]; then
-  "$PYBIN" -m venv "$APP_DIR/.venv"
+  if [ "$USE_CONDA" = 1 ]; then
+    "$CONDA_DIR/bin/conda" create -y -q -p "$APP_DIR/.venv" python=3.10 \
+      --override-channels -c https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main >/dev/null 2>&1 \
+      || "$CONDA_DIR/bin/conda" create -y -q -p "$APP_DIR/.venv" python=3.10 >/dev/null
+  else
+    "$PYBIN" -m venv "$APP_DIR/.venv"
+  fi
 fi
-"$APP_DIR/.venv/bin/pip" install -q --upgrade pip
+# pip 源可用 ASTOCK_PIP_INDEX 指定（国内机器填 https://pypi.tuna.tsinghua.edu.cn/simple）
+PIP_OPTS=()
+[ -n "${ASTOCK_PIP_INDEX:-}" ] && PIP_OPTS=(-i "$ASTOCK_PIP_INDEX")
+"$APP_DIR/.venv/bin/pip" install -q "${PIP_OPTS[@]}" --upgrade pip
 # 依赖以仓库里的两个清单为准：requirements.txt 是应用本身的，
 # deploy/requirements-server.txt 只有服务器才需要的（gunicorn）。
-"$APP_DIR/.venv/bin/pip" install -q -r "$APP_DIR/requirements.txt" -r "$APP_DIR/deploy/requirements-server.txt"
+"$APP_DIR/.venv/bin/pip" install -q "${PIP_OPTS[@]}" -r "$APP_DIR/requirements.txt" -r "$APP_DIR/deploy/requirements-server.txt"
 ok "依赖就绪（requirements.txt + deploy/requirements-server.txt）"
 
 say "5/9 配置文件"

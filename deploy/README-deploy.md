@@ -188,7 +188,7 @@ scp data/agents.db aliyun_ecs:~/ \
 设时区、建不可登录的 `astock` 系统账号、建 venv、生成 `ASTOCK_SECRET_KEY`、
 设权限、装 systemd 服务（web、scheduler，以及每天五次触发 `fetch_news.py` 的 `astock-news.timer`，
 时刻同本地 launchd：08:40 / 11:40 / 14:00 / 15:30 / 20:30，非交易日只有晚间那次真抓）、配 ufw、自检。
-幂等，可重复跑。系统 python3 低于 3.10（Ubuntu 20.04 是 3.8）时会从 deadsnakes 装 python3.10 单独建 venv，不动系统 python。
+幂等，可重复跑。系统 python3 低于 3.10（Ubuntu 20.04 是 3.8）时用 Miniconda（清华镜像）在 .venv 位置建 3.10 环境，不动系统 python；pip 源用 ASTOCK_PIP_INDEX 指定。
 
 权限规则集中在 `deploy/fix_perms.sh`，`deploy.sh`、`push.sh` 和 MCP 的 `astock_push`
 都调它，三处不会各改各的：

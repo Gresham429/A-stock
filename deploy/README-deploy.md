@@ -13,7 +13,7 @@
 | 风险 | 具体是什么 | 这套方案怎么挡 |
 |---|---|---|
 | **API key 被烧光** | 每日推荐、全市场选股、`/api/agents/run_all` 这些接口都能无限制触发 DeepSeek。`v4-pro` 是推理模型，一个循环脚本一夜能把余额清零，而且你第二天才发现 | `ratelimit.py`：每人日预算 + 全站日预算 + 最小调用间隔。计数落 sqlite，多 worker 下依然精确。计费点在真实的 DeepSeek 调用处，不在 HTTP 路由上（见「额度怎么调」） |
-| **任何人可读可写** | 阿里云公网 IP 上线几分钟内就会被扫到，5000 是重点端口。持仓、笔记、模拟盘全部可读可删 | `auth.py`：`before_request` 全局闸门，默认全关、白名单只有 `/login` `/static` `/healthz`。新增路由不会因为忘了加装饰器而裸奔 |
+| **任何人可读可写** | 阿里云公网 IP 上线几分钟内就会被扫到，5000 是重点端口。持仓、笔记、模拟盘全部可读可删 | `auth.py`：`before_request` 全局闸门，默认全关、白名单只有 `/login` `/logout` `/healthz` 三个路径，另加 `/static/` 前缀。新增路由不会因为忘了加装饰器而裸奔 |
 | **数据串台** | `watchlist.json`、`portfolio.json`、`data/*.db` 都是全局一份，朋友加的自选股会出现在你的看板，他的持仓成本你看得见 | `userctx.py`：个人数据隔离到 `data/users/<用户名>/`，公共数据（行情/新闻/全市场池/因子/复盘）继续共享 |
 | **进程被拖死** | Werkzeug 开发服务器无并发控制、无超时、暴露版本号；后台线程跟着 web 进程跑，多 worker 会重复决策、重复下单 | gunicorn（gthread）+ 定时任务拆成独立的 `scheduler.py` 单实例进程 |
 
@@ -27,88 +27,21 @@
 
 ## 二、多用户版是怎么做的
 
-多用户改造已经提交在代码里（分支 `multiuser`，之后合入 `main`），不再有单独的
-补丁步骤。相关模块：
-
-```
-userctx.py       当前用户上下文 + 个人数据目录解析 + 跨线程/线程池传播 + 舰队站长
-auth.py          账号 / 密码 / 服务端会话 / 全局闸门 / 安全响应头
-ratelimit.py     按人限流 + AI 日预算（计费点在 llm._chat）+ token 记账
-scheduler.py     独立调度进程（复盘 / 公共数据回填 / 清理；agent 自动跑默认关）
-wsgi.py          gunicorn 入口
-astockctl.py     账号与用量管理命令行
-templates/login.html
-```
-
-各个人数据 store（自选股、持仓、画像、笔记、规则、模拟盘、agent）的库路径按当前
-登录用户解析；公共 store 路径不变、连接走 `userctx.open_db` 开 WAL。
-
-### 为什么用"一人一个 sqlite"而不是"表里加 user_id"
-
-加 `user_id` 列要改每一条 SQL、每一个函数签名、每一个调用点，在这个体量的
-既有代码上风险很高，而且很容易漏掉一两处 `WHERE`，那种漏法恰恰是最糟的
-（数据串台且无声）。改路径解析只动了每个 store 里算路径的那几行。
-
-在几个人的规模下，一人一个文件顺带还是优点：互不锁表、可以单独备份某个人、
-删号就是删一个目录。
-
-### 公共 vs 个人
+机制（用户隔离、舰队归属、计费点、时区）见仓库根 `CLAUDE.md`「多用户与部署」节。
+这里只列数据边界：
 
 | | 内容 | 位置 |
 |---|---|---|
-| 公共 | 新闻库、全市场池、因子回测、提示词模板、每日复盘、账号与用量 | `data/` |
-| 个人 | 自选股、持仓、投资画像、私域笔记、交易规则、模拟盘 | `data/users/<用户名>/` |
-| 舰队 | 20 个 agent、模拟账户、教训、journal | `data/users/<站长>/`，全站只此一套 |
+| 公共 | 新闻库、全市场池、因子回测、提示词模板、每日复盘、账号与用量、三周期选股账本 `picks_public.db` | `data/` |
+| 个人 | 自选股、持仓、投资画像、私域笔记、交易规则、模拟盘、自选股买卖点账本 `picks.db` | `data/users/<用户名>/` |
 
 全市场池按人复制既费盘也没意义，而且重复抓取会更快吃到东财的 IP 风控。
-
-### agent 舰队 = 站长的数据
-
-全站只有一套 agent 舰队，它属于「站长」这个账号：
-
-- 站长由 `.env` 里的 `ASTOCK_FLEET_OWNER` 指定；留空则取 users 表里创建最早的管理员。
-  一般就是你自己，`adduser <你> --admin` 之后不用再配：服务先起来也没关系，进程最多
-  1 分钟内会自动认出新建的管理员，不用重启。站长一旦选定就不变（停用他也不换），
-  要换只能填 `ASTOCK_FLEET_OWNER` 再重启；填了不存在的账号，启动日志会报 error。
-- 所有登录用户都能看舰队的战绩、教训、house-view（GET 路由）；建/改/删 agent、
-  手动跑 `run` / `run_all` 只允许管理员或站长本人，其他人返回 403。
-- 舰队代码路径（agent 日循环、教训块、regime-view）永远在站长上下文里跑，其他账号
-  自己目录里的 agents.db 保持为空。
-
-### 服务器上 agent 不自动跑
-
-本地 `python3 app.py` 维持原来的行为：开着 app 就按盘中时段桶自动跑舰队。
-
-服务器上默认不跑（保留「不开 app 就不炒股」）：`scheduler.py` 只做复盘、公共数据
-回填和清理；舰队只在站长手动点 `run` / `run_all` 时跑。真要让服务器自动跑，在
-`.env` 里设 `ASTOCK_AGENT_AUTO=1` 并重启 `astock-scheduler`。
-
-### 时区
-
-限流的日期键、交易日判断、复盘落盘文件名都按北京时间算。两个 systemd unit 里
-钉了 `Environment=TZ=Asia/Shanghai`，`deploy.sh` 也会把系统时区设成
-`Asia/Shanghai`（`timedatectl` 不可用时跳过，服务进程仍由 unit 里的 TZ 兜底）。
 
 ---
 
 ## 三、本地也要初始化一次
 
-多用户版在本地同样要登录。第一次跑之前敲两条命令，建自己的账号并把现有的
-自选股/持仓/笔记迁到自己的目录：
-
-```bash
-python3 astockctl.py adduser <你的用户名> --admin
-python3 deploy/migrate_to_multiuser.py <你的用户名>
-python3 app.py                      # 之后 http://127.0.0.1:5000 会先跳到 /login
-```
-
-顺序不能反：migrate 要在第一次登录之前跑。登录（或调度进程的清理任务）会在你的目录里
-先建出一批空库，migrate 看到目标已存在就跳过，你的舰队和笔记会被空库顶掉。真发生了，
-加 `--force` 重跑一次就行（脚本在全部跳过时会以非零退出并提示）。`ASTOCK_FLEET_OWNER`
-也等 migrate 跑完再填。
-
-本地裸 http 调试时 cookie 不能带 Secure 标记：本地 `.env` 不设 `ASTOCK_ENV=production`
-即可（默认不是）。
+本地用法见仓库根 `README.md`「部署（本地 macOS · 四步）」节。
 
 ---
 
@@ -116,9 +49,10 @@ python3 app.py                      # 之后 http://127.0.0.1:5000 会先跳到 
 
 ### 1. 买机器
 
-2 核 2G 够用，系统选 Ubuntu 22.04（20.04 也行，deploy.sh 会自动装 python3.10）。两个 systemd unit 的内存上限是 web 1200M +
-scheduler 600M，合计不超过 2G，就是按这个机型配的；换 4G 机器的话可以把两个
-`MemoryMax` 都放大一倍。盘至少 40G：新闻库和板块日线是按天累积的。
+2 核 2G 够用，系统选 Ubuntu 22.04（20.04 也行，deploy.sh 会自动装 python3.10）。三个 systemd
+service 各自的内存上限（`deploy/*.service` 里的 `MemoryMax`）：web 1200M、scheduler 600M、
+news 400M（news 是 oneshot，每天五次短跑，不常与另外两个同时顶格）。换 4G 机器的话可以把
+这几个 `MemoryMax` 都放大一倍。盘至少 40G：新闻库和板块日线是按天累积的。
 
 **安全组只放行 22，且限制来源 IP**（阿里云控制台，实例，安全组，入方向）：
 
@@ -186,23 +120,22 @@ scp data/agents.db aliyun_ecs:~/ \
 
 `deploy.sh` 会装依赖（`requirements.txt` + `deploy/requirements-server.txt`）、
 设时区、建不可登录的 `astock` 系统账号、建 venv、生成 `ASTOCK_SECRET_KEY`、
-设权限、装 systemd 服务（web、scheduler，以及每天五次触发 `fetch_news.py` 的 `astock-news.timer`，
-时刻同本地 launchd：08:40 / 11:40 / 14:00 / 15:30 / 20:30，非交易日只有晚间那次真抓）、配 ufw、自检。
+设权限、装 systemd 单元（三个 service 加一个 timer）、配 ufw、自检：
+
+- `astock-web`：gunicorn。
+- `astock-scheduler`：公共预热（新闻库/全市场池/复盘）、每日 housekeeping（过期会话/旧用量/
+  舰队库清理）、三周期选股与各账号自选股买卖点的定时批（交易日 16:00 全量、09:05 短线）；
+  agent 自动跑默认关（`ASTOCK_AGENT_AUTO=0`）。
+- `astock-news.service`（oneshot）+ `astock-news.timer`：定时触发 `fetch_news.py` 做新闻库增量抓取，
+  时刻同本地 launchd：08:40 / 11:40 / 14:00 / 15:30 / 20:30，非交易日只有晚间那次真抓。
+
 幂等，可重复跑。系统 python3 低于 3.10（Ubuntu 20.04 是 3.8）时用 Miniconda（清华镜像）在 .venv 位置建 3.10 环境，不动系统 python；pip 源用 ASTOCK_PIP_INDEX 指定。
 
-权限规则集中在 `deploy/fix_perms.sh`，`deploy.sh`、`push.sh` 和 MCP 的 `astock_push`
-都调它，三处不会各改各的：
+权限规则集中在 `deploy/fix_perms.sh` 头注释，`deploy.sh`、`push.sh` 和 MCP 的 `astock_push`
+都调这一份脚本，三处不会各改各的。
 
-| 路径 | 属主 | 权限 | 为什么 |
-|---|---|---|---|
-| `/opt/astock` 代码 | `root:astock` | 去掉组/其他写位 | 应用进程改不了自己的代码；被攻破也无法植入后门等下次重启 |
-| `data/` | `astock:astock` | 700 | 所有人的持仓和笔记，只有应用账号能进 |
-| `.env` | `root:astock` | 640 | systemd 以 root 读 `EnvironmentFile`，`config.py` 由 `astock` 进程读，其他账号读不到。不能是 600：那样 `astock` 进程读不到 key |
-| `deploy/` | `root:root` | 755 | 里面的脚本会被 root 执行，切断「应用被攻破后改 deploy.sh 再等 root 执行」这条提权链 |
-| `/var/backups/astock` | `astock:astock` | 700 | `backup.sh` 以 `astock` 身份跑 |
-
-两个 systemd unit 的 `ReadWritePaths` 也只放 `/opt/astock/data`（AI 缓存 `ai_cache.json` 也在 data/ 下），
-文件系统其余部分对进程只读。
+三个 service 单元（web / scheduler / news）的 `ReadWritePaths` 都只放 `/opt/astock/data`
+（AI 缓存 `ai_cache.json` 也在 data/ 下），文件系统其余部分对进程只读。
 
 跑完之后你不能再直接 rsync 进 `/opt/astock` 了。后续更新一律用
 `deploy/push.sh`（见「日常运维」），它走暂存区中转，不需要给 rsync 配免密 sudo。
@@ -358,10 +291,10 @@ echo '30 23 * * * sudo -u astock /opt/astock/deploy/backup.sh >> /var/log/astock
   | sudo crontab -
 ```
 
-以 `astock` 身份跑：它只读得到 `data/` 和 `.env`，备份脚本本身被攻破也拿不到 root。
-备份目录 `/var/backups/astock` 由 `deploy.sh` 建好并归 `astock`（700）。
-备份包里有 `.env`（含 API key）和所有人的持仓，所以文件权限是 600。
-本机快照挡不住"机器被删"和"误删整个目录"，有条件请配 OSS 异地：
+以 `astock` 身份跑的原因、备份目录、文件权限见 `deploy/backup.sh` 头注释。
+默认保留最近 14 天、目录 `/var/backups/astock`，可在 `.env` 里用
+`ASTOCK_BACKUP_KEEP`／`ASTOCK_BACKUP_DIR` 覆盖。本机快照挡不住"机器被删"和
+"误删整个目录"，有条件请配 OSS 异地：
 
 ```bash
 # 装 ossutil 并配好 config 后，在 .env 里加：

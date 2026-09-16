@@ -1,7 +1,8 @@
 # 设计：全板块两级选股 + 大盘局势研判
 
+状态：候选池方案已被 2026-07-15-full-market-universe-design.md 取代；大盘研判条与选股口径仍有效
+
 - 日期：2026-07-13
-- 状态：✅ 已实现并本地实测通过（feat/all-sector-screening 分支，未提交）
 - 影响文件：`universe.py`（重写）、`datasources.py`（+大盘源）、`llm.py`（+大盘研判/增强选股）、`app.py`（+大盘接口/加宽选股）、`templates/index.html`、`static/app.js`
 
 ## 1. 目标
@@ -43,8 +44,8 @@ MARKET_UNIVERSE: dict[str, dict[str, list[tuple[str, str]]]]
 - `all_codes() -> list[str]`：全池去重保序。
 - `primary_sectors() -> list[str]`：全部一级名。
 - `sub_sectors(primary: str) -> list[str]`：某一级下的二级名。
-- `codes_of(focus: str) -> list[str]`：focus 为一级名→该一级全部；为二级名→该二级；为 `""`→全池。
-- `sector_of(code: str) -> tuple[str, str]`：代码→(一级, 二级)，找不到返回 `("其他","其他")`。
+- `codes_of(focus: str) -> list[str]`：focus 为一级名时返回该一级全部；为二级名时返回该二级；为 `""` 时返回全池。
+- `sector_of(code: str) -> tuple[str, str]`：输入代码，输出 (一级, 二级)，找不到返回 `("其他","其他")`。
 - `taxonomy() -> dict[str, list[str]]`：`{一级: [二级...]}`，供前端下拉与 `/api/config`。
 
 > **破坏性变更**：`sector_of` 返回类型由 `str` 改为 `tuple`。调用点在 `app.py:_screen_rows`（290、301 行）与 `llm.market_screen` 的行数据，需同步改。旧的 `sectors()` 语义变为 `primary_sectors()`，保留 `sectors()` 作别名以防遗漏调用。
@@ -59,12 +60,12 @@ MARKET_UNIVERSE: dict[str, dict[str, list[tuple[str, str]]]]
 
 ### `market_breadth() -> dict | None`
 - 源：东财，走 `em_get()` 限流。取 涨家数 / 跌家数 / 涨停数 / 跌停数 / 两市成交额。
-- **失败或被封→返回 `None`，绝不阻断**（大盘研判在缺情绪数据时降级为「仅指数」）。
+- **失败或被封时返回 `None`，绝不阻断**（大盘研判在缺情绪数据时降级为「仅指数」）。
 
 ## 4. AI 层：`llm.py`
 
 ### 全局：温度 0.15 + 更强 system 提示
-- `_chat` 默认 `temperature` 由 0.3 → **0.15**，所有分析型调用（daily / position / screen / overview）统一继承，不再逐个覆盖。
+- `_chat` 默认 `temperature` 由 0.3 降到 **0.15**，所有分析型调用（daily / position / screen / overview）统一继承，不再逐个覆盖。
 - `_DISCLAIMER` 强化：只依据给定客观数据、不得编造未提供数字、只描述波动幅度不预测方向、所有结论标注「参考信号，不构成投资建议」。
 
 ### 新增 `market_overview(indices, breadth, web_context="") -> dict`
@@ -109,9 +110,9 @@ MARKET_UNIVERSE: dict[str, dict[str, list[tuple[str, str]]]]
 ### 改 `POST /api/recommend/screen`
 - `focus` 支持一级/二级；调 `market_screen` 前先取（缓存的）大盘 ctx 注入。
 - `_screen_rows(capital, focus)` 采样策略：
-  - focus=二级 → 只取该二级的 `codes_of`；
-  - focus=一级 → 该一级下各二级均衡采样；
-  - focus="" 全市场 → 跨一级均衡采样，**总量 cap 由 28 抬到 36**（控 token/时延；每只成本 = 1 次腾讯批量 + 1 次新浪 metrics）。
+  - focus=二级 时只取该二级的 `codes_of`；
+  - focus=一级 时该一级下各二级均衡采样；
+  - focus="" 全市场时跨一级均衡采样，**总量 cap 由 28 抬到 36**（控 token/时延；每只成本 = 1 次腾讯批量 + 1 次新浪 metrics）。
 - 行数据 `sector` 字段改为 `primary/sub` 两列。
 
 ## 6. 前端：`templates/index.html` + `static/app.js`
@@ -124,7 +125,7 @@ MARKET_UNIVERSE: dict[str, dict[str, list[tuple[str, str]]]]
 ### 板块下拉两级化
 - `scr_focus` 单个 `<select>` 用 `<optgroup label="一级板块">`：一级作分组标题，二级作选项；每个一级也提供「整个X板块」可选项；保留「不限（全市场）」。
 - 扩展 `/api/config` 增加 `taxonomy` 字段，前端据此动态渲染分组下拉，避免硬编码板块名。
-- 文案「从 44 只科技股」→「从全市场 N 只候选跨板块筛选」。
+- 文案「从 44 只科技股」改为「从全市场 N 只候选跨板块筛选」。
 - 选股结果卡片展示 `primary/sub` 两级标签。
 
 ## 7. 配色/约定（沿用）
@@ -134,9 +135,9 @@ MARKET_UNIVERSE: dict[str, dict[str, list[tuple[str, str]]]]
 ## 8. 验证（改完自测）
 ```bash
 python app.py &
-curl -s localhost:5000/api/config
-curl -s "localhost:5000/api/market/overview" | head -c 400      # 指数+大盘研判
-curl -s -XPOST localhost:5000/api/recommend/screen -H 'Content-Type: application/json' \
+curl -s 127.0.0.1:5000/api/config
+curl -s "127.0.0.1:5000/api/market/overview" | head -c 400      # 指数+大盘研判
+curl -s -XPOST 127.0.0.1:5000/api/recommend/screen -H 'Content-Type: application/json' \
      -d '{"capital":10000,"focus_sector":"锂电池"}' --max-time 200   # 二级下钻
 python3 -c "import ast;[ast.parse(open(f).read()) for f in ['universe.py','datasources.py','llm.py','app.py']]"
 node --check static/app.js
@@ -144,7 +145,7 @@ node --check static/app.js
 - 语法检查全过；`/api/market/overview` 在无东财 breadth 时仍返回指数与 AI；二级下钻只在该二级内选股；大盘 regime 出现在选股 overall。
 
 ## 9. 风险 / 限制
-- 东财 `market_breadth` 可能间歇封锁 → 已设计降级不阻断。
+- 东财 `market_breadth` 可能间歇封锁，已设计降级不阻断。
 - 全市场精选池需人工维护、覆盖有限（非全量）；`name` 仅兜底。
 - 指数字段下标需按腾讯实际返回校准（实现时用 a-stock-data 核对）。
 - 两处破坏性变更：`sector_of` 返回 tuple、`_screen_rows` 行结构 primary/sub——需同步改所有调用点，避免 KeyError。

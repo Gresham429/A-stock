@@ -24,6 +24,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import config      # noqa: E402,F401  先加载 .env，否则 usage/whoami 打印的是代码默认值
 import auth        # noqa: E402
 import ratelimit   # noqa: E402
 import userctx     # noqa: E402
@@ -67,21 +68,27 @@ def cmd_passwd(a: argparse.Namespace) -> None:
     print(f"{a.uid} 的密码已更新，其所有登录会话已失效（需要重新登录）")
 
 
+def _require_user(uid: str) -> None:
+    """auth.set_disabled 对不存在的 uid 是空 UPDATE、不报错，这里先查一次，别假成功。"""
+    if auth.get_user(uid) is None:
+        raise ValueError(f"用户 {uid} 不存在")
+
+
 def cmd_disable(a: argparse.Namespace) -> None:
+    _require_user(a.uid)
     auth.set_disabled(a.uid, True)
     print(f"{a.uid} 已停用，在线会话已踢掉。数据目录保留，用 enable 可随时恢复")
 
 
 def cmd_enable(a: argparse.Namespace) -> None:
+    _require_user(a.uid)
     auth.set_disabled(a.uid, False)
     print(f"{a.uid} 已启用")
 
 
 def cmd_kick(a: argparse.Namespace) -> None:
     """只踢会话不停号——朋友手机丢了但人还在用的场景。"""
-    import sqlite3  # noqa: F401  (auth 内部用)
-    with auth._conn() as c:                      # noqa: SLF001 管理脚本，直接用内部连接
-        n = c.execute("DELETE FROM sessions WHERE uid=?", (a.uid,)).rowcount
+    n = auth.kick(a.uid)
     print(f"已踢掉 {a.uid} 的 {n} 个登录会话")
 
 
@@ -119,6 +126,8 @@ def cmd_whoami(a: argparse.Namespace) -> None:
     print(f"用户数据目录  : {userctx.USERS_DIR}")
     print(f"账号数        : {len(auth.list_users())}")
     print(f"磁盘上的用户  : {', '.join(userctx.list_uids()) or '（无）'}")
+    print(f"舰队站长      : {auth.fleet_uid_hint() or '未设置'}"
+          "  （ASTOCK_FLEET_OWNER 优先，否则最早创建的管理员）")
     print(f"会话有效期    : {auth.SESSION_DAYS} 天")
     print(f"Secure cookie : {auth.COOKIE_SECURE}  （走 https 时必须为 True）")
     print(f"AI 每人/天    : {ratelimit.AI_PER_USER_DAY}")

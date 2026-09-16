@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import random
 import re
 import time
@@ -27,7 +28,10 @@ logger = logging.getLogger(__name__)
 
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 EM_MIN_INTERVAL = 1.0  # 东财两次请求最小间隔(秒)
-_em_last_call = [0.0]
+# 节流时间戳落盘，让 gunicorn 两个 worker + scheduler 三个进程共享同一个最小间隔
+# （进程内变量各进程一份，实际请求速率会翻倍，东财已因此封过 clist）。
+_EM_TS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", ".em_last_call")
+_em_last_call = [0.0]  # 文件不可用时的进程内回退
 
 
 # ── 基础 helper ──────────────────────────────────────────────────────────
@@ -67,19 +71,84 @@ def _http_get(url: str, ref: str | None = None, gbk: bool = False,
     return raw.decode("gbk" if gbk else "utf-8", "ignore")
 
 
-def em_get(url: str, ref: str = "https://data.eastmoney.com/",
-           timeout: int = 20) -> str:
-    """东财统一请求入口：串行限流 + 随机抖动，避免被风控封 IP。"""
-    wait = EM_MIN_INTERVAL - (time.time() - _em_last_call[0])
+def _em_sleep(last: float) -> None:
+    """距上次东财调用不足最小间隔就睡够，外加随机抖动。"""
+    wait = EM_MIN_INTERVAL - (time.time() - last)
     if wait > 0:
         time.sleep(wait + random.uniform(0.1, 0.4))
+
+
+def _em_locked(fn: Any) -> bool:
+    """在 data/.em_last_call 的 fcntl 排他锁下执行 fn(fh)。
+
+    文件不存在则创建（读到空视为 0）。任何 OSError（无 fcntl、目录只读、
+    锁失败）返回 False，调用方退回进程内旧行为。
+    """
+    try:
+        import fcntl
+        os.makedirs(os.path.dirname(_EM_TS_FILE), exist_ok=True)
+        with open(_EM_TS_FILE, "a+", encoding="utf-8") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            try:
+                fn(fh)
+            finally:
+                fcntl.flock(fh, fcntl.LOCK_UN)
+        return True
+    except (OSError, ImportError) as e:
+        logger.debug("东财节流文件不可用，退回进程内节流: %s", e)
+        return False
+
+
+def _em_read_ts(fh: Any) -> float:
+    fh.seek(0)
+    raw = fh.read().strip()
+    try:
+        return float(raw) if raw else 0.0
+    except ValueError:
+        return 0.0
+
+
+def _em_write_ts(fh: Any, ts: float) -> None:
+    fh.seek(0)
+    fh.truncate()
+    fh.write(f"{ts:.3f}")
+    fh.flush()
+
+
+def _em_wait_slot() -> None:
+    """占一个东财请求槽：锁内读上次时刻、睡够间隔、写入本次时刻。
+
+    睡眠在锁内，所以另一个进程/线程此时读到的已是本次的时刻，不会俩一起放行。
+    """
+    def _body(fh: Any) -> None:
+        _em_sleep(_em_read_ts(fh))
+        now = time.time()
+        _em_write_ts(fh, now)
+        _em_last_call[0] = now
+
+    if not _em_locked(_body):
+        _em_sleep(_em_last_call[0])
+        _em_last_call[0] = time.time()
+
+
+def _em_mark_done() -> None:
+    """请求结束再记一次时刻：与旧逻辑一致，间隔从上一次请求结束算起。"""
+    now = time.time()
+    _em_last_call[0] = now
+    _em_locked(lambda fh: _em_write_ts(fh, now))
+
+
+def em_get(url: str, ref: str = "https://data.eastmoney.com/",
+           timeout: int = 20) -> str:
+    """东财统一请求入口：串行限流（跨进程，见 _EM_TS_FILE）+ 随机抖动，避免被风控封 IP。"""
+    _em_wait_slot()
     try:
         req = urllib.request.Request(url)
         req.add_header("User-Agent", UA)
         req.add_header("Referer", ref)
         return urllib.request.urlopen(req, timeout=timeout).read().decode("utf-8", "ignore")
     finally:
-        _em_last_call[0] = time.time()
+        _em_mark_done()
 
 
 # ── 行情/估值（腾讯） ─────────────────────────────────────────────────────

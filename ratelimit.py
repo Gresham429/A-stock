@@ -9,10 +9,17 @@
 
 # 两类桶
 
-ai    —— 会调 LLM 的接口，花的是真钱。按人日限 + 全局日预算双重封顶。
-heavy —— 不花钱但会猛打东财/新浪（回填、回测、刷新全市场池）。这些接口被
-         刷会让服务器 IP 吃到数据源风控，全站深挖变「无数据」。README 里
-         你自己也记过东财限流这个坑。
+ai    —— 1 单位 = 1 次真实 DeepSeek 调用，花的是真钱。按人日限 + 全局日预算
+         双重封顶。计数点不在 HTTP 层而在 llm._chat：请求前 allow_llm() 做门，
+         成功返回后 record_ai_call() 计一次。这样 run_all 跑 20 个 agent 就记 20，
+         GET 路由、调度器、缓存未命中都算，缓存命中/失败/超时不算。before_request
+         里的 check() 对 ai 路径只做门（频率、最小间隔、预算是否已满），不计数。
+         没有用户上下文的调用（调度器、复盘）记在 "system" 名下；舰队代码路径
+         （as_fleet() 里跑的 agent，不论自动跑还是站长手动 run/run_all）记在 "fleet"
+         名下。这两个名字都只受全站预算约束，不占任何人的个人额度。
+heavy —— 不花钱但会猛打东财/新浪（回填、回测、刷新全市场池、新闻深挖）。这些接口
+         被刷会让服务器 IP 吃到数据源风控，全站深挖变「无数据」。仍按 HTTP 请求
+         次数在 check() 里计。
 
 # 计数放 sqlite 而不是内存
 
@@ -27,6 +34,7 @@ import threading
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from flask import Flask, g, jsonify, request
 
@@ -36,6 +44,9 @@ logger = logging.getLogger(__name__)
 
 DB_PATH = userctx.shared_path("usage.db")
 _LOCK = threading.Lock()
+_TZ = ZoneInfo("Asia/Shanghai")   # 日期键按北京时间切，与 agent_loop 一致；服务器时区无关
+SYSTEM_UID = "system"             # 无用户上下文的 LLM 调用记在这个名下
+FLEET_UID = "fleet"               # 舰队（as_fleet 里）的 LLM 调用记在这个名下，不占站长个人额度
 
 # ── 额度（都可以在 .env 里调） ────────────────────────────────────────────────
 AI_PER_USER_DAY = int(os.environ.get("ASTOCK_AI_PER_USER_DAY", "40"))
@@ -45,12 +56,11 @@ HEAVY_PER_USER_DAY = int(os.environ.get("ASTOCK_HEAVY_PER_USER_DAY", "20"))
 REQ_PER_MIN = int(os.environ.get("ASTOCK_REQ_PER_MIN", "180"))           # 每人每分钟总请求数
 
 # ── 哪些路径算哪个桶 ─────────────────────────────────────────────────────────
-# 只对写方法(POST/PUT/DELETE)计费——这些接口全是 POST 触发的。
+# 只看写方法(POST/PUT/DELETE)。ai 路径这里只做门、不计数（真实计数在 llm._chat）；
+# heavy 路径按请求计数。
 AI_PREFIXES = (
     "/api/recommend/",        # daily / position / entry / screen 全在下面
-    "/api/news/deepen",
     "/api/notes/structure",
-    "/api/rules/scenario",
     "/api/review/run",
 )
 AI_PATTERNS = ("/api/agents/run_all",)     # /api/agents/<id>/run 由下面的函数单独判
@@ -61,6 +71,7 @@ HEAVY_PREFIXES = (
     "/api/sectors/snapshot",
     "/api/factors/backtest",
     "/api/news/refresh",
+    "/api/news/deepen",       # 深挖打新闻源，不一定调 LLM，按重任务计
 )
 
 _SCHEMA = """
@@ -93,12 +104,23 @@ def init() -> None:
         c.executescript(_SCHEMA)
 
 
+def _now() -> datetime:
+    return datetime.now(_TZ)
+
+
 def _today() -> str:
-    return datetime.now().strftime("%Y-%m-%d")
+    return _now().strftime("%Y-%m-%d")
 
 
-def bucket_of(path: str, method: str) -> str:
-    """这个请求算哪个桶；不计费返回空串。"""
+def bucket_of(path: str, method: str, refresh: bool = False) -> str:
+    """这个请求算哪个桶；不计费返回空串。
+
+    唯一的 GET 例外：/api/market/overview?refresh=1 会绕过 ai_cache 直接调 v4-pro，
+    所以 refresh 为 True 时归 ai 桶（过最小间隔与前置预算门）；不带 refresh 的 GET
+    走缓存，仍不计。
+    """
+    if method == "GET" and path == "/api/market/overview" and refresh:
+        return "ai"
     if method in ("GET", "HEAD", "OPTIONS"):
         return ""
     if path in AI_PATTERNS or any(path.startswith(p) for p in AI_PREFIXES):
@@ -130,29 +152,65 @@ def _bump(day: str, uid: str, bucket: str, path: str) -> None:
         c.execute("INSERT INTO usage(day,uid,bucket,n) VALUES(?,?,?,1)"
                   " ON CONFLICT(day,uid,bucket) DO UPDATE SET n=n+1", (day, uid, bucket))
         c.execute("INSERT INTO calls(ts,uid,bucket,path) VALUES(?,?,?,?)",
-                  (datetime.now().isoformat(timespec="seconds"), uid, bucket, path[:120]))
+                  (_now().isoformat(timespec="seconds"), uid, bucket, path[:120]))
 
 
 def record_llm_tokens(uid: str, prompt: int, completion: int) -> None:
-    """给 llm.py 回调用：记下真实 token 消耗。
+    """给 llm.py 回调用：记下真实 token 消耗。uid 为空记在 system 名下。
 
     额度本身按「次数」封顶就够安全了，这张表是为了让你能看见钱花在谁身上、
     花在哪个模型上——出账单时不至于只能猜。
     """
-    if not uid:
-        return
     try:
         with _LOCK, _conn() as c:
             c.execute("INSERT INTO llm_tokens(day,uid,prompt,completion) VALUES(?,?,?,?)"
                       " ON CONFLICT(day,uid) DO UPDATE SET prompt=prompt+excluded.prompt,"
                       " completion=completion+excluded.completion",
-                      (_today(), uid, int(prompt or 0), int(completion or 0)))
+                      (_today(), uid or SYSTEM_UID, int(prompt or 0), int(completion or 0)))
     except Exception as e:  # noqa: BLE001 记账失败绝不能影响正常功能
         logger.debug("记录 token 用量失败: %s", e)
 
 
-def check(uid: str, path: str, method: str) -> tuple[bool, str, int]:
-    """返回 (是否放行, 给人看的原因, HTTP 状态码)。"""
+def allow_llm(uid: str) -> tuple[bool, str]:
+    """真实 LLM 调用前的预算门，llm._chat 发请求前调用。返回 (是否放行, 原因)。
+
+    全站日预算对所有调用生效（含调度器、agent、GET 路由）；个人日预算只对
+    有用户上下文的调用生效，uid 为空视作 system，uid 为 FLEET_UID 是舰队，
+    这两者都只受全站预算约束。
+    这道门在调用点而不是 HTTP 层，所以 README-deploy 里「全站预算同时约束
+    定时任务」才为真。只读不计数，计数在 record_ai_call()。
+    """
+    day = _today()
+    gn = _global_count(day, "ai")
+    if gn >= AI_GLOBAL_DAY:
+        return False, (f"今天全站 AI 调用已达上限 {AI_GLOBAL_DAY} 次，"
+                       f"北京时间 0 点重置（防止 API 余额被意外耗尽）")
+    if not uid or uid == FLEET_UID:
+        return True, ""
+    if _count(day, uid, "ai") >= AI_PER_USER_DAY:
+        return False, f"你今天的 AI 分析次数已用完（{AI_PER_USER_DAY} 次/天），北京时间 0 点重置"
+    return True, ""
+
+
+def record_ai_call(uid: str, model: str) -> None:
+    """一次真实 DeepSeek 调用成功返回后计 1 次。uid 为空记在 system 名下。
+
+    calls 表的 path 列记模型名（不再是 HTTP 路径），出账单时能按模型分账。
+    失败/超时/缓存命中不经过这里，所以不计。记账失败不影响正常功能。
+    """
+    try:
+        _bump(_today(), uid or SYSTEM_UID, "ai", model or "-")
+    except Exception as e:  # noqa: BLE001 记账是旁路
+        logger.debug("记录 AI 调用失败: %s", e)
+
+
+def check(uid: str, path: str, method: str, refresh: bool = False) -> tuple[bool, str, int]:
+    """before_request 闸门。返回 (是否放行, 给人看的原因, HTTP 状态码)。
+
+    ai 路径只做门（频率、最小间隔、日预算是否已满），不计数——真实计数在
+    llm._chat 成功后由 record_ai_call() 做。heavy 路径在这里按请求计数。
+    refresh 透传给 bucket_of（GET /api/market/overview?refresh=1 归 ai）。
+    """
     now = time.time()
 
     # 1) 每分钟总请求数——挡住失控的前端轮询和脚本扫接口
@@ -164,7 +222,7 @@ def check(uid: str, path: str, method: str) -> tuple[bool, str, int]:
             return False, f"请求过于频繁（每分钟上限 {REQ_PER_MIN} 次），稍等一下", 429
         win.append(now)
 
-    bucket = bucket_of(path, method)
+    bucket = bucket_of(path, method, refresh)
     if not bucket:
         return True, "", 200
 
@@ -178,31 +236,27 @@ def check(uid: str, path: str, method: str) -> tuple[bool, str, int]:
                 wait = int(AI_MIN_INTERVAL - (now - last)) + 1
                 return False, f"AI 分析请求太密集，{wait} 秒后再试", 429
 
-        # 3) 全局日预算——这是余额的最后一道保险，任何人都不能突破
-        gn = _global_count(day, "ai")
-        if gn >= AI_GLOBAL_DAY:
-            return False, (f"今天全站 AI 调用已达上限 {AI_GLOBAL_DAY} 次，"
-                           f"明天 0 点重置（防止 API 余额被意外耗尽）"), 429
-
-        # 4) 每人日限——保证一个人刷不光所有人的份额
-        n = _count(day, uid, "ai")
-        if n >= AI_PER_USER_DAY:
-            return False, f"你今天的 AI 分析次数已用完（{AI_PER_USER_DAY} 次/天）", 429
+        # 3) 全站与个人日预算是否已满——同一道门 llm._chat 还会再过一次，
+        #    这里提前拦是为了让前端立刻拿到 429 而不是等慢请求跑一半再失败
+        ok, why = allow_llm(uid)
+        if not ok:
+            return False, why, 429
 
         with _mem_lock:
             _last_ai[uid] = now
+        return True, "", 200          # 不计数：一次请求可能触发 0 次或 20 次 LLM 调用
 
-    elif bucket == "heavy":
-        n = _count(day, uid, "heavy")
-        if n >= HEAVY_PER_USER_DAY:
-            return False, (f"今天的重任务次数已用完（{HEAVY_PER_USER_DAY} 次/天）。"
-                           f"全市场池刷新/回测很吃数据源配额，刷太多会让所有人的深挖变「无数据」"), 429
-
+    # heavy：按请求计数
+    n = _count(day, uid, "heavy")
+    if n >= HEAVY_PER_USER_DAY:
+        return False, (f"今天的重任务次数已用完（{HEAVY_PER_USER_DAY} 次/天），北京时间 0 点重置。"
+                       f"全市场池刷新/回测很吃数据源配额，刷太多会让所有人的深挖变「无数据」"), 429
     _bump(day, uid, bucket, path)
     return True, "", 200
 
 
 def my_usage(uid: str) -> dict:
+    """某人今天的用量。ai_used = 真实 LLM 调用次数（不是 HTTP 请求数）。"""
     day = _today()
     with _conn() as c:
         t = c.execute("SELECT prompt,completion FROM llm_tokens WHERE day=? AND uid=?",
@@ -217,8 +271,12 @@ def my_usage(uid: str) -> dict:
 
 
 def all_usage(days: int = 7) -> list[dict]:
-    """管理员视角：最近 N 天每人每天的用量。"""
-    since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    """管理员视角：最近 N 天每人每天的用量。
+
+    ai 列 = 真实 LLM 调用次数；无用户上下文的调用（调度器/复盘）在 uid 为 system
+    的那一行，舰队的在 uid 为 fleet 的那一行。heavy 列 = 重任务 HTTP 请求数。
+    """
+    since = (_now() - timedelta(days=days)).strftime("%Y-%m-%d")
     with _conn() as c:
         rows = c.execute(
             "SELECT u.day, u.uid,"
@@ -231,7 +289,7 @@ def all_usage(days: int = 7) -> list[dict]:
 
 
 def purge(keep_days: int = 60) -> int:
-    cut = (datetime.now() - timedelta(days=keep_days)).strftime("%Y-%m-%d")
+    cut = (_now() - timedelta(days=keep_days)).strftime("%Y-%m-%d")
     with _LOCK, _conn() as c:
         n = c.execute("DELETE FROM calls WHERE ts < ?", (cut,)).rowcount
         c.execute("DELETE FROM usage WHERE day < ?", (cut,))
@@ -248,7 +306,8 @@ def init_app(app: Flask) -> None:
         uid = getattr(g, "uid", "")
         if not uid:          # 未登录的请求已被 auth 闸门拦掉，这里不重复处理
             return None
-        ok, why, code = check(uid, request.path, request.method)
+        ok, why, code = check(uid, request.path, request.method,
+                              refresh=request.args.get("refresh") == "1")
         if not ok:
             logger.info("限流拦截 %s %s %s: %s", uid, request.method, request.path, why)
             return jsonify({"error": why, "code": "rate_limited"}), code
@@ -262,18 +321,3 @@ def init_app(app: Flask) -> None:
     logger.info("限流已启用：AI 每人 %d 次/天，全站 %d 次/天，最小间隔 %.0fs",
                 AI_PER_USER_DAY, AI_GLOBAL_DAY, AI_MIN_INTERVAL)
 
-
-def consume(uid: str, bucket: str = "ai", path: str = "scheduler", n: int = 1) -> bool:
-    """后台任务记账。返回 False 表示全站预算已用尽，调用方应当跳过本次任务。
-
-    调度器自动跑 agent 也是在花你的 API 余额，所以它同样要过全局日预算这道门。
-    否则「限流只管人不管定时任务」——半夜 20 个 agent 自动跑照样能把余额掏空。
-    """
-    day = _today()
-    if bucket == "ai" and _global_count(day, "ai") + n > AI_GLOBAL_DAY:
-        logger.warning("全站 AI 日预算已用尽（%d/%d），跳过 %s 的后台任务",
-                       _global_count(day, "ai"), AI_GLOBAL_DAY, uid)
-        return False
-    for _ in range(max(1, n)):
-        _bump(day, uid, bucket, path)
-    return True

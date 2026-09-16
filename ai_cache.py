@@ -1,6 +1,10 @@
 """L1：AI 输出短期缓存 —— 智能命中（输入指纹 + 当日）+ 时间戳，落盘避免重复慢调用。
 
-- 存储 `ai_cache.json`；key = f"{kind}:{input_hash}:{date}"，跨交易日自然失效。
+- 存储 `ai_cache.json`；key = f"{kind}:{uid}:{input_hash}:{date}"，跨交易日自然失效。
+- key 带当前用户：提示词里注入了这个人的画像/笔记/费率，同样的 inputs 不能跨人命中。
+  无用户上下文（调度器）用 "-" 占位。文件仍是一份。
+- 例外是 SHARED_KINDS（macro / profile）：这两类提示词只含公开资料（外围行情、公司公开叙事），
+  不含任何个人数据，所以 uid 段固定为 "-"，所有人共用一份结果、少烧一次 LLM。
 - 输入指纹只取「影响结论」的输入（自选/持仓/资金/板块/代码），**排除实时价格**，否则每次报价跳动都 miss。
 - TTL 分类型；命中且未过期才返回。线程安全 + 原子写；文件只留当日条目，恒定很小。
 """
@@ -14,6 +18,8 @@ import threading
 from datetime import datetime
 from typing import Any
 
+import userctx
+
 logger = logging.getLogger(__name__)
 
 _CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_cache.json")
@@ -23,6 +29,10 @@ _LOCK = threading.Lock()
 _TTL = {"daily": 1800, "screen": 1800, "position": 1800, "market": 300,
         "profile": 43200,  # 公司叙事变化慢，当日长缓存(12h)，跨日 key 自然失效
         "macro": 21600}    # 全球宏观 digest：当日 6h 缓存（一天算几次即可）
+
+# 提示词只含公开资料、不注入画像/笔记/费率的类型：跨用户共用缓存（uid 段固定 "-"）。
+# 其余 kind（daily/entry/market/position/screen）注入了个人数据，必须按 uid 隔离。
+SHARED_KINDS = frozenset({"macro", "profile"})
 
 
 def _today() -> str:
@@ -36,7 +46,9 @@ def _fingerprint(inputs: Any) -> str:
 
 
 def _key(kind: str, inputs: Any) -> str:
-    return f"{kind}:{_fingerprint(inputs)}:{_today()}"
+    """缓存键。SHARED_KINDS 的 uid 段固定为 "-"（公开资料，跨人共用）；其余按当前用户隔离。"""
+    uid = "-" if kind in SHARED_KINDS else (userctx.get_uid() or "-")
+    return f"{kind}:{uid}:{_fingerprint(inputs)}:{_today()}"
 
 
 def _load() -> dict[str, Any]:

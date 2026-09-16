@@ -41,6 +41,7 @@ import profile_store
 import screening
 import structure
 import universe_store
+import userctx
 
 logger = logging.getLogger(__name__)
 
@@ -151,13 +152,14 @@ def _debate_decider(ctx: dict[str, Any]) -> tuple[list[Intent], str]:
                          json_mode=False, max_tokens=8000)
 
     # **单边失败必须炸掉整个辩论，不许降级成一面之词。**
-    # `llm._chat` 空正文即抛，`list(ex.map())` 让异常向外传播 → run_day 记 ok=False。
+    # `llm._chat` 空正文即抛，`userctx.ctx_map`（语义同 `list(ex.map())`，另把当前用户
+    # 上下文带进池线程——否则个人库在池里读不到用户）让异常向外传播，run_day 记 ok=False。
     # 别「好心」改成 try/except 把失败的一边吞成 ""：那样裁判只听另一边，仍会产出一个
     # 看着合理的结论，而**没人会发现多头根本没上场**——token 耗尽被伪装成市场判断，
     # 且在跌势里系统性偏空（多头恰恰是逆境下最容易耗尽的那个）。属 PITFALLS 第一类
     # 「不报错、只让你相信一个错结论」。宁可这一轮不交易。
     with ThreadPoolExecutor(max_workers=2) as ex:
-        bull, bear = list(ex.map(side, ["bull", "bear"]))
+        bull, bear = userctx.ctx_map(ex, side, ["bull", "bear"])
     judge = llm._chat(
         [{"role": "system", "content": llm._system_prompt()[0]},
          {"role": "user", "content": base + f"\n\n【多头论点】\n{bull}\n\n【空头论点】\n{bear}\n\n"
@@ -1016,7 +1018,8 @@ def run_all(dry_run: bool = False, blocks: str = "", force: bool = False,
 
     from concurrent.futures import ThreadPoolExecutor
     t0 = time.time()
+    # ctx_map 而不是 ex.map：池线程要带当前用户（舰队站长）上下文，个人库才解析得到路径
     with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
-        out = list(ex.map(one, agents))
+        out = userctx.ctx_map(ex, one, agents)
     logger.info("agent 日循环完成：%d 个，%.0fs（并行 %d）", len(out), time.time() - t0, workers)
     return out

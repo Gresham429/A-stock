@@ -19,18 +19,51 @@ import template_store
 
 logger = logging.getLogger(__name__)
 
-def _record_usage(usage: dict) -> None:
-    """把这次调用真实消耗的 token 记到当前用户名下。
+def _current_uid() -> str:
+    """记账用的 uid：舰队路径（as_fleet 里跑的 agent）返回 ratelimit.FLEET_UID，
+    无用户上下文（调度器/复盘）返回空串（ratelimit 按 system 记），其余是当前用户。
 
-    限额本身是按「次数」封顶的（次数才挡得住失控的循环），这里记 token 是为了
-    让账单可归因——月底看到余额掉得快时，能查出是谁、哪天、哪个模型花的。
-    记账失败绝不能影响正常功能，所以整段吞掉异常。
+    舰队单独记名的原因：as_fleet 把当前用户切成站长，直接读 get_uid() 会把 20 个
+    agent 的调用算进站长的个人日额度，半天就把他锁死；舰队应只受全站预算约束。
+    """
+    import ratelimit
+    import userctx
+    if userctx.in_fleet():
+        return ratelimit.FLEET_UID
+    return userctx.get_uid()
+
+
+def _check_budget() -> None:
+    """发请求前过 ratelimit.allow_llm 预算门，不放行则抛 LLMError。
+
+    门在这里而不在 HTTP 层，所以调度器、agent、GET 路由的调用都受全站日预算约束。
+    ratelimit/userctx 延迟导入，保持 llm 可独立 import。门本身出错（usage.db 锁死、
+    导入失败等）一律拒绝而不是放行：这道门是保护 API 余额的最后一层，它坏了的时候
+    正是计数不可信、失控循环最可能把余额清零的时候。宁可 AI 功能暂时不可用，
+    也不能在没有预算约束的情况下继续烧钱。
     """
     try:
         import ratelimit
-        import userctx
-        uid = userctx.get_uid()
-        if uid and usage:
+        ok, why = ratelimit.allow_llm(_current_uid())
+    except Exception as e:  # noqa: BLE001 门故障按拒绝处理
+        logger.error("LLM 预算门不可用，本次 AI 调用拒绝: %s", e)
+        raise LLMError(f"预算门不可用，本次 AI 调用拒绝: {e}") from e
+    if not ok:
+        raise LLMError(why)
+
+
+def _record_usage(usage: dict, model: str) -> None:
+    """一次真实调用成功后记账：计 1 次 AI 调用 + 记真实 token 消耗，都在当前用户名下。
+
+    次数是限额本身（次数才挡得住失控的循环），token 是为了让账单可归因——月底
+    看到余额掉得快时，能查出是谁、哪天、哪个模型花的。失败/超时不经过这里，
+    所以不计。记账失败绝不能影响正常功能，所以整段吞掉异常。
+    """
+    try:
+        import ratelimit
+        uid = _current_uid()
+        ratelimit.record_ai_call(uid, model)
+        if usage:
             ratelimit.record_llm_tokens(uid, usage.get("prompt_tokens", 0),
                                         usage.get("completion_tokens", 0))
     except Exception:  # noqa: BLE001 记账是旁路，出错静默
@@ -77,8 +110,10 @@ def _chat(messages: list[dict[str, str]], *, json_mode: bool = True,
     """
     if not config.llm_enabled():
         raise LLMError("未配置 DeepSeek API key（检查 .env）")
+    _check_budget()
+    model_name = model or config.DEEPSEEK_MODEL
     payload: dict[str, Any] = {
-        "model": model or config.DEEPSEEK_MODEL,
+        "model": model_name,
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
@@ -94,7 +129,7 @@ def _chat(messages: list[dict[str, str]], *, json_mode: bool = True,
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-        _record_usage(data.get("usage") or {})
+        _record_usage(data.get("usage") or {}, model_name)
         choice = data["choices"][0]
         content = choice["message"].get("content") or ""
         if not content.strip():

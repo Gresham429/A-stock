@@ -56,6 +56,7 @@ import websearch
 import auth        # 登录闸门：默认全关，白名单极短
 import ratelimit   # 按人限流 + AI 日预算：保护 DeepSeek 余额
 import userctx     # 当前用户上下文 + 个人数据目录解析
+import picks_routes  # 选股与观点账本 Blueprint
 # 选股与形态初筛（2026-07-16 抽出 screening.py）。显式带回名字，路由调用点不用改；
 # `app._pa_score` / `app._FACTOR_RANGE` 等仍可达（测试与 agent 依赖）。
 from screening import (  # noqa: E402,F401
@@ -139,6 +140,7 @@ def _init_user_stores(uid: str) -> None:
 
 auth.init_app(app)        # 登录闸门 —— 必须先注册，后面的钩子依赖它设的 g.uid
 ratelimit.init_app(app)   # 按人限流 + AI 日预算
+app.register_blueprint(picks_routes.bp)   # 选股与观点账本（/api/picks/*，在 auth 闸门之后自动受保护）
 
 
 @app.before_request
@@ -1545,6 +1547,11 @@ if __name__ == "__main__":
         logger.info("首次运行：后台回填新闻库…（1–2 季度，约几分钟）")
     userctx.Thread(target=_universe_boot, daemon=True).start()
     userctx.Thread(target=_review_boot, daemon=True).start()
+    import picks_pipeline
+    # 本地开发：只给站长跑自选股；服务器上由 scheduler.py 遍历账号
+    userctx.Thread(target=picks_pipeline.loop_forever,
+                   args=(lambda: [userctx.fleet_uid()] if userctx.fleet_uid() else [], picks_routes._market_ctx),
+                   daemon=True).start()
     # 本地开发模式保留「开着 app 就每桶自动跑 agent」。舰队 = 站长的库，所以在站长
     # 上下文里起线程（userctx.Thread 构造时复制上下文）。服务器上不走这里，agent 只由站长手动触发。
     if userctx.fleet_uid():

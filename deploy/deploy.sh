@@ -22,7 +22,9 @@ warn() { printf '  \033[0;31m!\033[0m %s\n' "$*"; }
 say "1/9 系统依赖"
 if command -v apt-get >/dev/null; then
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq
+  # 机器上常有过期的第三方源（比如 docker 的 focal 源没了 Release 文件），
+  # update 报错不代表官方源坏了，只警告不中止；真装不上下面一行会报。
+  apt-get update -qq || warn "apt-get update 有源失败（多半是过期的第三方源），继续用已有索引"
   apt-get install -y -qq python3 python3-venv python3-pip sqlite3 curl rsync >/dev/null
 else
   yum install -y -q python3 python3-pip sqlite curl rsync >/dev/null
@@ -38,7 +40,7 @@ elif command -v python3.10 >/dev/null; then
 elif command -v apt-get >/dev/null; then
   apt-get install -y -qq software-properties-common >/dev/null
   add-apt-repository -y ppa:deadsnakes/ppa >/dev/null 2>&1
-  apt-get update -qq
+  apt-get update -qq || warn "apt-get update 有源失败，继续"
   apt-get install -y -qq python3.10 python3.10-venv python3.10-distutils >/dev/null
   PYBIN=python3.10
   ok "系统 python3 $(python3 -V 2>&1 | cut -d' ' -f2) 过旧，已从 deadsnakes 装 python3.10 / sqlite3 $(sqlite3 --version | cut -d' ' -f1)"

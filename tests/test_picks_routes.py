@@ -81,8 +81,22 @@ def test_run_permissions_and_status():
     j = c.get("/api/picks/status").get_json()
     ck("public_running" in j and "watchlist_running" in j, "状态字段")
 
+def test_status_reflects_lock_files():
+    """web 进程里的 `_state` 字典看不到 scheduler 进程起的批跑，status 必须再查一遍锁文件。"""
+    c = app.test_client()
+    lock_path = os.path.join(pp.LOCK_DIR, ".picks-running-public")
+    open(lock_path, "w").close()
+    try:
+        j = c.get("/api/picks/status").get_json()
+        ck(j["public_running"] is True, "公共锁文件存在时 status 应显示在跑")
+    finally:
+        os.remove(lock_path)
+    j = c.get("/api/picks/status").get_json()
+    ck(j["public_running"] is False, "锁文件移除后 status 应显示未在跑")
+
 if __name__ == "__main__":
     for fn in (test_public_and_chain_on_fresh_db, test_public_and_chain,
-               test_watchlist_is_per_user, test_run_permissions_and_status):
+               test_watchlist_is_per_user, test_run_permissions_and_status,
+               test_status_reflects_lock_files):
         fn()
     print(f"OK — test_picks_routes 全过（{N[0]} 断言）")

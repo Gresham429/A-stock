@@ -415,8 +415,10 @@ ASTOCK_AI_GLOBAL_DAY=150     # 全站每天（余额的最后一道保险）
 - 没有用户上下文的调用（调度器、复盘）记在 `system` 名下；舰队的调用（`ASTOCK_AGENT_AUTO=1`
   的自动跑，以及站长手动点的 `run` / `run_all`，都在站长上下文里跑）记在 `fleet` 名下。
   这两个名字都只受全站日预算约束，不占任何人的个人额度。20 个 agent 一天两桶就是几十次
-  调用，`ASTOCK_AI_GLOBAL_DAY` 要把这部分算进去。三周期选股每个交易日约 4 到 6 次 DeepSeek
-  调用记在 `system` 名下，全站预算要把它算进去。
+  调用，`ASTOCK_AI_GLOBAL_DAY` 要把这部分算进去。三周期选股每个交易日固定 4 次 DeepSeek
+  调用记在 `system` 名下（16:00 全量三周期 3 次 + 09:05 早盘短线 1 次），另外每个活跃用户
+  每天 2 次记在自己名下（16:00 和 09:05 各一次自选股买卖点提示词，占个人日额度而不是全站
+  预算）；手动点刷新若刚好撞上大盘研判缓存冷启动，还会多算一次 `market_overview`。
 
 HTTP 层还有一道按请求计的门：每人每分钟总请求数（`ASTOCK_REQ_PER_MIN`）、AI 调用最小
 间隔（`ASTOCK_AI_MIN_INTERVAL`）、重任务日上限（`ASTOCK_HEAVY_PER_USER_DAY`，全市场池

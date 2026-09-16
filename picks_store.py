@@ -83,6 +83,24 @@ def current(scope: str, code: str = "") -> list[dict[str, Any]]:
         return [dict(r) for r in c.execute(sql + " ORDER BY created_at DESC", args)]
 
 
+def latest_run(scope: str) -> list[dict[str, Any]]:
+    """每个周期最新一轮的 open 行：按 horizon 各自取 created_at 最大的那批，
+    不是「全表最大 created_at」——不同周期可能不是同一天跑的（如 09:05 只刷短线）。"""
+    with _conn(scope) as c:
+        return [dict(r) for r in c.execute(
+            "SELECT * FROM calls c1 WHERE c1.scope=? AND c1.status='open' AND c1.created_at=("
+            "  SELECT MAX(c2.created_at) FROM calls c2"
+            "  WHERE c2.scope=c1.scope AND c2.horizon=c1.horizon AND c2.status='open'"
+            ") ORDER BY c1.horizon, c1.created_at DESC", (scope,))]
+
+
+def recent_codes(scope: str, since: str) -> list[str]:
+    """near-window 里出现过的全部代码，不限 status——结算要给已过期的短线行也贴回结果。"""
+    with _conn(scope) as c:
+        return sorted({r[0] for r in c.execute(
+            "SELECT DISTINCT code FROM calls WHERE scope=? AND created_at>=?", (scope, since))})
+
+
 def chain(scope: str, code: str, limit: int = 50) -> list[dict[str, Any]]:
     with _conn(scope) as c:
         return [dict(r) for r in c.execute(
@@ -94,7 +112,8 @@ def _enforce(prev: dict[str, Any] | None, p: dict[str, Any], today: str) -> tupl
     """改口规则。返回 (decision, trigger, 价位来源行)。
 
     revise/withdraw 必须带一个站得住的触发理由：trigger=='none' 一律拒绝；
-    stop_hit/target_hit 要求上一条的 touched 字段确实记录到对应结果；
+    stop_hit/target_hit 要求上一条的 touched 字段确实记录到对应结果（withdraw 与
+    revise 同等要求——「撤销」同样不能凭空说止损/目标已触发）；
     expired 要求上一条的 valid_until 已经过了 today，不能拿「过期」当幌子提前改口。
     """
     decision = p.get("decision") if p.get("decision") in DECISIONS else "new"
@@ -106,10 +125,10 @@ def _enforce(prev: dict[str, Any] | None, p: dict[str, Any], today: str) -> tupl
     if decision in ("revise", "withdraw") and trigger == "none":
         logger.warning("picks: %s %s 无触发却要 %s，按 keep 处理", p.get("code"), p.get("horizon"), decision)
         return "keep", "none", prev
-    if decision == "revise" and trigger == "stop_hit" and prev.get("touched") != "stop":
+    if decision in ("revise", "withdraw") and trigger == "stop_hit" and prev.get("touched") != "stop":
         logger.warning("picks: %s 称止损触发但结果未记录到，按 keep", p.get("code"))
         return "keep", "none", prev
-    if decision == "revise" and trigger == "target_hit" and prev.get("touched") != "exit":
+    if decision in ("revise", "withdraw") and trigger == "target_hit" and prev.get("touched") != "exit":
         logger.warning("picks: %s 称目标达成但结果未记录到，按 keep", p.get("code"))
         return "keep", "none", prev
     if decision in ("revise", "withdraw") and trigger == "expired" and prev.get("valid_until", "") >= today:
@@ -126,20 +145,31 @@ def apply(scope: str, proposed: dict[str, Any], today: str, run_id: str) -> dict
     读旧行、改口判定、supersede 旧行、插新行全在一个连接的一个事务里
     （BEGIN IMMEDIATE 提前拿写锁），防止两次并发 apply 都读到同一条旧
     open 行、各自插一条新 open 行，破坏「同一 (scope,code,horizon) 只有
-    一条 open」的不变量。
+    一条 open」的不变量。watchlist 的不变量更严：自选股同一只股票只留一条
+    open（不分周期），换周期即替代旧行，不会短线中线各挂一条。
+
+    `valid_until()` 可能要查节假日表，挪到 BEGIN IMMEDIATE 之前算好，
+    别把这类可能变慢的调用放进写锁持有期间。
     """
     code, horizon = proposed["code"], proposed.get("horizon", "short")
+    vu_new = valid_until(horizon, today)
     with _conn(scope) as c:
         c.execute("BEGIN IMMEDIATE")
-        prev_row = c.execute(
-            "SELECT * FROM calls WHERE scope=? AND code=? AND horizon=? AND status='open' "
-            "ORDER BY created_at DESC, id DESC LIMIT 1",
-            (scope, code, horizon)).fetchone()
+        if scope == "watchlist":
+            prev_row = c.execute(
+                "SELECT * FROM calls WHERE scope=? AND code=? AND status='open' "
+                "ORDER BY created_at DESC, id DESC LIMIT 1",
+                (scope, code)).fetchone()
+        else:
+            prev_row = c.execute(
+                "SELECT * FROM calls WHERE scope=? AND code=? AND horizon=? AND status='open' "
+                "ORDER BY created_at DESC, id DESC LIMIT 1",
+                (scope, code, horizon)).fetchone()
         prev = dict(prev_row) if prev_row else None
         decision, trigger, src = _enforce(prev, proposed, today)
         status = "withdrawn" if decision == "withdraw" else "open"
         vf = today if decision in ("new", "revise") else (prev or {}).get("valid_from", today)
-        vu = valid_until(horizon, today) if decision in ("new", "revise") else (prev or {}).get("valid_until", valid_until(horizon, today))
+        vu = vu_new if decision in ("new", "revise") else (prev or {}).get("valid_until", vu_new)
         row = {
             "run_id": run_id, "created_at": today, "scope": scope, "code": code,
             "name": proposed.get("name") or (prev or {}).get("name", ""), "horizon": horizon,
@@ -169,6 +199,14 @@ def expire(scope: str, today: str) -> int:
                          (scope, today)).rowcount
 
 
+def _ok_bar(b: dict[str, Any]) -> bool:
+    """停牌零价日不算数：high/low/close 任一 <=0 都丢弃，同 picks_levels._clean 的口径。"""
+    try:
+        return float(b["high"]) > 0 and float(b["low"]) > 0 and float(b["close"]) > 0
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def staple(scope: str, code: str, bars: list[dict[str, Any]], today: str) -> int:
     """把给出后的走势贴回近 60 天内的行：最高/最低相对给出价、5 日/20 日收益、碰到哪个区间。"""
     since = (dt.date.fromisoformat(today) - dt.timedelta(days=WINDOW_DAYS)).isoformat()
@@ -178,7 +216,7 @@ def staple(scope: str, code: str, bars: list[dict[str, Any]], today: str) -> int
             "SELECT * FROM calls WHERE scope=? AND code=? AND created_at>=?",
             (scope, code, since))]
         for r in rows:
-            after = [b for b in bars if str(b.get("date", ""))[:10] > r["created_at"]]
+            after = [b for b in bars if _ok_bar(b) and str(b.get("date", ""))[:10] > r["created_at"]]
             px0 = r.get("px_at_call")
             if not after or not px0:
                 continue

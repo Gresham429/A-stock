@@ -51,7 +51,7 @@ const clr=v=> v>0?'up':v<0?'down':'flat';
 const sgn=v=> v>0?'+':'';
 const fmt=(v,d=2)=> v==null||v===''?'—':Number(v).toFixed(d);
 const fmtInt=v=> v==null?'—':Math.round(v).toLocaleString();
-const esc=s=> (s==null?'':String(s)).replace(/[<>&]/g,m=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[m]));
+const esc=s=> (s==null?'':String(s)).replace(/[<>&"']/g,m=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[m]));
 // AI 结果的时间戳/缓存 meta 行 + 强制刷新按钮（onclick 传重新请求的调用串）
 function aiMeta(j,onclick){
   const when=j.analyzed_at?j.analyzed_at.replace('T',' ').slice(0,16):(j.updated||'');

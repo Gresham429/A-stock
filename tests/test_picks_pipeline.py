@@ -140,8 +140,27 @@ def test_run_watchlist_uses_user_watchlist():
         {"code": r["code"], "name": r["name"], "horizon": "short", "stance": "watch", "entry_lo": 9.8, "entry_hi": 10.0,
          "exit_lo": 10.5, "exit_hi": 10.8, "stop": 9.5, "decision": "new", "trigger": "none", "thesis": "t", "trigger_note": "n",
          "basis_json": "{}", "px_at_call": 10.0} for r in rows]
-    r = pp.run_watchlist()
+    with pp.userctx.as_user("tester"):
+        r = pp.run_watchlist()
     ck(r["calls"] == 2, f"自选股两条: {r}")
+
+def test_run_watchlist_lock():
+    setup_fakes(); setup_store()
+    pp.store.load_watchlist = lambda: ["603010"]
+    pp.profile_store.get_active = lambda: {"cash": 5000}
+    called = [False]
+    def wp(rows, levels, memory, mctx, cap):
+        called[0] = True
+        return []
+    llm_picks.watchlist_points = wp
+    with pp.userctx.as_user("lockuser"):
+        lock_path = os.path.join(pp.userctx.user_dir(), ".picks-running")
+        open(lock_path, "w").close()
+        try:
+            r = pp.run_watchlist()
+            ck(r["error"] == "已在生成" and not called[0], f"个人锁存在时应直接返回、不调用 llm: {r}")
+        finally:
+            os.remove(lock_path)
 
 def test_run_public_llm_failure_keeps_ledger():
     setup_fakes(); setup_store()
@@ -190,14 +209,67 @@ def test_loop_isolates_user_failure():
     ck(done == ["b"], f"a 失败不拖累 b，b 应正常跑到: {done}")
     ck(pp._last["full"] == dt.date.today().isoformat(), "桶一旦开始就标记今天已处理")
 
+def test_tick_survives_public_failure():
+    setup_store()
+    pp.due_slot = lambda now, last: "full"
+    def rp(*a, **k):
+        raise RuntimeError("boom")
+    pp.run_public = rp
+    done = []
+    def rw(market_ctx=None, capital=None):
+        done.append(pp.userctx.get_uid())
+        return {"calls": 0, "error": None}
+    pp.run_watchlist = rw
+    slot = pp.tick(lambda: ["a", "b"], None)
+    ck(slot == "full", f"公共失败仍应返回到点的 slot: {slot}")
+    ck(done == ["a", "b"], f"公共失败不应跳过逐用户自选股循环: {done}")
+
+def test_tick_market_ctx_under_fleet():
+    setup_store()
+    pp.due_slot = lambda now, last: "full"
+    pp.userctx.set_fleet_uid("owner")
+    seen_uid = []
+    def mctx_fn():
+        seen_uid.append(pp.userctx.get_uid())
+        return {"regime": "x"}
+    received = []
+    def rp(mctx=None, horizons=("short", "mid", "long")):
+        received.append(mctx)
+        return {"calls": 0, "error": None}
+    pp.run_public = rp
+    pp.run_watchlist = lambda *a, **k: {"calls": 0, "error": None}
+    pp.tick(lambda: [], mctx_fn)
+    ck(seen_uid == ["owner"], f"market_ctx_fn 应在舰队站长上下文下调用，好让 _tier_block 读到画像: {seen_uid}")
+    ck(received == [{"regime": "x"}], f"run_public 应收到 market_ctx_fn 返回的 dict: {received}")
+
+def test_settle_staples_recent_expired():
+    setup_fakes(); setup_store()
+    today = dt.date.today()
+    created = (today - dt.timedelta(days=10)).isoformat()
+    ps.apply("public", {"code": "600809", "name": "山西汾酒", "horizon": "short", "stance": "buy",
+                        "entry_lo": 9.5, "entry_hi": 9.8, "exit_lo": 10.8, "exit_hi": 11.2, "stop": 9.2,
+                        "thesis": "t", "trigger_note": "n", "basis_json": "{}",
+                        "decision": "new", "trigger": "none", "px_at_call": 10.0}, created, "r")
+    d0 = dt.date.fromisoformat(created)
+    future = [{"date": (d0 + dt.timedelta(days=i + 1)).isoformat(), "open": 10.0, "high": 10.2, "low": 9.8,
+              "close": 10.0 + i * 0.01, "volume": 1} for i in range(15)]
+    pp.ds.sina_kline = lambda code, num=40, scale=240: future
+    r = pp.settle("public", today.isoformat())
+    ck(r["expired"] == 1, f"10 天前建的短线行到今天该已过期: {r}")
+    rows = ps.chain("public", "600809")
+    ck(rows[0]["status"] == "expired" and rows[0]["max_up"] is not None,
+       f"过期行也要被结果贴回，不能因为 expire() 先跑、current() 只看 open 而漏掉: {rows[0]}")
+
 if __name__ == "__main__":
     for fn in (test_short_pool_prefers_theme_and_turnover, test_mid_pool_uses_sector_leaders_and_flow,
                test_long_pool_filters_by_valuation_and_growth, test_enrich_rows_and_levels,
                test_long_pool_survives_financial_errors, test_mid_pool_visits_all_ranked_sectors,
                test_enrich_drops_codes_without_quote, test_snapshot_cached,
                test_snapshot_failure_not_cached, test_run_public_persists_calls,
-               test_run_watchlist_uses_user_watchlist, test_run_public_llm_failure_keeps_ledger,
+               test_run_watchlist_uses_user_watchlist, test_run_watchlist_lock,
+               test_run_public_llm_failure_keeps_ledger,
                test_lock_and_due, test_run_public_isolates_horizon_failure,
-               test_loop_isolates_user_failure):
+               test_loop_isolates_user_failure, test_tick_survives_public_failure,
+               test_tick_market_ctx_under_fleet, test_settle_staples_recent_expired):
         fn()
     print(f"OK — test_picks_pipeline 全过（{N[0]} 断言）")

@@ -152,9 +152,14 @@ app.py 用显式 import 带回名字，路由调用点与 `app._X` 可达性不�
   conda 少坑）；本地仍 conda。用户可否决。
 - **阿里云 + Tailscale 两个必改项**（2026-09-16 踩过，整机 DNS 断了一小时、18:30 复盘失败）：`tailscale set --accept-dns=false --netfilter-mode=off`。原因与说明在 deploy/README-deploy.md 第 4 节。这台机器是共用机（k3s/docker/nginx/游戏服），`deploy.sh` 用 `ASTOCK_UFW=0` 跳过 ufw，外围防线 = 阿里云安全组 + Tailscale。
 - **三周期选股运行时**：交易日 16:00 全量跑一次（公共三周期记 `system`、各账号自选股各跑一次），
-  09:05 只刷短线。手动点 `/api/picks/run` 走 ai 门、计入个人日额度。跨进程用文件锁
-  `data/.picks-running-<scope>` 防重跑。账本落公共库 `data/picks_public.db`（三周期）与
-  `data/users/<uid>/picks.db`（自选股）；改口规则在 `picks_store._enforce` 里强制，不留后门。
+  09:05 只让公共池跑短线一个周期；自选股不分早盘晚盘，两个时刻都是同一份覆盖全部周期的完整
+  提示词，不因为是早盘就收窄。手动点 `/api/picks/run` 走 ai 门、计入个人日额度。跨进程锁是两
+  个文件：公共锁 `data/.picks-running-public`，个人锁 `data/users/<uid>/.picks-running`（各账号
+  跑自己的一份，互不阻塞）。到点记录 `_last` 只在进程内存里，不落盘——`scheduler.py` 若在
+  16:00 之后重启，会把当天的 full 槽当成没跑过，重新触发一轮（多打一轮 DeepSeek 调用，但账本
+  改口规则会挡掉站不住的重复结论，不会出现数据损坏）。账本落公共库 `data/picks_public.db`
+  （三周期）与 `data/users/<uid>/picks.db`（自选股）；改口规则在 `picks_store._enforce` 里强制，
+  不留后门。
 
 ## 数据源 & 坑（改代码前必读）
 
@@ -459,7 +464,8 @@ agent 不自动跑。服务器 IP 上东财端点全通（含家里被封的 cli
 公共 `data/`: `news.db` `universe.db` `factors.db` `templates.db` `auth.db` `usage.db` `review/`
 `picks_public.db` `.em_last_call` `.picks-running-*`；根目录 `ai_cache.json`（键带 uid）。
 个人 `data/users/<uid>/`: `watchlist.json` `portfolio.json`(按画像隔离+lot 模型) `notes.db` `rules.db`
-`paper.db` `profiles.db` `agents.db` `picks.db` `.init.lock`。舰队只读站长目录里的 `agents.db`/`paper.db`/`profiles.db`。
+`paper.db` `profiles.db` `agents.db` `picks.db` `.init.lock` `.picks-running`。舰队只读站长目录里的
+`agents.db`/`paper.db`/`profiles.db`。
 旧布局（根目录 `watchlist.json`、`data/agents.db` 等）由 `deploy/migrate_to_multiuser.py <uid>` 复制进
 站长目录，原文件不删。
 

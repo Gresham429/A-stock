@@ -116,11 +116,49 @@ def test_apply_single_open_row_under_threads():
             f.result()
     ck(len(ps.current("watchlist", "601988")) == 1, "并发 apply 只留一条 open 行")
 
+def test_staple_ignores_zero_bars():
+    ps.apply("watchlist", prop(code="600809", name="山西汾酒", entry_lo=9.5, entry_hi=9.8, exit_lo=10.8, exit_hi=11.2, stop=9.2, px_at_call=10.0), "2026-09-16", "r")
+    bars = [
+        {"date": "2026-09-16", "open": 10, "high": 10.1, "low": 9.9, "close": 10.0, "volume": 1},
+        {"date": "2026-09-17", "open": 0, "high": 0, "low": 0, "close": 0, "volume": 0},   # 停牌零价日
+        {"date": "2026-09-18", "open": 9.8, "high": 9.9, "low": 9.6, "close": 9.7, "volume": 1},
+    ]
+    n = ps.staple("watchlist", "600809", bars, "2026-09-18")
+    row = ps.current("watchlist", "600809")[0]
+    ck(n >= 1 and row["touched"] != "stop", f"零价停牌日不该被当成碰到止损: {row}")
+    ck(row["max_dn"] == -4.0, f"max_dn 应只从真实K线算，忽略零价日: {row['max_dn']}")
+
+def test_withdraw_stop_hit_requires_touched():
+    ps.apply("watchlist", prop(code="600887", name="伊利股份"), "2026-09-16", "r")
+    r = ps.apply("watchlist", prop(code="600887", name="伊利股份", decision="withdraw", trigger="stop_hit"), "2026-09-17", "r")
+    ck(r["decision"] == "keep", "withdraw+stop_hit 但上一条 touched 未记录到 stop 时应降为 keep")
+
+def test_latest_run_per_horizon():
+    ps.apply("public", prop(code="600000", name="浦发银行", horizon="short"), "2026-08-01", "d1")
+    ps.apply("public", prop(code="600001", name="邯郸钢铁", horizon="short"), "2026-08-02", "d2")
+    ps.apply("public", prop(code="600002", name="齐鲁石化", horizon="mid"), "2026-08-01", "d1")
+    rows = ps.latest_run("public")
+    hc = {(r["horizon"], r["code"]) for r in rows}
+    ck(("short", "600001") in hc, "更新一天的短线行应在最新一轮里")
+    ck(("short", "600000") not in hc, "旧一天的短线行不属于最新一轮")
+    ck(("mid", "600002") in hc, "中线仍算它自己最新的一轮，即使日期比短线的更早")
+
+def test_watchlist_horizon_switch_supersedes():
+    r1 = ps.apply("watchlist", prop(code="601888", name="中国中免", horizon="short"), "2026-09-16", "r1")
+    ck(r1["decision"] == "new" and r1["horizon"] == "short", "首条短线")
+    r2 = ps.apply("watchlist", prop(code="601888", name="中国中免", horizon="mid", decision="revise",
+                                    trigger="thesis_broken", entry_lo=9.0, entry_hi=9.2), "2026-09-17", "r2")
+    ck(r2["decision"] == "revise" and r2["horizon"] == "mid" and r2["parent_id"] == r1["id"], "跨周期切换应替代旧行")
+    open_rows = ps.current("watchlist", "601888")
+    ck(len(open_rows) == 1 and open_rows[0]["horizon"] == "mid", "自选股同一只只留一条 open，且周期已切换")
+
 if __name__ == "__main__":
     for fn in (test_new_and_keep_chain, test_revise_without_trigger_downgraded, test_revise_with_thesis_broken_allowed,
                test_target_hit_requires_touched, test_withdraw, test_new_with_prev_open_becomes_keep_unless_trigger,
                test_valid_until_counts_trading_days, test_expire, test_staple_outcome, test_memory_block_window_and_rollup,
                test_staple_covers_withdrawn_rows, test_expired_trigger_requires_past_valid_until,
-               test_apply_single_open_row_under_threads):
+               test_apply_single_open_row_under_threads, test_staple_ignores_zero_bars,
+               test_withdraw_stop_hit_requires_touched, test_latest_run_per_horizon,
+               test_watchlist_horizon_switch_supersedes):
         fn()
     print(f"OK — test_picks_store 全过（{N[0]} 断言）")

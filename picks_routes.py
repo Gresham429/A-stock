@@ -26,9 +26,12 @@ def _can_manage() -> bool:
 
 @bp.get("/public")
 def api_public():  # noqa: ANN202
+    """三周期各自的最新一轮（`latest_run`），不是「全表当前 open」——09:05 只刷短线时，
+    中线/长线的最新一轮仍是昨天 16:00 那批，用 `current()` 会把它们和当天刚出的短线
+    混在一起、误当成同一轮生成时间。"""
     picks_store.init("public")
     h = request.args.get("horizon", "")
-    rows = [r for r in picks_store.current("public") if not h or r["horizon"] == h]
+    rows = [r for r in picks_store.latest_run("public") if not h or r["horizon"] == h]
     gen = max((r["created_at"] for r in rows), default=None)
     return jsonify({"calls": rows, "generated_at": gen})
 
@@ -72,7 +75,7 @@ def _spawn(kind: str, fn, uid: str = "") -> dict[str, str]:
 
     try:
         userctx.Thread(target=_run, daemon=True).start()
-    except Exception:
+    except Exception:  # noqa: BLE001 起线程失败要把标记复位后原样抛出，不能吞
         with _lock:
             if kind == "public":
                 _state["public_running"] = False
@@ -97,12 +100,17 @@ def api_run_public():  # noqa: ANN202
 
 @bp.get("/status")
 def api_status():  # noqa: ANN202
+    """在跑状态取「进程内标记 或 锁文件」——同一台机器上 web 与 scheduler 是两个进程，
+    scheduler 起的批跑只落了锁文件，web 进程里的 `_state` 字典看不到，只查 `_state`
+    会漏报「实际在跑但本进程不知道」。"""
     uid = getattr(g, "uid", "")
     with _lock:
         last = {k: v for k, v in _state["last"].items() if k == "public" or k == f"watchlist:{uid}"}
-        return jsonify({"public_running": bool(_state["public_running"]),
-                        "watchlist_running": bool(_state["watchlist_running"].get(uid)),
-                        "last": last})
+        pub_flag = bool(_state["public_running"])
+        wl_flag = bool(_state["watchlist_running"].get(uid))
+    pub_running = pub_flag or picks_pipeline.is_running("public")
+    wl_running = wl_flag or picks_pipeline.is_running("watchlist")
+    return jsonify({"public_running": pub_running, "watchlist_running": wl_running, "last": last})
 
 
 def _market_ctx() -> dict[str, Any] | None:

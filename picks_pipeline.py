@@ -11,6 +11,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 import datasources as ds
 import llm_picks
@@ -168,12 +169,23 @@ MORNING_AT = (9, 5)
 _last: dict[str, str] = {}
 
 
+def _today() -> str:
+    """上海时区的今天：服务器可能跑在别的时区，交易日判定、账本 created_at、
+    额度计费全部以 A 股所在的时区为准，不用进程本地时区。"""
+    return dt.datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+
+
 def _lock_path(scope: str) -> str:
     return os.path.join(LOCK_DIR, f".picks-running-{scope}")
 
 
-def acquire_lock(scope: str) -> bool:
-    p = _lock_path(scope)
+def _user_lock_path() -> str:
+    """个人自选股跑批锁：data/users/<uid>/.picks-running，当前用户自己一份。"""
+    return os.path.join(userctx.user_dir(), ".picks-running")
+
+
+def acquire_lock(scope: str, path: str | None = None) -> bool:
+    p = path or _lock_path(scope)
     try:
         if os.path.exists(p) and time.time() - os.path.getmtime(p) > LOCK_STALE_SEC:
             logger.warning("picks: 锁 %s 超过 30 分钟，视为陈旧覆盖", p)
@@ -189,17 +201,38 @@ def acquire_lock(scope: str) -> bool:
         return True
 
 
-def release_lock(scope: str) -> None:
+def release_lock(scope: str, path: str | None = None) -> None:
     try:
-        os.remove(_lock_path(scope))
+        os.remove(path or _lock_path(scope))
     except OSError:
         pass
 
 
+def is_running(scope: str) -> bool:
+    """按锁文件判断是否在跑：scope='public' 查公共锁；'watchlist' 查当前用户自己的锁。
+
+    锁文件不存在或已陈旧（超过 LOCK_STALE_SEC）都算未在跑，跟 acquire_lock 的
+    陈旧判定口径一致。当前上下文没有用户时按未在跑处理，不让路由因此 500。
+    """
+    try:
+        path = _user_lock_path() if scope == "watchlist" else _lock_path(scope)
+    except RuntimeError:
+        return False
+    if not os.path.exists(path):
+        return False
+    return time.time() - os.path.getmtime(path) <= LOCK_STALE_SEC
+
+
 def settle(scope: str, today: str) -> dict[str, Any]:
-    """到期 + 结果贴回（拉日 K，只对近 60 天有记录的股票）。"""
+    """到期 + 结果贴回（拉日 K）。
+
+    结算对象是「近 WINDOW_DAYS 天内出现过的全部代码」（`recent_codes`），不是
+    只看当前 open 行——本函数先调 expire() 才结算，短线行大概率此时已经被标成
+    expired、如果只看 open 行就永远轮不到它，20 日收益会一直空着。
+    """
     expired = picks_store.expire(scope, today)
-    codes = sorted({r["code"] for r in picks_store.current(scope)})
+    since = (dt.date.fromisoformat(today) - dt.timedelta(days=picks_store.WINDOW_DAYS)).isoformat()
+    codes = picks_store.recent_codes(scope, since)
     n = 0
     for c in codes:
         try:
@@ -224,15 +257,19 @@ def run_public(market_ctx: dict[str, Any] | None = None,
                horizons: tuple[str, ...] = ("short", "mid", "long"), capital: float = 10000) -> dict[str, Any]:
     """跑公共三周期。每个周期独立 try/except：一个周期失败不影响其余周期，也不回滚
     已经成功落库的行——`calls`/`error` 都如实反映实际发生的事。"""
-    today = dt.date.today().isoformat()
+    today = _today()
     run_id = f"pub-{today}-{int(time.time())}"
     picks_store.init("public")
     if not acquire_lock("public"):
         return {"run_id": run_id, "calls": 0, "horizons": [], "error": "已在生成"}
     try:
-        settle("public", today)
         total = 0
         errors: list[str] = []
+        try:
+            settle("public", today)
+        except Exception as e:  # noqa: BLE001 结算失败不影响选股
+            logger.warning("picks: 公共结算失败: %s", e)
+            errors.append(f"settle: {e}")
         for h in horizons:
             try:
                 pool = {"short": short_pool, "mid": mid_pool, "long": long_pool}[h]()
@@ -240,6 +277,8 @@ def run_public(market_ctx: dict[str, Any] | None = None,
                 memory = {r["code"]: picks_store.memory_block("public", r["code"], (levels.get(r["code"]) or {}).get("price"), today) for r in rows}
                 calls = llm_picks.horizon_picks(h, rows, levels, memory, market_ctx, capital)
                 total += _persist("public", calls, today, run_id)
+                if not calls and llm_picks.LAST_ERROR:
+                    errors.append(f"{h}: {llm_picks.LAST_ERROR}")
             except Exception as e:  # noqa: BLE001 单周期失败不拖累其余周期，已落库的行保留
                 logger.exception("picks: 周期 %s 失败", h)
                 errors.append(f"{h}: {e}")
@@ -249,23 +288,31 @@ def run_public(market_ctx: dict[str, Any] | None = None,
 
 
 def run_watchlist(market_ctx: dict[str, Any] | None = None, capital: float | None = None) -> dict[str, Any]:
-    today = dt.date.today().isoformat()
+    """跑个人自选股。跨进程按当前用户的锁文件互斥（`_user_lock_path`），一个用户
+    在同一时刻只允许一轮在跑；锁与账本落库无关，任何失败路径都在 finally 里释放。"""
+    today = _today()
     run_id = f"wl-{userctx.get_uid() or 'nouser'}-{today}-{int(time.time())}"
     picks_store.init("watchlist")
-    codes = [str(c) for c in (store.load_watchlist() or []) if c]   # load_watchlist 返回代码列表
-    if not codes:
-        return {"run_id": run_id, "calls": 0, "error": "自选股为空"}
-    if capital is None:
-        capital = float((profile_store.get_active() or {}).get("cash") or 10000)
+    lock_path = _user_lock_path()
+    if not acquire_lock("watchlist", lock_path):
+        return {"run_id": run_id, "calls": 0, "error": "已在生成"}
     try:
+        codes = [str(c) for c in (store.load_watchlist() or []) if c]   # load_watchlist 返回代码列表
+        if not codes:
+            return {"run_id": run_id, "calls": 0, "error": "自选股为空"}
+        if capital is None:
+            capital = float((profile_store.get_active() or {}).get("cash") or 10000)
         settle("watchlist", today)
         rows, levels = enrich(codes, short=True)
         memory = {c: picks_store.memory_block("watchlist", c, (levels.get(c) or {}).get("price"), today) for c in codes}
         calls = llm_picks.watchlist_points(rows, levels, memory, market_ctx, capital)
-        return {"run_id": run_id, "calls": _persist("watchlist", calls, today, run_id), "error": None}
+        error = f"llm: {llm_picks.LAST_ERROR}" if not calls and llm_picks.LAST_ERROR else None
+        return {"run_id": run_id, "calls": _persist("watchlist", calls, today, run_id), "error": error}
     except Exception as e:  # noqa: BLE001 整轮失败账本不动
         logger.exception("picks: 自选股运行失败")
         return {"run_id": run_id, "calls": 0, "error": str(e)}
+    finally:
+        release_lock("watchlist", lock_path)
 
 
 def due_slot(now: dt.datetime, last: dict[str, str]) -> str:
@@ -286,18 +333,30 @@ def tick(uids_fn: Callable[[], list[str]],
     """单次到点判定与执行，供 `loop_forever` 每 60 秒调用一次；返回实际跑的 slot（或 ""）。
 
     到点即把 `_last[slot]` 标记为今天已处理——仓库「错过不补」的约定，桶一旦开始就
-    算数，不因为账号内部失败而当天重跑。随后每个账号的自选股运行各自 try/except：
-    一个账号出错（无论是 `run_watchlist` 本身还是它调用的取数）只记日志、跳到下一个
-    账号，不拖累其余账号那一桶。
+    算数，不因为账号内部失败而当天重跑。公共三周期失败也不能让整个 tick 提前退出：
+    `run_public` 包一层 try/except，失败只记日志，随后仍照跑每个账号的自选股。
+    随后每个账号的自选股运行各自 try/except：一个账号出错（无论是 `run_watchlist`
+    本身还是它调用的取数）只记日志、跳到下一个账号，不拖累其余账号那一桶。
     """
-    slot = due_slot(dt.datetime.now(), _last)
+    now = dt.datetime.now(ZoneInfo("Asia/Shanghai"))
+    slot = due_slot(now, _last)
     if not slot:
         return ""
-    _last[slot] = dt.date.today().isoformat()
-    mctx = market_ctx_fn() if market_ctx_fn else None
+    _last[slot] = _today()
+    mctx = None
+    if market_ctx_fn:
+        try:
+            with userctx.as_fleet():
+                mctx = market_ctx_fn()
+        except Exception as e:  # noqa: BLE001 站长上下文取大盘失败不影响后续跑批
+            logger.warning("picks: 大盘研判获取失败: %s", e)
+            mctx = None
     horizons = ("short", "mid", "long") if slot == "full" else ("short",)
     logger.info("picks: 到点 %s，公共三周期 %s", slot, horizons)
-    run_public(mctx, horizons)
+    try:
+        run_public(mctx, horizons)
+    except Exception as e:  # noqa: BLE001 公共失败不能跳过逐用户自选股循环
+        logger.warning("picks: run_public 异常: %s", e)
     for uid in uids_fn():
         try:
             with userctx.as_user(uid):

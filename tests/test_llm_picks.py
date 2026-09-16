@@ -9,7 +9,8 @@ def ck(cond, msg):
     N[0] += 1
     assert cond, msg
 
-LEVELS = {"600519": {"price": 10.0, "atr_pct": 2.0, "levels": [{"px": 9.5, "kind": "lo20"}, {"px": 11.0, "kind": "hi20"}, {"px": 9.2, "kind": "atr_lo2"}]}}
+LEVELS = {"600519": {"price": 10.0, "atr_pct": 2.0, "levels": [{"px": 9.5, "kind": "lo20"}, {"px": 11.0, "kind": "hi20"}, {"px": 9.2, "kind": "atr_lo2"}]},
+          "000001": {"price": 10.0, "atr_pct": 2.0, "levels": [{"px": 9.5, "kind": "lo20"}, {"px": 11.0, "kind": "hi20"}, {"px": 9.2, "kind": "atr_lo2"}]}}
 CANDS = [{"code": "600519", "name": "贵州茅台", "primary": "食品", "sub": "白酒", "price": 10.0, "pe_ttm": 20, "pb": 5,
           "vol": 30, "cum20": 3.0, "range_pos": 40, "net20": 1.2, "turnover": 1.5, "lot_cost": 1000}]
 
@@ -33,18 +34,20 @@ def test_validate_snaps_and_drops_unknown():
     ck(isinstance(c["basis_json"], str), "basis 存字符串")
 
 def test_validate_survives_malformed_rows():
+    # 后两条故意用不同代码（600519/000001）：同一代码在一次返回里出现两次会被去重（见
+    # test_validate_uses_quote_names_and_dedupes），这里要测的是「格式各异的行都能各自按条通过」。
     parsed = {"calls": [
         "not a dict",
         {"code": "600519", "name": "贵州茅台", "horizon": "short", "stance": "buy", "entry": 9.6, "stop": 9.2,
          "decision": "new", "trigger": "none", "thesis": "t", "trigger_note": "n", "basis": {}},
-        {"code": "600519", "name": "贵州茅台", "horizon": "short", "stance": "buy", "entry": [9.5, 9.6], "exit": [10.9, 11.3],
+        {"code": "000001", "name": "平安银行", "horizon": "short", "stance": "buy", "entry": [9.5, 9.6], "exit": [10.9, 11.3],
          "stop": 9.2, "decision": "new", "trigger": "none", "thesis": "t", "trigger_note": "n", "basis": {}}]}
-    out = lp.validate_calls(parsed, LEVELS, {"600519"})
+    out = lp.validate_calls(parsed, LEVELS, {"600519", "000001"})
     ck(len(out) == 2, f"非字典项被跳过、其余两条按条通过: {len(out)}")
     b, c = out
     ck(b["entry_lo"] == b["entry_hi"] == 9.5, f"标量区间吸附成 [x,x] 再吸附到候选: {b['entry_lo']} {b['entry_hi']}")
     ck(b["exit_lo"] is None, "缺失 exit 置空而不是抛异常")
-    ck(c["code"] == "600519", "第三条完整行正常通过")
+    ck(c["code"] == "000001", "第三条完整行正常通过")
 
 def test_horizon_picks_prompt_and_parse():
     reply = {"calls": [{"code": "600519", "name": "贵州茅台", "horizon": "mid", "stance": "buy", "entry": [9.5, 9.6],
@@ -66,11 +69,24 @@ def test_watchlist_points_bad_json_returns_empty():
     try:
         out = lp.watchlist_points(CANDS, LEVELS, {}, None, 10000)
         ck(out == [], "解析失败返回空列表而不是抛")
+        ck(lp.LAST_ERROR != "", "解析失败应记录 LAST_ERROR，供调用方把原因带给用户")
     finally:
         llm._chat = orig
 
+def test_validate_uses_quote_names_and_dedupes():
+    parsed = {"calls": [
+        {"code": "600519", "name": "模型瞎写的名字", "horizon": "short", "stance": "buy", "entry": [9.7, 9.9],
+         "exit": [10.9, 11.3], "stop": 9.2, "decision": "new", "trigger": "none", "thesis": "第一条", "trigger_note": "n", "basis": {}},
+        {"code": "600519", "name": "又一个瞎写的", "horizon": "short", "stance": "sell", "entry": [9.6, 9.7],
+         "exit": [10.8, 11.0], "stop": 9.2, "decision": "new", "trigger": "none", "thesis": "第二条", "trigger_note": "n", "basis": {}}]}
+    out = lp.validate_calls(parsed, LEVELS, {"600519"}, {"600519": "贵州茅台"})
+    ck(len(out) == 1, "一次返回里同一代码重复，应只留第一条")
+    ck(out[0]["name"] == "贵州茅台", "名字应取自行情快照传入的 names，不是模型自己写的")
+    ck(out[0]["thesis"] == "第一条", "保留的应是第一条，不是后来的重复项")
+
 if __name__ == "__main__":
     for fn in (test_validate_snaps_and_drops_unknown, test_validate_survives_malformed_rows,
-               test_horizon_picks_prompt_and_parse, test_watchlist_points_bad_json_returns_empty):
+               test_horizon_picks_prompt_and_parse, test_watchlist_points_bad_json_returns_empty,
+               test_validate_uses_quote_names_and_dedupes):
         fn()
     print(f"OK — test_llm_picks 全过（{N[0]} 断言）")

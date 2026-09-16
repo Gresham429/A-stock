@@ -11,6 +11,8 @@ import picks_store
 
 logger = logging.getLogger(__name__)
 
+LAST_ERROR: str = ""   # 上一次 _ask 失败的原因；调用方在返回空列表时可以把这句话带给用户
+
 HORIZON_CN = {"short": "短线（1 到 5 个交易日，交易活跃、低吸高抛，给具体价位）",
               "mid": "中线（2 到 8 周，板块轮动、趋势刚起，价位区间加趋势破坏即离场）",
               "long": "长线（3 到 12 个月，基本面与估值，分批建仓区间）"}
@@ -58,8 +60,10 @@ def _range(v: Any) -> list[Any]:
     return [None, None]
 
 
-def validate_calls(parsed: dict[str, Any], levels: dict[str, dict], allowed: set[str]) -> list[dict[str, Any]]:
+def validate_calls(parsed: dict[str, Any], levels: dict[str, dict], allowed: set[str],
+                   names: dict[str, str] | None = None) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    seen: set[str] = set()
     for c in (parsed or {}).get("calls") or []:
         if not isinstance(c, dict):
             logger.info("picks: 丢弃非字典项 %r", c)
@@ -69,6 +73,10 @@ def validate_calls(parsed: dict[str, Any], levels: dict[str, dict], allowed: set
             if code not in allowed:
                 logger.info("picks: 丢弃不在候选内的 %s", code)
                 continue
+            if code in seen:
+                logger.info("picks: 一次返回里 %s 重复，只留第一条", code)
+                continue
+            seen.add(code)
             lv = (levels.get(code) or {}).get("levels") or []
             adjusted = False
 
@@ -86,7 +94,7 @@ def validate_calls(parsed: dict[str, Any], levels: dict[str, dict], allowed: set
             exit_ = _range(c.get("exit"))
             basis = c.get("basis") if isinstance(c.get("basis"), dict) else {}
             row = {
-                "code": code, "name": c.get("name", ""),
+                "code": code, "name": (names or {}).get(code) or c.get("name", ""),
                 "horizon": c.get("horizon") if c.get("horizon") in picks_store.HORIZON_DAYS else "short",
                 "stance": c.get("stance") if c.get("stance") in ("buy", "watch", "avoid", "sell") else "watch",
                 "entry_lo": _s(entry[0]), "entry_hi": _s(entry[1]),
@@ -107,12 +115,16 @@ def validate_calls(parsed: dict[str, Any], levels: dict[str, dict], allowed: set
 
 
 def _ask(prompt: str, max_tokens: int) -> dict[str, Any]:
+    global LAST_ERROR
     try:
         text = llm._chat([{"role": "system", "content": llm._system_prompt()[0]},
                           {"role": "user", "content": prompt}], max_tokens=max_tokens)
-        return llm._parse_json(text)
+        parsed = llm._parse_json(text)
+        LAST_ERROR = ""
+        return parsed
     except (llm.LLMError, ValueError) as e:
         logger.warning("picks: 模型调用或解析失败: %s", e)
+        LAST_ERROR = str(e)
         return {}
 
 
@@ -129,7 +141,8 @@ def horizon_picks(horizon: str, candidates: list[dict[str, Any]], levels: dict[s
 {_SCHEMA}
 calls 恰好 5 条，horizon 填 {horizon}。"""
     parsed = _ask(prompt, 9000)
-    out = validate_calls(parsed, levels, {r["code"] for r in candidates})
+    names = {r["code"]: r["name"] for r in candidates}
+    out = validate_calls(parsed, levels, {r["code"] for r in candidates}, names)
     for r in out:
         r["horizon"] = horizon
     return out[:5]
@@ -149,4 +162,5 @@ def watchlist_points(rows: list[dict[str, Any]], levels: dict[str, dict], memory
 {_SCHEMA}
 calls 覆盖全部自选股，每只一条。"""
     parsed = _ask(prompt, 9000)
-    return validate_calls(parsed, levels, {r["code"] for r in rows})
+    names = {r["code"]: r["name"] for r in rows}
+    return validate_calls(parsed, levels, {r["code"] for r in rows}, names)

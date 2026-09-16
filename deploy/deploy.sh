@@ -118,7 +118,11 @@ done
 say "8/9 本机防火墙"
 # 真正的防线是阿里云安全组（见 README-deploy.md）。这里再关一道，
 # 防的是「安全组规则被误改」这种事——两层都得破才暴露。
-if command -v ufw >/dev/null; then
+# 机器上还跑着别的服务（nginx / k3s / 游戏服 等）时不能这么做：默认拒绝入站会把它们
+# 一起关掉。那种情况用 ASTOCK_UFW=0 跳过，只靠安全组 + Tailscale。
+if [ "${ASTOCK_UFW:-1}" != 1 ]; then
+  warn "ASTOCK_UFW=0：跳过 ufw（共用机器，别的服务还在监听公网端口），防线只剩安全组 + Tailscale"
+elif command -v ufw >/dev/null; then
   ufw --force default deny incoming >/dev/null
   ufw --force default allow outgoing >/dev/null
   ufw allow 22/tcp >/dev/null

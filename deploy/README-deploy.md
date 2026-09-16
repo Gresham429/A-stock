@@ -180,6 +180,10 @@ scp data/agents.db aliyun_ecs:~/ \
 # 其余 4 个库和 watchlist.json / portfolio.json 同理，传完再跑步骤 3 的 migrate
 ```
 
+机器上如果还跑着别的服务（nginx、k3s、游戏服之类，`ss -ltnp` 能看到它们监听公网端口），
+不要让 `deploy.sh` 启用 ufw，否则会把它们一起挡掉：`ASTOCK_UFW=0 sudo -E bash deploy/deploy.sh`。
+这种情况下外围防线是阿里云安全组和 Tailscale。
+
 `deploy.sh` 会装依赖（`requirements.txt` + `deploy/requirements-server.txt`）、
 设时区、建不可登录的 `astock` 系统账号、建 venv、生成 `ASTOCK_SECRET_KEY`、
 设权限、装 systemd 服务（web、scheduler，以及每天五次触发 `fetch_news.py` 的 `astock-news.timer`，

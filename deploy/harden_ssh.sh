@@ -12,16 +12,21 @@
 #   2. 改完自动布一个「倒计时撤销」——你不在限定时间内确认，配置自动还原；
 #   3. 用 reload 而不是 restart，当前这条连接不会被踢掉。
 # 三层加起来，最坏情况也就是等几分钟自己恢复。
+# 改完还会用 sshd -T 读一遍实际生效值——文件写对了不等于生效了，
+# sshd 对同一个选项取「第一次出现」的值，别的 drop-in 排在前面就会压过我们。
 set -euo pipefail
 
-DROPIN=/etc/ssh/sshd_config.d/99-astock-hardening.conf
+# 文件名以 00- 开头：sshd_config.d 按文件名字典序 Include，同一选项第一次出现的值生效，
+# 所以我们的文件必须排在云厂商的 50-cloud-init.conf 之类前面才压得住它。
+DROPIN=/etc/ssh/sshd_config.d/00-astock-hardening.conf
+CLOUDINIT=/etc/ssh/sshd_config.d/50-cloud-init.conf
 MAIN=/etc/ssh/sshd_config
 REVERT_UNIT=astock-ssh-revert
 REVERT_MIN="${ASTOCK_SSH_REVERT_MIN:-10}"
 
 say()  { printf '\n\033[1;33m▸ %s\033[0m\n' "$*"; }
-ok()   { printf '  \033[0;32m✓\033[0m %s\n' "$*"; }
-bad()  { printf '  \033[0;31m✗\033[0m %s\n' "$*"; }
+ok()   { printf '  \033[0;32m[ok]\033[0m %s\n' "$*"; }
+bad()  { printf '  \033[0;31m[x]\033[0m %s\n' "$*"; }
 die()  { printf '\n\033[0;31m已中止，配置一个字没动。\033[0m\n%s\n\n' "$*"; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || die "请用 sudo 运行：sudo bash $0"
@@ -93,6 +98,13 @@ if ! grep -qE '^\s*Include\s+/etc/ssh/sshd_config\.d/\*\.conf' "$MAIN"; then
   printf '  \033[0;33m?\033[0m %s 没有 Include sshd_config.d，改为直接追加到主配置\n' "$MAIN"
 else
   ok "支持 sshd_config.d drop-in"
+  # 云镜像常带这个文件，里面往往写着 PasswordAuthentication yes。
+  # 我们的 00- 文件排在它前面会压过它，但要让你知道它在，别以为是脚本没生效。
+  if [ -f "$CLOUDINIT" ]; then
+    printf '  \033[0;33m?\033[0m 检测到 %s（云镜像自带，内容如下）：\n' "$CLOUDINIT"
+    grep -vE '^\s*(#|$)' "$CLOUDINIT" | sed 's/^/      /' || true
+    printf '      我们的 %s 按字典序排在它前面，同名选项以我们的为准；下面会用 sshd -T 核实。\n' "$(basename "$DROPIN")"
+  fi
 fi
 
 say "备份"
@@ -114,6 +126,8 @@ ClientAliveCountMax 2'
 
 if [ "$USE_DROPIN" = 1 ]; then
   mkdir -p /etc/ssh/sshd_config.d
+  # 旧版脚本写的是 99- 文件，内容相同；留着只会让人误以为有两份配置
+  rm -f /etc/ssh/sshd_config.d/99-astock-hardening.conf
   printf '%s\n' "$CONF" > "$DROPIN"
   chmod 644 "$DROPIN"
   ok "已写入 $DROPIN"
@@ -150,10 +164,22 @@ say "生效（用 reload，当前连接不会断）"
 systemctl reload "$SVC"
 ok "$SVC 已 reload"
 
+say "核实生效值（sshd -T 输出的是合并所有配置后的真实值）"
+EFFECTIVE=$(sshd -T 2>/dev/null | grep -iE '^(passwordauthentication|kbdinteractiveauthentication|permitrootlogin|maxauthtries) ' || true)
+printf '%s\n' "$EFFECTIVE" | sed 's/^/    /'
+if printf '%s\n' "$EFFECTIVE" | grep -qi '^passwordauthentication no'; then
+  ok "PasswordAuthentication 生效值为 no"
+else
+  bad "PasswordAuthentication 生效值不是 no：写进去了但被别的配置压住了"
+  printf '    多半是 %s 之外还有排在更前面的 drop-in 或 Match 块。查一下：\n' "$(basename "$DROPIN")"
+  printf '      grep -rn -i passwordauthentication %s %s\n' "$MAIN" /etc/ssh/sshd_config.d/
+  printf '    倒计时撤销仍然布着，不确认就会自动还原；先别关这个终端。\n'
+fi
+
 cat <<TIP
 
 ───────────────────────────────────────────────────────
-  ⚠  别关这个终端。现在去你自己的电脑上**另开一个终端**验证：
+  注意：别关这个终端。现在去你自己的电脑上**另开一个终端**验证：
 
         ssh aliyun_ecs
 

@@ -52,7 +52,7 @@ def _copy_db(src: str, dst: str) -> str:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="单人数据 → 多用户目录")
+    ap = argparse.ArgumentParser(description="单人数据 -> 多用户目录")
     ap.add_argument("uid", help="你的用户名（要和 astockctl.py adduser 建的那个一致）")
     ap.add_argument("--force", action="store_true", help="目标已存在时覆盖")
     a = ap.parse_args()
@@ -77,13 +77,17 @@ def main() -> None:
             continue
         if rel.endswith(".db"):
             size = _copy_db(src, dst)
-            print(f"  ✓   {rel:<22} → {name}  ({size})")
+            print(f"  [ok] {rel:<22} -> {name}  ({size})")
         else:
             shutil.copy2(src, dst)
-            print(f"  ✓   {rel:<22} → {name}")
+            print(f"  [ok] {rel:<22} -> {name}")
         moved += 1
 
     print(f"\n完成：复制 {moved} 个，跳过 {skipped} 个。原文件全部保留。")
+    if skipped and not moved:
+        sys.exit("目标文件已全部存在，一个都没复制。若它们是服务先起来时自动建出的空库"
+                 "（建完账号先登录过、或调度进程先跑过），加 --force 重跑覆盖：\n"
+                 f"    python3 deploy/migrate_to_multiuser.py {a.uid} --force")
     print("\n验收步骤：")
     print("  1. 启动服务，用这个账号登录，确认自选股/持仓/画像/agent 都在")
     print("  2. 确认无误后，再手动删掉仓库根目录的 watchlist.json、portfolio.json")

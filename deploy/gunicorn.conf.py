@@ -36,9 +36,10 @@ loglevel = os.environ.get("ASTOCK_LOG_LEVEL", "info").lower()
 # 访问日志带上响应耗时(%(D)s 微秒)，排查「哪个接口变慢了」时有用
 access_log_format = '%(h)s "%(r)s" %(s)s %(b)s %(D)sus "%(a)s"'
 
-# 定期回收 worker：本项目长跑会攒下线程池和缓存，定期换一批更稳。
-# jitter 避免几个 worker 同时重启造成请求空档。
-max_requests = 2000
-max_requests_jitter = 200
+# 不回收 worker（0 = 关闭）。run_all 和复盘都在 worker 的后台线程里跑，
+# worker 一到 max_requests 被回收，跑到一半的 agent 轮次/复盘会跟着被杀。
+# 几个人的流量攒不出需要回收的泄漏，稳定性比「定期换一批」重要。
+max_requests = 0
+max_requests_jitter = 0
 
 proc_name = "astock-web"

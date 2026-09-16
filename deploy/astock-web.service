@@ -9,7 +9,14 @@ Type=notify
 User=astock
 Group=astock
 WorkingDirectory=/opt/astock
+# .env 里的 ASTOCK_* / DEEPSEEK_* 由 systemd 注入进程环境（config.py 只在文件存在时才读，
+# 这里再注入一次是为了让 ratelimit/auth 这类在 import 期就读环境的模块也拿得到）。
+# 前缀 "-" 表示文件不存在也不报错。
+EnvironmentFile=-/opt/astock/.env
 Environment="ASTOCK_ENV=production"
+# 日期键（限流日预算、交易日判断、复盘落盘文件名）全部按北京时间算，
+# 服务器系统时区不一定是它，这里显式钉死。
+Environment="TZ=Asia/Shanghai"
 Environment="PATH=/opt/astock/.venv/bin:/usr/local/bin:/usr/bin:/bin"
 ExecStart=/opt/astock/.venv/bin/gunicorn -c deploy/gunicorn.conf.py wsgi:application
 ExecReload=/bin/kill -s HUP $MAINPID
@@ -22,7 +29,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict          # 整个文件系统只读……
 ProtectHome=true              # ……/home /root 直接不可见
-ReadWritePaths=/opt/astock    # ……只有应用目录可写
+# ……只有数据目录和 AI 缓存文件可写；代码目录归 root、进程改不了自己的代码
+ReadWritePaths=/opt/astock/data /opt/astock/ai_cache.json
 PrivateDevices=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
@@ -34,9 +42,10 @@ MemoryDenyWriteExecute=true
 RestrictSUIDSGID=true
 RemoveIPC=true
 
-# 资源上限：单进程失控时不至于把整机拖死
+# 资源上限：单进程失控时不至于把整机拖死。
+# web 1200M + scheduler 600M 合计不超过 2G，对应 README-deploy 里「2 核 2G」的机型。
 LimitNOFILE=8192
-MemoryMax=1500M
+MemoryMax=1200M
 TasksMax=256
 
 [Install]

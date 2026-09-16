@@ -9,6 +9,7 @@ import datetime as dt
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 import datasources as ds
@@ -24,14 +25,23 @@ logger = logging.getLogger(__name__)
 POOL_N = 30
 KLINE_N = 90
 LONG_PREFILTER = 120
+_SNAP_TTL = 600
+_snap_cache: dict[str, Any] = {"ts": 0.0, "rows": []}
 
 
 def _snapshot() -> list[dict[str, Any]]:
+    """全市场快照，带 TTL 缓存——short_pool/long_pool 各调一次，别各拉一遍全市场。"""
+    now = time.time()
+    if now - _snap_cache["ts"] < _SNAP_TTL:
+        return _snap_cache["rows"]
     try:
-        return ds.sina_all_stocks() or []
+        rows = ds.sina_all_stocks() or []
     except Exception as e:  # noqa: BLE001 取数失败按空处理，池子退化不崩
         logger.warning("picks: 全市场快照失败: %s", e)
-        return []
+        rows = []
+    _snap_cache["ts"] = now
+    _snap_cache["rows"] = rows
+    return rows
 
 
 def short_pool(n: int = POOL_N) -> list[str]:
@@ -65,8 +75,6 @@ def mid_pool(n: int = POOL_N) -> list[str]:
         for c in universe_store.codes_of(row.get("sector", ""))[:8]:
             if c not in out:
                 out.append(c)
-        if len(out) >= n * 2:
-            break
     if not out:
         return []
     m = screening._metrics_of(out)
@@ -75,33 +83,56 @@ def mid_pool(n: int = POOL_N) -> list[str]:
     return (good + rest)[:n]
 
 
+def _fin_ok(code: str) -> bool:
+    """营收、利润同比是否双正；单只财报失败按不合格处理，不拖垮整批并发取数。"""
+    try:
+        fin = ds.financial_summary(code) or []
+    except Exception as e:  # noqa: BLE001 单只财报失败按不合格处理，不影响其余并发请求
+        logger.warning("picks: %s 财报失败: %s", code, e)
+        return False
+    if not fin:
+        return False
+    f0 = fin[0]
+    return (f0.get("revenue_yoy") or 0) > 0 and (f0.get("profit_yoy") or 0) > 0
+
+
 def long_pool(n: int = POOL_N) -> list[str]:
-    """长线：估值分位低（PE、PB 在快照里排前 LONG_PREFILTER）且营收、利润同比双正。"""
+    """长线：估值分位低（PE、PB 在快照里排前 LONG_PREFILTER）且营收、利润同比双正。
+
+    财报逐只请求是网络调用，串行 120 次太慢，用小并发池并行取。
+    """
     snap = [s for s in _snapshot() if s.get("pe_ttm") and s["pe_ttm"] > 0 and s.get("pb") and s["pb"] > 0]
     snap.sort(key=lambda s: (float(s["pe_ttm"]) * float(s["pb"])))
-    out: list[str] = []
-    for s in snap[:LONG_PREFILTER]:
-        c = str(s.get("code", ""))
-        fin = ds.financial_summary(c) or []
-        if not fin:
-            continue
-        f0 = fin[0]
-        if (f0.get("revenue_yoy") or 0) > 0 and (f0.get("profit_yoy") or 0) > 0:
-            out.append(c)
-        if len(out) >= n:
-            break
-    return out
+    cands = snap[:LONG_PREFILTER]
+    if not cands:
+        return []
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        pairs = list(ex.map(lambda s: (s["code"], _fin_ok(s["code"])), cands))
+    out = [str(code) for code, ok in pairs if ok]
+    return out[:n]
 
 
 def enrich(codes: list[str], short: bool = False) -> tuple[list[dict[str, Any]], dict[str, dict]]:
-    """行情 + 指标 + 板块 + 候选价位。"""
+    """行情 + 指标 + 板块 + 候选价位。缺行情的代码剔除，不进 rows/levels。"""
     if not codes:
         return [], {}
     quotes = ds.tencent_quote(codes)
-    metrics = screening._metrics_of(codes)
+    valid: list[str] = []
+    dropped = 0
+    for c in codes:
+        q = quotes.get(c) or {}
+        if q.get("price") is None:
+            dropped += 1
+            continue
+        valid.append(c)
+    if dropped:
+        logger.warning("picks: %d 只无行情已剔除", dropped)
+    if not valid:
+        return [], {}
+    metrics = screening._metrics_of(valid)
     rows: list[dict[str, Any]] = []
     levels: dict[str, dict] = {}
-    for c in codes:
+    for c in valid:
         q = quotes.get(c) or {}
         m = metrics.get(c) or {}
         try:

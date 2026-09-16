@@ -25,6 +25,7 @@ import profile_store
 import rules_store
 import template_store
 import universe_store
+import userctx
 import websearch
 
 logger = logging.getLogger(__name__)
@@ -73,10 +74,16 @@ def _lesson_block(agent_id: int | None = None) -> str:
     有本质区别：这里数事实，那里拟合参数。故不受 784 笔样本量死局限制。
 
     `agent_id=None`（用户面 5 个 AI）→ 全体舰队汇总；给定 → 只该 agent 自己的（个体记忆）。
+
+    舰队全站只有一套（站长的 agents.db），所以不管当前请求是谁，都切到站长上下文读。
+    尚未设置站长时 require_uid 抛 RuntimeError，这里按「journal 空时空块」处理。
     """
     try:
-        txt = agent_store.for_ai(agent_id=agent_id)
+        with userctx.as_fleet():
+            txt = agent_store.for_ai(agent_id=agent_id)
         return txt + "\n\n" if txt else ""
+    except RuntimeError:
+        return ""
     except (sqlite3.Error, OSError) as e:
         logger.warning("教训块生成失败: %s", e)
         return ""
@@ -88,7 +95,10 @@ def _stock_house_view(code: str) -> str:
     按 code 查）。只列买入决策；journal 空则不注入。事实统计，非规律。
     """
     try:
-        rows = agent_store.journal_for_code(code, limit=6)
+        with userctx.as_fleet():   # 舰队 = 站长的库，所有人看同一份
+            rows = agent_store.journal_for_code(code, limit=6)
+    except RuntimeError:           # 尚未设置舰队站长：与 journal 空时一样不注入
+        return ""
     except (sqlite3.Error, OSError) as e:
         logger.warning("个股 house-view 生成失败: %s", e)
         return ""
@@ -115,7 +125,10 @@ def _regime_view(regime: str) -> str:
     if not regime:
         return ""
     try:
-        rows = agent_store.journal_for_regime(regime, limit=12)
+        with userctx.as_fleet():   # 舰队 = 站长的库，所有人看同一份
+            rows = agent_store.journal_for_regime(regime, limit=12)
+    except RuntimeError:           # 尚未设置舰队站长：与 journal 空时一样不注入
+        return ""
     except (sqlite3.Error, OSError) as e:
         logger.warning("regime-view 生成失败: %s", e)
         return ""

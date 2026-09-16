@@ -41,7 +41,7 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com
   ```
 - 结果落 `data/review/<date>.json`（已 gitignore），`/review` 自动读最新一份。
 
-## 部署（本地 macOS · 三步即可）
+## 部署（本地 macOS · 四步）
 
 面向本地 macOS：**开着 app 就自动出复盘**，不用配 cron / launchd。
 
@@ -57,11 +57,23 @@ echo 'DEEPSEEK_API_KEY=sk-你的key' > .env
 ```
 > 不填也能跑，只是没有 AI 研判/文稿（硬指标照常）。key 在 [platform.deepseek.com](https://platform.deepseek.com) 申请。
 
-**③ 启动**：
+**③ 建账号（一次）**——看板有登录页，个人数据按账号放在 `data/users/<账号>/`：
+```bash
+python3 astockctl.py adduser <你> --admin            # 首个管理员即 agent 舰队的站长
+python3 deploy/migrate_to_multiuser.py <你>          # 老用户：把根目录旧数据迁到你名下（新装可跳过）
+```
+> 迁移要在第一次登录前做；本地不要设 `ASTOCK_ENV=production`（那会让 cookie 只走 https）。
+
+**④ 启动**：
 ```bash
 python3 app.py
 ```
-浏览器开 **http://127.0.0.1:5000**，左上角切「选股自动化 / 复盘自动化」。（⚠️ 用 `127.0.0.1`，别用 `localhost`——localhost 会撞 macOS AirPlay 的 5000 端口。）
+浏览器开 **http://127.0.0.1:5000**，登录后左上角切「选股自动化 / 复盘自动化」。（⚠️ 用 `127.0.0.1`，别用 `localhost`——localhost 会撞 macOS AirPlay 的 5000 端口。）
+
+### 部署到服务器给几个人共用
+
+登录、每人一份数据、AI 日预算、gunicorn + 独立调度进程、Tailscale 私网、阿里云一键脚本，
+全部在 `deploy/`，步骤看 `deploy/README-deploy.md`。服务器上 agent 默认不自动跑（`ASTOCK_AGENT_AUTO=0`）。
 
 **就这样，之后全自动**：
 - **复盘每天自动出**：只要 app 开着，**每个交易日 18:30 自动生成当日复盘**（等龙虎榜定稿；想改时刻，启动前设 `export REVIEW_AUTO_TIME=19:00`）。也可随时到 `/review` 点右上「↻ 生成今日复盘」手动出。

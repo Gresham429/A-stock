@@ -5,11 +5,15 @@
 - 体检闸：核心数据（涨停池）缺 → 硬拒，绝不拿空数据喂 AI（防编造）。
 - AI 整块可降级：失败/未配 key → 保留硬指标照常落盘。
 - history / prev_theme 从既有存档取，供 情绪周期 / 题材延续率。
+- 跨进程互斥：文件锁 data/review/.running-<date>（gunicorn 多 worker + scheduler 互不可见，
+  进程内的 app._review_job 挡不住双跑）。拿不到锁返回 status=running。
 """
 from __future__ import annotations
 
 import datetime
 import logging
+import os
+import time
 from typing import Optional
 
 from . import fetch, llm_review, metrics, store
@@ -17,13 +21,80 @@ from . import fetch, llm_review, metrics, store
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
+LOCK_STALE_SEC = 30 * 60   # 锁超过 30 分钟视为陈旧（进程崩溃未清理），可覆盖
+
+
+# ── 跨进程文件锁 ─────────────────────────────────────────────────────
+def _lock_path(date: str) -> str:
+    # 运行时读 store.REVIEW_DIR（不在 import 时绑定），测试可改目录
+    return os.path.join(store.REVIEW_DIR, f".running-{date}")
+
+
+def _lock_age(path: str) -> Optional[float]:
+    """锁文件年龄（秒）。以文件内写的时间为准，解析失败退回 mtime；文件不存在返回 None。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            parts = f.read().split()
+        ts = float(parts[1])
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, IndexError):
+        try:
+            ts = os.path.getmtime(path)
+        except OSError:
+            return None
+    return time.time() - ts
+
+
+def acquire_lock(date: str) -> bool:
+    """原子创建 .running-<date>（O_CREAT|O_EXCL），写入 "pid time"。
+
+    已存在且未陈旧返回 False；陈旧（超过 LOCK_STALE_SEC）则 warning 后删除重试一次。
+    """
+    os.makedirs(store.REVIEW_DIR, exist_ok=True)
+    path = _lock_path(date)
+    for attempt in (0, 1):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            age = _lock_age(path)
+            if attempt == 1 or age is None or age < LOCK_STALE_SEC:
+                return False
+            logger.warning("复盘 %s 锁文件已 %.0f 分钟未释放，视为陈旧覆盖: %s",
+                           date, age / 60, path)
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+            continue
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(f"{os.getpid()} {time.time():.0f}")
+        return True
+    return False
+
+
+def release_lock(date: str) -> None:
+    """删除锁文件；不存在也不报错。"""
+    try:
+        os.remove(_lock_path(date))
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        logger.error("释放复盘锁 %s 失败: %s", date, e)
+
+
+def is_running(date: str) -> bool:
+    """是否有进程正在生成该场次（锁存在且未陈旧）。供 /api/review/status 合并显示。"""
+    age = _lock_age(_lock_path(date))
+    return age is not None and age < LOCK_STALE_SEC
 
 
 def run_review(date: Optional[str] = None, force: bool = False,
                with_ai: bool = True) -> dict:
     """跑一场复盘。返回结果 dict（含 status）。
 
-    status: done(新算并落盘) / already(已有存档，未 force) / error(体检闸失败)。
+    status: done(新算并落盘) / already(已有存档，未 force) /
+            running(别的进程正在生成该场次，本次跳过) / error(体检闸失败)。
     """
     target = fetch.resolve_trade_date(date)
     if not target:
@@ -35,6 +106,19 @@ def run_review(date: Optional[str] = None, force: bool = False,
             logger.info("复盘 %s 已有存档，跳过（force=1 可重跑）", target)
             return {"status": "already", "target_date": target, "envelope": existing}
 
+    # 存档检查之后、真正取数之前拿跨进程锁；结束（含异常）一定释放
+    if not acquire_lock(target):
+        logger.info("复盘 %s 已有进程在生成，本次跳过", target)
+        return {"status": "running", "target_date": target,
+                "error": "该场次正在由另一进程生成，稍后刷新即可"}
+    try:
+        return _run_locked(target, date, with_ai)
+    finally:
+        release_lock(target)
+
+
+def _run_locked(target: str, date: Optional[str], with_ai: bool) -> dict:
+    """持锁后的实际流程：取数 -> 体检闸 -> 硬指标 -> AI -> 落盘。"""
     dash = fetch.to_dash(target)
     logger.info("开始复盘 %s …", target)
 

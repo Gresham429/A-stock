@@ -1,0 +1,43 @@
+# 放到 /etc/systemd/system/astock-scheduler.service
+# 定时任务单独一个进程，且必须是单实例——多份调度器会让同一个 agent
+# 被并发决策、重复下单、重复写教训。
+[Unit]
+Description=A股观察台 · 定时任务 (复盘 / 公共数据回填 / 清理；agent 自动跑默认关)
+After=network-online.target astock-web.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=astock
+Group=astock
+WorkingDirectory=/opt/astock
+# 同 astock-web.service：.env 注入进程环境，时区钉死为北京时间
+EnvironmentFile=-/opt/astock/.env
+Environment="ASTOCK_ENV=production"
+Environment="TZ=Asia/Shanghai"
+Environment="PATH=/opt/astock/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/opt/astock/.venv/bin/python3 scheduler.py
+Restart=always
+RestartSec=30
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/astock/data /opt/astock/ai_cache.json
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+RestrictSUIDSGID=true
+
+# 与 astock-web 的 1200M 合计不超过 2G
+LimitNOFILE=4096
+MemoryMax=600M
+TasksMax=128
+
+[Install]
+WantedBy=multi-user.target

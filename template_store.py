@@ -23,6 +23,8 @@ from datetime import date as date_cls
 from datetime import datetime, timedelta
 from typing import Any
 
+import userctx
+
 logger = logging.getLogger(__name__)
 
 _DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
@@ -51,10 +53,8 @@ CREATE INDEX IF NOT EXISTS idx_ts_date ON template_stats(date);
 
 
 def _conn() -> sqlite3.Connection:
-    os.makedirs(_DIR, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10)
-    conn.row_factory = sqlite3.Row
-    return conn
+    # 统一走 userctx.open_db：开 WAL，让多 worker 并发读写不互相阻塞
+    return userctx.open_db(DB_PATH, timeout=10)
 
 
 def init() -> None:

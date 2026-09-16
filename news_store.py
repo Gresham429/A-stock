@@ -24,6 +24,8 @@ import store
 import universe
 import universe_store
 
+import userctx
+
 logger = logging.getLogger(__name__)
 
 _DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
@@ -58,10 +60,8 @@ _hol_cache: dict[int, set[str]] = {}
 
 # ── DB 基础 ────────────────────────────────────────────────────────────────
 def _conn() -> sqlite3.Connection:
-    os.makedirs(_DIR, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10)
-    conn.row_factory = sqlite3.Row
-    return conn
+    # 统一走 userctx.open_db：开 WAL，让多 worker 并发读写不互相阻塞
+    return userctx.open_db(DB_PATH, timeout=10)
 
 
 def init() -> None:
@@ -211,12 +211,19 @@ def _universe_slice(n: int = 15) -> list[str]:
     return sl
 
 
+def _watch_codes() -> list[str]:
+    """自选股代码：有当前用户就取他的；无用户上下文（调度器的公共任务）取全站并集。"""
+    if userctx.get_uid():
+        return store.load_watchlist()
+    return [r["code"] for r in store.load_all_watchlists()]
+
+
 def fetch_incremental() -> dict[str, Any]:
     """增量：全市场快讯 + 自选股新闻 + 轮询一批全池龙头（覆盖各板块）。去重 + 清理 + 记 last_fetch。"""
     init()
     added = insert_many(_market_rows(40))
     seen: set[str] = set()
-    for code in store.load_watchlist() + _universe_slice(15):
+    for code in _watch_codes() + _universe_slice(15):
         if code in seen:
             continue
         seen.add(code)
@@ -233,7 +240,7 @@ def backfill(page_size: int = 50) -> dict[str, Any]:
     added = insert_many(_market_rows(60))
     for code in universe.all_codes():  # 全池龙头 → 覆盖全部一级/二级板块
         added += insert_many(_stock_rows(code, page_size=page_size))
-    for code in store.load_watchlist():  # 自选股额外拉研报（基本面历史）
+    for code in _watch_codes():  # 自选股额外拉研报（基本面历史）
         added += insert_many(_report_rows(code, page_size=30))
     set_meta("last_backfill", datetime.now().isoformat(timespec="seconds"))
     logger.info("news 回填：+%d 条", added)

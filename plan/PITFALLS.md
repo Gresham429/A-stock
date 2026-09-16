@@ -300,3 +300,54 @@ _pa_score 按 vol 正向 IC 选出高波动股 → AI 听话买入
 - **AI 接口 30~90s**：`curl --max-time 200`；有代理时 `--noproxy '*'`（python 要 `os.environ.pop` 掉 `*_proxy`）。
 - **按日累积的表一律要有 `purge()`**：`sector_daily` 曾无清理 → 977 板块 × 245 日 = **24 万行/年 ≈ 82MB**，10 年 820MB。SQLite `DELETE` 不回收文件空间（页复用），稳态≈1年峰值。
 - **`risk_pref` 曾是死字段**：存了、API 能改、前端能选，但 `llm.py` **0 处** → 用户选「稳健/激进」AI 完全看不到。已译成具体行为指令注入（`profile_store.RISK_GUIDE`）。
+
+## 五、多用户与多进程（2026-09-16，分支 multiuser 接线时踩到）
+
+### 19. 线程池不带 contextvars：原生 ThreadPoolExecutor 里「当前用户」是空的
+
+`contextvars` 只随 `copy_context()` 传播，`threading.Thread` 与 `ThreadPoolExecutor.map` 都不会
+自动复制。2026-09-11 的补丁把 app.py 的 `threading.Thread` 换成了 `userctx.Thread`，但没碰
+`agent_loop.run_all` 和 debate 决策里的两个池子，结果打补丁后每个 agent 在 `agent_store.get_agent`
+处抛「当前上下文没有用户」，舰队一次都没真跑过。三个 reader 独立复现。
+规矩：后台线程用 `userctx.Thread` / `spawn` / `submit`，线程池用 `userctx.ctx_map`（逐任务
+`copy_context`，一个 Context 不能被两个线程同时进入）。新加线程的地方先问一句：里面碰个人库吗。
+
+### 20. 预算不能在门之前预扣
+
+补丁版 scheduler 每 5 分钟心跳在 `run_all` 之前按 agent 数 `consume(n=20)`，不看交易日、时段、
+`claim_slot`。20 个 agent 下 10 分钟耗尽个人 40 次、35 分钟耗尽全站 150 次，之后所有人 429，
+而扣掉的额度对应零次真实 LLM 调用。根因是计费单位选错了：按「HTTP 请求」或「计划要跑的次数」
+计费，与真实花费没有对应关系。
+现在计费点在 `llm._chat`：发请求前 `allow_llm` 做门，成功后 `record_ai_call` 计一次；缓存命中、
+失败、超时都不计；GET 路由、调度器、舰队全部覆盖。HTTP 层的 `check()` 只做门不计数。
+
+### 21. 「只对写方法计费」会漏掉 GET 路由里的 LLM 调用
+
+`GET /api/market/overview?refresh=1` 调 v4-pro 6000 tokens 且能绕过 5 分钟缓存，补丁版限流对
+GET 一律不计、也不做最小间隔，任何登录用户循环 GET 就能烧光余额。计费挪到调用点后自动覆盖；
+门这一侧给 `bucket_of` 加了 refresh 参数让它也过最小间隔。新加会调 LLM 的路由不用登记，但
+要问一句：它是 GET 吗，需不需要过门。
+
+### 22. 进程内状态在 gunicorn 多 worker 下每份各算各的
+
+`_review_job`（复盘运行状态）、`_user_inited`（用户库是否建过表）、ratelimit 的分钟窗与最小间隔、
+`datasources._em_last_call`（东财节流时间戳）都是模块级字典或变量。两 worker + scheduler 三个进程
+互不可见：复盘可双跑、同一用户可能被两个 worker 同时灌两遍 84 条规则种子、东财请求率翻三倍。
+跨进程要共享的状态一律落文件加 `fcntl.flock`：`data/review/.running-<date>`、
+`data/users/<uid>/.init.lock`、`data/.em_last_call`。进程内字典只当「本进程视角」用，
+接口上要能合并文件状态（`/api/review/status` 的 `running_elsewhere`）。
+
+### 23. 提交前的两条 grep 拦不住 IP 和登录名
+
+铁律原来只查 `.env` 未跟踪和 `sk-` 前缀。2026-09-11 的 deploy 文档含真实公网 IP、服务器登录名、
+本机绝对路径，两条 grep 全部通过。仓库是公开 MIT 仓库，IP 加登录名等于 SSH 爆破的完整目标。
+铁律已加第三条（对暂存区新增行 grep IPv4 字面量与 `/Volumes/` `/Users/`），测试里的 IP 用
+`203.0.113.x` 文档保留段。凡是从别的工具或别的机器带进来的文件，入库前先跑这三条。
+
+### 24. 站长/单例身份不能只在进程启动时解析一次
+
+补丁版 `auth.init()` 在 import 时把最早管理员写进模块变量，之后不再刷新。按部署文档顺序
+「先起服务、再 adduser」，两个 worker 和 scheduler 都停在站长为空，`/api/agents` 全部 503
+直到人工重启。现在 `userctx.fleet_uid()` 在为空时每 60 秒惰性回调 auth 注册的 resolver。
+任何「启动时读一次、之后当常量用」的身份或配置，都要问：它在进程生命周期里会不会变、
+变了谁来通知。

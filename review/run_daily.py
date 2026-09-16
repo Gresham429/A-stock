@@ -6,7 +6,8 @@
     python -m review.run_daily --force        # 已存档也重跑
     python -m review.run_daily --no-ai        # 只算硬指标，不调 DeepSeek
 
-退出码：0=done/already，3=体检闸失败（核心数据缺）。供定时器判成败/告警。
+退出码：0=done/already/running（running=另一进程正在生成，不算失败），
+3=体检闸失败（核心数据缺）。供定时器判成败/告警。
 """
 from __future__ import annotations
 
@@ -36,7 +37,7 @@ def main() -> int:
         c = (r.get("envelope") or {}).get("counts", {})
         print(f"       涨停{c.get('zt')} 炸板{c.get('zb')} 跌停{c.get('dt')} "
               f"昨涨停{c.get('yzt')} 题材{c.get('theme')} 龙虎榜{c.get('lhb')}")
-    return 0 if status in ("done", "already") else 3
+    return 0 if status in ("done", "already", "running") else 3
 
 
 if __name__ == "__main__":

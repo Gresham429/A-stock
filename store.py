@@ -5,9 +5,19 @@ import json
 import logging
 from pathlib import Path
 
+import userctx
+
 logger = logging.getLogger(__name__)
 
-WATCHLIST_PATH = Path(__file__).parent / "watchlist.json"
+# 测试钩子：设成某个 Path 即全局覆盖（tests/test_portfolio.py 用它做隔离）。
+# 留 None ＝按当前登录用户解析，生产时走的是这一支。
+WATCHLIST_PATH: Path | None = None
+
+
+def _path() -> Path:
+    """当前登录用户的 watchlist.json（多用户隔离，见 userctx.py）。"""
+    return WATCHLIST_PATH or Path(userctx.user_path("watchlist.json"))
+
 
 # 首次运行时的默认自选股（第一轮分析筛出的 6 只）
 DEFAULT_CODES = ["002415", "300059", "002241", "000938", "002049", "002475"]
@@ -15,11 +25,11 @@ DEFAULT_CODES = ["002415", "300059", "002241", "000938", "002049", "002475"]
 
 def load_watchlist() -> list[str]:
     """读取自选股代码列表；文件不存在时用默认列表初始化。"""
-    if not WATCHLIST_PATH.exists():
+    if not _path().exists():
         save_watchlist(DEFAULT_CODES)
         return list(DEFAULT_CODES)
     try:
-        data = json.loads(WATCHLIST_PATH.read_text(encoding="utf-8"))
+        data = json.loads(_path().read_text(encoding="utf-8"))
         codes = data.get("codes", []) if isinstance(data, dict) else data
         return [str(c) for c in codes]
     except (json.JSONDecodeError, OSError) as e:
@@ -31,9 +41,35 @@ def save_watchlist(codes: list[str]) -> None:
     """写入自选股代码列表（去重保序）。"""
     seen: set[str] = set()
     unique = [c for c in codes if not (c in seen or seen.add(c))]
-    WATCHLIST_PATH.write_text(
+    _path().write_text(
         json.dumps({"codes": unique}, ensure_ascii=False, indent=2),
         encoding="utf-8")
+
+
+def load_all_watchlists() -> list[dict]:
+    """全站自选股并集：遍历 data/users/<uid>/watchlist.json，按 code 去重。
+
+    给无用户上下文的公共任务用（调度器里的新闻回填/增量），那里没有「当前用户」，
+    要照顾的是所有人的自选股。返回 [{"code": "002415", "uids": ["a", "b"]}, ...]，
+    code 按首次出现顺序排；坏文件跳过并记日志，不影响其他人。
+    """
+    by_code: dict[str, list[str]] = {}
+    for uid in userctx.list_uids():
+        path = Path(userctx.USERS_DIR) / uid / "watchlist.json"
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("读取 %s 的 watchlist 失败，跳过: %s", uid, e)
+            continue
+        codes = data.get("codes", []) if isinstance(data, dict) else data
+        if not isinstance(codes, list):
+            logger.warning("%s 的 watchlist 格式不对，跳过", uid)
+            continue
+        for c in codes:
+            by_code.setdefault(str(c), []).append(uid)
+    return [{"code": c, "uids": uids} for c, uids in by_code.items()]
 
 
 def add_code(code: str) -> list[str]:

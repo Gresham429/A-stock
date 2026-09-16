@@ -9,6 +9,7 @@
 """
 import os
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -43,6 +44,11 @@ def test_idempotence_is_atomic_claim():
 
 def test_claim_slot_is_exclusive():
     """同一 (agent, 日, 桶) 只能被抢到一次；不同桶互不影响。"""
+    # 多用户改造后个人库按「当前登录用户」解析，而测试里没有当前用户，
+    # 所以用 DB_PATH 钩子指到临时库（和 test_agent_memory 里一个做法）。
+    # 顺带修掉一个原有副作用：这个用例过去是直接往真实 data/agents.db 里
+    # 写 agent_id=-12345 的哨兵行的。
+    agent_store.DB_PATH = os.path.join(tempfile.mkdtemp(), "agents.db")
     agent_store.init()
     aid, d = -12345, "1999-01-01"
     agent_store.release_slot(aid, d, "早盘")

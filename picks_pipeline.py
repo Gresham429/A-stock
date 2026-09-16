@@ -8,14 +8,19 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 import datasources as ds
+import llm_picks
+import news_store
 import picks_levels
 import picks_store
+import profile_store
 import screening
+import store
 import universe_store
 import userctx
 from review import store as review_store
@@ -155,3 +160,140 @@ def enrich(codes: list[str], short: bool = False) -> tuple[list[dict[str, Any]],
             logger.warning("picks: %s K线失败: %s", c, e)
             levels[c] = {"price": q.get("price"), "atr_pct": None, "levels": []}
     return rows, levels
+
+
+LOCK_DIR = userctx.DATA_DIR
+LOCK_STALE_SEC = 1800
+FULL_AT = (16, 0)
+MORNING_AT = (9, 5)
+_last: dict[str, str] = {}
+
+
+def _lock_path(scope: str) -> str:
+    return os.path.join(LOCK_DIR, f".picks-running-{scope}")
+
+
+def acquire_lock(scope: str) -> bool:
+    p = _lock_path(scope)
+    try:
+        if os.path.exists(p) and time.time() - os.path.getmtime(p) > LOCK_STALE_SEC:
+            logger.warning("picks: 锁 %s 超过 30 分钟，视为陈旧覆盖", p)
+            os.remove(p)
+        fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, f"{os.getpid()} {time.time()}".encode())
+        os.close(fd)
+        return True
+    except FileExistsError:
+        return False
+    except OSError as e:
+        logger.warning("picks: 锁文件不可用，放行: %s", e)
+        return True
+
+
+def release_lock(scope: str) -> None:
+    try:
+        os.remove(_lock_path(scope))
+    except OSError:
+        pass
+
+
+def settle(scope: str, today: str) -> dict[str, Any]:
+    """到期 + 结果贴回（拉日 K，只对近 60 天有记录的股票）。"""
+    expired = picks_store.expire(scope, today)
+    codes = sorted({r["code"] for r in picks_store.current(scope)})
+    n = 0
+    for c in codes:
+        try:
+            n += picks_store.staple(scope, c, ds.sina_kline(c, 40), today)
+        except Exception as e:  # noqa: BLE001 单只结算失败不影响其余
+            logger.warning("picks: %s 结算失败: %s", c, e)
+    return {"expired": expired, "stapled": n}
+
+
+def _persist(scope: str, calls: list[dict[str, Any]], today: str, run_id: str) -> int:
+    n = 0
+    for c in calls:
+        try:
+            picks_store.apply(scope, c, today, run_id)
+            n += 1
+        except Exception as e:  # noqa: BLE001 单条落库失败不影响其余
+            logger.warning("picks: %s 落库失败: %s", c.get("code"), e)
+    return n
+
+
+def run_public(market_ctx: dict[str, Any] | None = None,
+               horizons: tuple[str, ...] = ("short", "mid", "long"), capital: float = 10000) -> dict[str, Any]:
+    today = dt.date.today().isoformat()
+    run_id = f"pub-{today}-{int(time.time())}"
+    picks_store.init("public")
+    if not acquire_lock("public"):
+        return {"run_id": run_id, "calls": 0, "horizons": [], "error": "已在生成"}
+    try:
+        settle("public", today)
+        total = 0
+        for h in horizons:
+            pool = {"short": short_pool, "mid": mid_pool, "long": long_pool}[h]()
+            rows, levels = enrich(pool, short=(h == "short"))
+            memory = {r["code"]: picks_store.memory_block("public", r["code"], (levels.get(r["code"]) or {}).get("price"), today) for r in rows}
+            calls = llm_picks.horizon_picks(h, rows, levels, memory, market_ctx, capital)
+            total += _persist("public", calls, today, run_id)
+        return {"run_id": run_id, "calls": total, "horizons": list(horizons), "error": None}
+    except Exception as e:  # noqa: BLE001 整轮失败账本不动
+        logger.exception("picks: 公共运行失败")
+        return {"run_id": run_id, "calls": 0, "horizons": list(horizons), "error": str(e)}
+    finally:
+        release_lock("public")
+
+
+def run_watchlist(market_ctx: dict[str, Any] | None = None, capital: float | None = None) -> dict[str, Any]:
+    today = dt.date.today().isoformat()
+    run_id = f"wl-{userctx.get_uid() or 'nouser'}-{today}-{int(time.time())}"
+    picks_store.init("watchlist")
+    codes = [str(c) for c in (store.load_watchlist() or []) if c]   # load_watchlist 返回代码列表
+    if not codes:
+        return {"run_id": run_id, "calls": 0, "error": "自选股为空"}
+    if capital is None:
+        capital = float((profile_store.get_active() or {}).get("cash") or 10000)
+    try:
+        settle("watchlist", today)
+        rows, levels = enrich(codes, short=True)
+        memory = {c: picks_store.memory_block("watchlist", c, (levels.get(c) or {}).get("price"), today) for c in codes}
+        calls = llm_picks.watchlist_points(rows, levels, memory, market_ctx, capital)
+        return {"run_id": run_id, "calls": _persist("watchlist", calls, today, run_id), "error": None}
+    except Exception as e:  # noqa: BLE001 整轮失败账本不动
+        logger.exception("picks: 自选股运行失败")
+        return {"run_id": run_id, "calls": 0, "error": str(e)}
+
+
+def due_slot(now: dt.datetime, last: dict[str, str]) -> str:
+    """到点判定：16:00 后当天未跑全量返回 full；09:05 到 16:00 之间当天未跑早盘返回 morning。"""
+    if not news_store.is_trading_day(now.date()):
+        return ""
+    today = now.date().isoformat()
+    hm = (now.hour, now.minute)
+    if hm >= FULL_AT and last.get("full") != today:
+        return "full"
+    if MORNING_AT <= hm < FULL_AT and last.get("morning") != today:
+        return "morning"
+    return ""
+
+
+def loop_forever(uids_fn: Callable[[], list[str]],
+                 market_ctx_fn: Callable[[], dict[str, Any] | None] | None = None) -> None:
+    """定时循环：每 60 秒探一次到点。full = 三周期 + 每个账号自选股；morning = 短线 + 自选股。"""
+    while True:
+        try:
+            slot = due_slot(dt.datetime.now(), _last)
+            if slot:
+                _last[slot] = dt.date.today().isoformat()
+                mctx = market_ctx_fn() if market_ctx_fn else None
+                horizons = ("short", "mid", "long") if slot == "full" else ("short",)
+                logger.info("picks: 到点 %s，公共三周期 %s", slot, horizons)
+                run_public(mctx, horizons)
+                for uid in uids_fn():
+                    with userctx.as_user(uid):
+                        r = run_watchlist(mctx)
+                        logger.info("picks: [%s] 自选股 %s", uid, r)
+        except Exception as e:  # noqa: BLE001 循环绝不停摆
+            logger.warning("picks: 定时循环异常: %s", e)
+        time.sleep(60)

@@ -109,11 +109,63 @@ def test_snapshot_failure_not_cached():
     r2 = pp._snapshot()
     ck(len(r2) == 1 and calls[0] == 2, f"失败不应写入缓存、下一次要真正重试: {r2} calls={calls[0]}")
 
+import datetime as dt
+import json
+import tempfile
+import picks_store as ps
+import llm_picks
+
+def setup_store():
+    tmp = tempfile.mkdtemp()
+    ps.DB_PATHS["public"] = os.path.join(tmp, "pub.db"); ps.DB_PATHS["watchlist"] = os.path.join(tmp, "wl.db")
+    ps.init("public"); ps.init("watchlist")
+    pp.LOCK_DIR = tmp
+    pp.news_store.is_trading_day = lambda d=None: True   # 零网络；valid_until 与 due_slot 都走这里
+
+def test_run_public_persists_calls():
+    setup_fakes(); setup_store()
+    llm_picks.horizon_picks = lambda horizon, cands, levels, memory, mctx, cap: [
+        {"code": cands[0]["code"], "name": cands[0]["name"], "horizon": horizon, "stance": "buy", "entry_lo": 9.8, "entry_hi": 10.0,
+         "exit_lo": 10.5, "exit_hi": 10.8, "stop": 9.5, "decision": "new", "trigger": "none", "thesis": "t", "trigger_note": "n",
+         "basis_json": "{}", "px_at_call": 10.0}]
+    r = pp.run_public(horizons=("short", "mid"))
+    ck(r["calls"] == 2 and r["error"] is None, f"两周期各落 1 条: {r}")
+    ck(len(ps.current("public")) == 2, "账本 open 两条")
+
+def test_run_watchlist_uses_user_watchlist():
+    setup_fakes(); setup_store()
+    pp.store.load_watchlist = lambda: ["603010", "300750"]
+    pp.profile_store.get_active = lambda: {"cash": 5000}
+    llm_picks.watchlist_points = lambda rows, levels, memory, mctx, cap: [
+        {"code": r["code"], "name": r["name"], "horizon": "short", "stance": "watch", "entry_lo": 9.8, "entry_hi": 10.0,
+         "exit_lo": 10.5, "exit_hi": 10.8, "stop": 9.5, "decision": "new", "trigger": "none", "thesis": "t", "trigger_note": "n",
+         "basis_json": "{}", "px_at_call": 10.0} for r in rows]
+    r = pp.run_watchlist()
+    ck(r["calls"] == 2, f"自选股两条: {r}")
+
+def test_run_public_llm_failure_keeps_ledger():
+    setup_fakes(); setup_store()
+    llm_picks.horizon_picks = lambda *a, **k: []
+    r = pp.run_public(horizons=("short",))
+    ck(r["calls"] == 0 and ps.current("public") == [], "模型无返回时账本不动")
+
+def test_lock_and_due():
+    setup_store()
+    ck(pp.acquire_lock("public") is True and pp.acquire_lock("public") is False, "锁互斥")
+    pp.release_lock("public")
+    ck(pp.acquire_lock("public") is True, "释放后可再拿"); pp.release_lock("public")
+    ck(pp.due_slot(dt.datetime(2026, 9, 16, 16, 5), {}) == "full", "16:05 到点全量")
+    ck(pp.due_slot(dt.datetime(2026, 9, 16, 16, 5), {"full": "2026-09-16"}) == "", "同日不重复")
+    ck(pp.due_slot(dt.datetime(2026, 9, 16, 9, 10), {}) == "morning", "09:10 到点早盘")
+    ck(pp.due_slot(dt.datetime(2026, 9, 16, 12, 0), {"morning": "2026-09-16"}) == "", "午间无事")
+
 if __name__ == "__main__":
     for fn in (test_short_pool_prefers_theme_and_turnover, test_mid_pool_uses_sector_leaders_and_flow,
                test_long_pool_filters_by_valuation_and_growth, test_enrich_rows_and_levels,
                test_long_pool_survives_financial_errors, test_mid_pool_visits_all_ranked_sectors,
                test_enrich_drops_codes_without_quote, test_snapshot_cached,
-               test_snapshot_failure_not_cached):
+               test_snapshot_failure_not_cached, test_run_public_persists_calls,
+               test_run_watchlist_uses_user_watchlist, test_run_public_llm_failure_keeps_ledger,
+               test_lock_and_due):
         fn()
     print(f"OK — test_picks_pipeline 全过（{N[0]} 断言）")

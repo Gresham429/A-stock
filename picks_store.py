@@ -90,8 +90,13 @@ def chain(scope: str, code: str, limit: int = 50) -> list[dict[str, Any]]:
             (scope, code, limit))]
 
 
-def _enforce(prev: dict[str, Any] | None, p: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
-    """改口规则。返回 (decision, trigger, 价位来源行)。"""
+def _enforce(prev: dict[str, Any] | None, p: dict[str, Any], today: str) -> tuple[str, str, dict[str, Any]]:
+    """改口规则。返回 (decision, trigger, 价位来源行)。
+
+    revise/withdraw 必须带一个站得住的触发理由：trigger=='none' 一律拒绝；
+    stop_hit/target_hit 要求上一条的 touched 字段确实记录到对应结果；
+    expired 要求上一条的 valid_until 已经过了 today，不能拿「过期」当幌子提前改口。
+    """
     decision = p.get("decision") if p.get("decision") in DECISIONS else "new"
     trigger = p.get("trigger") if p.get("trigger") in TRIGGERS else "none"
     if prev is None:
@@ -107,37 +112,50 @@ def _enforce(prev: dict[str, Any] | None, p: dict[str, Any]) -> tuple[str, str, 
     if decision == "revise" and trigger == "target_hit" and prev.get("touched") != "exit":
         logger.warning("picks: %s 称目标达成但结果未记录到，按 keep", p.get("code"))
         return "keep", "none", prev
+    if decision in ("revise", "withdraw") and trigger == "expired" and prev.get("valid_until", "") >= today:
+        logger.warning("picks: %s 称已过期但有效期未到，按 keep", p.get("code"))
+        return "keep", "none", prev
     if decision == "keep":
         return "keep", "none", prev
     return decision, trigger, p
 
 
 def apply(scope: str, proposed: dict[str, Any], today: str, run_id: str) -> dict[str, Any]:
-    """按改口规则落库，返回落库行。"""
+    """按改口规则落库，返回落库行。
+
+    读旧行、改口判定、supersede 旧行、插新行全在一个连接的一个事务里
+    （BEGIN IMMEDIATE 提前拿写锁），防止两次并发 apply 都读到同一条旧
+    open 行、各自插一条新 open 行，破坏「同一 (scope,code,horizon) 只有
+    一条 open」的不变量。
+    """
     code, horizon = proposed["code"], proposed.get("horizon", "short")
-    prev_rows = [r for r in current(scope, code) if r["horizon"] == horizon]
-    prev = prev_rows[0] if prev_rows else None
-    decision, trigger, src = _enforce(prev, proposed)
-    status = "withdrawn" if decision == "withdraw" else "open"
-    vf = today if decision in ("new", "revise") else (prev or {}).get("valid_from", today)
-    vu = valid_until(horizon, today) if decision in ("new", "revise") else (prev or {}).get("valid_until", valid_until(horizon, today))
-    row = {
-        "run_id": run_id, "created_at": today, "scope": scope, "code": code,
-        "name": proposed.get("name") or (prev or {}).get("name", ""), "horizon": horizon,
-        "stance": src.get("stance", "watch"),
-        "entry_lo": src.get("entry_lo"), "entry_hi": src.get("entry_hi"),
-        "exit_lo": src.get("exit_lo"), "exit_hi": src.get("exit_hi"), "stop": src.get("stop"),
-        "valid_from": vf, "valid_until": vu,
-        "thesis": proposed.get("thesis", "") if decision != "keep" else (prev or {}).get("thesis", ""),
-        "trigger_note": src.get("trigger_note", ""),
-        "basis_json": src.get("basis_json", "{}") if isinstance(src.get("basis_json"), str) else json.dumps(src.get("basis_json") or {}, ensure_ascii=False),
-        "decision": decision, "trigger": trigger,
-        "parent_id": (prev or {}).get("id"), "status": status,
-        "px_at_call": proposed.get("px_at_call"),
-        "max_up": None, "max_dn": None, "ret_5d": None, "ret_20d": None, "touched": "none",
-    }
-    cols = ",".join(row)
     with _conn(scope) as c:
+        c.execute("BEGIN IMMEDIATE")
+        prev_row = c.execute(
+            "SELECT * FROM calls WHERE scope=? AND code=? AND horizon=? AND status='open' "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (scope, code, horizon)).fetchone()
+        prev = dict(prev_row) if prev_row else None
+        decision, trigger, src = _enforce(prev, proposed, today)
+        status = "withdrawn" if decision == "withdraw" else "open"
+        vf = today if decision in ("new", "revise") else (prev or {}).get("valid_from", today)
+        vu = valid_until(horizon, today) if decision in ("new", "revise") else (prev or {}).get("valid_until", valid_until(horizon, today))
+        row = {
+            "run_id": run_id, "created_at": today, "scope": scope, "code": code,
+            "name": proposed.get("name") or (prev or {}).get("name", ""), "horizon": horizon,
+            "stance": src.get("stance", "watch"),
+            "entry_lo": src.get("entry_lo"), "entry_hi": src.get("entry_hi"),
+            "exit_lo": src.get("exit_lo"), "exit_hi": src.get("exit_hi"), "stop": src.get("stop"),
+            "valid_from": vf, "valid_until": vu,
+            "thesis": proposed.get("thesis", "") if decision != "keep" else (prev or {}).get("thesis", ""),
+            "trigger_note": src.get("trigger_note", ""),
+            "basis_json": src.get("basis_json", "{}") if isinstance(src.get("basis_json"), str) else json.dumps(src.get("basis_json") or {}, ensure_ascii=False),
+            "decision": decision, "trigger": trigger,
+            "parent_id": (prev or {}).get("id"), "status": status,
+            "px_at_call": proposed.get("px_at_call"),
+            "max_up": None, "max_dn": None, "ret_5d": None, "ret_20d": None, "touched": "none",
+        }
+        cols = ",".join(row)
         if prev:
             c.execute("UPDATE calls SET status='superseded' WHERE id=?", (prev["id"],))
         cur = c.execute(f"INSERT INTO calls({cols}) VALUES({','.join('?' * len(row))})", list(row.values()))
@@ -157,7 +175,7 @@ def staple(scope: str, code: str, bars: list[dict[str, Any]], today: str) -> int
     n = 0
     with _conn(scope) as c:
         rows = [dict(r) for r in c.execute(
-            "SELECT * FROM calls WHERE scope=? AND code=? AND created_at>=? AND status IN ('open','superseded')",
+            "SELECT * FROM calls WHERE scope=? AND code=? AND created_at>=?",
             (scope, code, since))]
         for r in rows:
             after = [b for b in bars if str(b.get("date", ""))[:10] > r["created_at"]]

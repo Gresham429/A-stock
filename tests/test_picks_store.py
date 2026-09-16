@@ -1,4 +1,5 @@
 """tests/test_picks_store.py  观点账本：修改链、改口规则、到期、结果贴回、记忆块。"""
+import concurrent.futures
 import os, sys, tempfile, datetime as dt
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import picks_store as ps
@@ -47,7 +48,10 @@ def test_target_hit_requires_touched():
     ck(r["decision"] == "keep", "上一条 touched 不是 exit 时 target_hit 降为 keep")
 
 def test_withdraw():
-    r = ps.apply("watchlist", prop(decision="withdraw", trigger="expired"), "2026-09-21", "run6")
+    # 上一条（2026-09-19 的 thesis_broken revise）把 valid_until 推到了 2026-09-25；
+    # fix round 1 给 expired 触发加了「真过期才生效」的校验，这里改用 2026-09-26
+    # （已过 valid_until）以保持 trigger="expired" 语义正确，而不是把日期定在有效期内。
+    r = ps.apply("watchlist", prop(decision="withdraw", trigger="expired"), "2026-09-26", "run6")
     ck(r["status"] == "withdrawn", "撤销行状态 withdrawn")
     ck(ps.current("watchlist", "600519") == [], "撤销后无 open")
 
@@ -87,9 +91,36 @@ def test_memory_block_window_and_rollup():
     rl = ps.rollup("watchlist", "601318", "2026-07-18")
     ck(rl["n"] == 1, "远期汇总计数")
 
+def test_staple_covers_withdrawn_rows():
+    ps.apply("watchlist", prop(code="000858", name="五粮液", exit_lo=10.5), "2026-09-10", "r")
+    ps.apply("watchlist", prop(code="000858", name="五粮液", decision="withdraw", trigger="thesis_broken"), "2026-09-11", "r")
+    bars = [{"date": "2026-09-12", "open": 10.0, "high": 10.6, "low": 9.9, "close": 10.5, "volume": 1},
+            {"date": "2026-09-13", "open": 10.5, "high": 11.0, "low": 10.4, "close": 10.9, "volume": 1}]
+    n = ps.staple("watchlist", "000858", bars, "2026-09-13")
+    rows = ps.chain("watchlist", "000858")
+    ck(n == 2 and all(r["max_up"] is not None for r in rows), "撤销行也要被贴回结果，不能因 status 被跳过")
+    withdrawn = [r for r in rows if r["status"] == "withdrawn"][0]
+    ck(withdrawn["touched"] == "exit", "撤销行碰到卖点区间仍记 exit")
+
+def test_expired_trigger_requires_past_valid_until():
+    ps.apply("watchlist", prop(code="600030", name="中信证券"), "2026-09-16", "r")
+    r1 = ps.apply("watchlist", prop(code="600030", name="中信证券", decision="revise", trigger="expired", stance="watch"), "2026-09-17", "r")
+    ck(r1["decision"] == "keep", "有效期未到时 expired 触发被降为 keep")
+    r2 = ps.apply("watchlist", prop(code="600030", name="中信证券", decision="revise", trigger="expired", stance="watch"), "2026-09-24", "r")
+    ck(r2["decision"] == "revise", "有效期已过时 expired 触发生效")
+
+def test_apply_single_open_row_under_threads():
+    with concurrent.futures.ThreadPoolExecutor(4) as ex:
+        futs = [ex.submit(ps.apply, "watchlist", prop(code="601988"), "2026-09-16", "r") for _ in range(8)]
+        for f in futs:
+            f.result()
+    ck(len(ps.current("watchlist", "601988")) == 1, "并发 apply 只留一条 open 行")
+
 if __name__ == "__main__":
     for fn in (test_new_and_keep_chain, test_revise_without_trigger_downgraded, test_revise_with_thesis_broken_allowed,
                test_target_hit_requires_touched, test_withdraw, test_new_with_prev_open_becomes_keep_unless_trigger,
-               test_valid_until_counts_trading_days, test_expire, test_staple_outcome, test_memory_block_window_and_rollup):
+               test_valid_until_counts_trading_days, test_expire, test_staple_outcome, test_memory_block_window_and_rollup,
+               test_staple_covers_withdrawn_rows, test_expired_trigger_requires_past_valid_until,
+               test_apply_single_open_row_under_threads):
         fn()
     print(f"OK — test_picks_store 全过（{N[0]} 断言）")

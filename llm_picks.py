@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from typing import Any
 
 import llm
@@ -11,7 +12,18 @@ import picks_store
 
 logger = logging.getLogger(__name__)
 
-LAST_ERROR: str = ""   # 上一次 _ask 失败的原因；调用方在返回空列表时可以把这句话带给用户
+# _ask 的失败原因用线程局部存储：公共三周期与各账号自选股可能在不同线程里并发跑
+# （picks_pipeline.tick 逐用户 for 循环、picks_routes._spawn 的后台线程），模块级
+# 全局变量会被并发的另一路运行覆盖，读到的可能是别人那次的错误。
+_tls = threading.local()
+
+
+def set_last_error(msg: str) -> None:
+    _tls.value = msg
+
+
+def last_error() -> str:
+    return getattr(_tls, "value", "")
 
 HORIZON_CN = {"short": "短线（1 到 5 个交易日，交易活跃、低吸高抛，给具体价位）",
               "mid": "中线（2 到 8 周，板块轮动、趋势刚起，价位区间加趋势破坏即离场）",
@@ -115,16 +127,15 @@ def validate_calls(parsed: dict[str, Any], levels: dict[str, dict], allowed: set
 
 
 def _ask(prompt: str, max_tokens: int) -> dict[str, Any]:
-    global LAST_ERROR
     try:
         text = llm._chat([{"role": "system", "content": llm._system_prompt()[0]},
                           {"role": "user", "content": prompt}], max_tokens=max_tokens)
         parsed = llm._parse_json(text)
-        LAST_ERROR = ""
+        set_last_error("")
         return parsed
     except (llm.LLMError, ValueError) as e:
         logger.warning("picks: 模型调用或解析失败: %s", e)
-        LAST_ERROR = str(e)
+        set_last_error(str(e))
         return {}
 
 

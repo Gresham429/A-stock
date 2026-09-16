@@ -157,9 +157,10 @@ app.py 用显式 import 带回名字，路由调用点与 `app._X` 可达性不�
   个文件：公共锁 `data/.picks-running-public`，个人锁 `data/users/<uid>/.picks-running`（各账号
   跑自己的一份，互不阻塞）。到点记录 `_last` 只在进程内存里，不落盘——`scheduler.py` 若在
   16:00 之后重启，会把当天的 full 槽当成没跑过，重新触发一轮（多打一轮 DeepSeek 调用，但账本
-  改口规则会挡掉站不住的重复结论，不会出现数据损坏）。账本落公共库 `data/picks_public.db`
-  （三周期）与 `data/users/<uid>/picks.db`（自选股）；改口规则在 `picks_store._enforce` 里强制，
-  不留后门。
+  改口规则会挡掉站不住的重复结论，不会出现数据损坏）。到点批跑本身要在站长上下文里读一次大盘
+  研判供选股参考，5 分钟大盘缓存冷了会多算一次 `market_overview`，记 `fleet` 名下只吃全站预算。
+  账本落公共库 `data/picks_public.db`（三周期）与 `data/users/<uid>/picks.db`（自选股）；改口
+  规则在 `picks_store._enforce` 里强制，不留后门。
 
 ## 数据源 & 坑（改代码前必读）
 

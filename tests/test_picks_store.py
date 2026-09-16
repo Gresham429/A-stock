@@ -152,6 +152,15 @@ def test_watchlist_horizon_switch_supersedes():
     open_rows = ps.current("watchlist", "601888")
     ck(len(open_rows) == 1 and open_rows[0]["horizon"] == "mid", "自选股同一只只留一条 open，且周期已切换")
 
+def test_keep_preserves_prev_horizon():
+    r1 = ps.apply("watchlist", prop(code="600350", name="山东威达", horizon="short"), "2026-09-16", "r1")
+    ck(r1["decision"] == "new" and r1["horizon"] == "short", "首条短线")
+    r2 = ps.apply("watchlist", prop(code="600350", name="山东威达", horizon="mid", decision="new",
+                                    entry_lo=1.0, entry_hi=1.1), "2026-09-17", "r2")
+    ck(r2["decision"] == "keep", "已有 open 时想换周期但没给触发，应降为 keep")
+    ck(r2["horizon"] == "short", f"keep 行的 horizon 应沿用上一条，不该悄悄变成 proposed 想切的周期: {r2['horizon']}")
+    ck(r2["entry_lo"] == r1["entry_lo"] and r2["entry_hi"] == r1["entry_hi"], "keep 行价位应沿用上一条")
+
 if __name__ == "__main__":
     for fn in (test_new_and_keep_chain, test_revise_without_trigger_downgraded, test_revise_with_thesis_broken_allowed,
                test_target_hit_requires_touched, test_withdraw, test_new_with_prev_open_becomes_keep_unless_trigger,
@@ -159,6 +168,6 @@ if __name__ == "__main__":
                test_staple_covers_withdrawn_rows, test_expired_trigger_requires_past_valid_until,
                test_apply_single_open_row_under_threads, test_staple_ignores_zero_bars,
                test_withdraw_stop_hit_requires_touched, test_latest_run_per_horizon,
-               test_watchlist_horizon_switch_supersedes):
+               test_watchlist_horizon_switch_supersedes, test_keep_preserves_prev_horizon):
         fn()
     print(f"OK — test_picks_store 全过（{N[0]} 断言）")

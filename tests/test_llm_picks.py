@@ -69,7 +69,7 @@ def test_watchlist_points_bad_json_returns_empty():
     try:
         out = lp.watchlist_points(CANDS, LEVELS, {}, None, 10000)
         ck(out == [], "解析失败返回空列表而不是抛")
-        ck(lp.LAST_ERROR != "", "解析失败应记录 LAST_ERROR，供调用方把原因带给用户")
+        ck(lp.last_error() != "", "解析失败应记录 last_error()，供调用方把原因带给用户")
     finally:
         llm._chat = orig
 

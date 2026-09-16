@@ -207,7 +207,7 @@ def test_loop_isolates_user_failure():
     slot = pp.tick(lambda: ["a", "b"], None)
     ck(slot == "full", f"到点应跑 full: {slot}")
     ck(done == ["b"], f"a 失败不拖累 b，b 应正常跑到: {done}")
-    ck(pp._last["full"] == dt.date.today().isoformat(), "桶一旦开始就标记今天已处理")
+    ck(pp._last["full"] == pp._today(), "桶一旦开始就标记今天已处理（按上海时区，不用进程本地时区）")
 
 def test_tick_survives_public_failure():
     setup_store()

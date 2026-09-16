@@ -172,7 +172,8 @@ def apply(scope: str, proposed: dict[str, Any], today: str, run_id: str) -> dict
         vu = vu_new if decision in ("new", "revise") else (prev or {}).get("valid_until", vu_new)
         row = {
             "run_id": run_id, "created_at": today, "scope": scope, "code": code,
-            "name": proposed.get("name") or (prev or {}).get("name", ""), "horizon": horizon,
+            "name": proposed.get("name") or (prev or {}).get("name", ""),
+            "horizon": horizon if decision != "keep" else prev["horizon"],
             "stance": src.get("stance", "watch"),
             "entry_lo": src.get("entry_lo"), "entry_hi": src.get("entry_hi"),
             "exit_lo": src.get("exit_lo"), "exit_hi": src.get("exit_hi"), "stop": src.get("stop"),

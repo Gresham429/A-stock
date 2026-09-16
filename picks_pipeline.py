@@ -277,8 +277,8 @@ def run_public(market_ctx: dict[str, Any] | None = None,
                 memory = {r["code"]: picks_store.memory_block("public", r["code"], (levels.get(r["code"]) or {}).get("price"), today) for r in rows}
                 calls = llm_picks.horizon_picks(h, rows, levels, memory, market_ctx, capital)
                 total += _persist("public", calls, today, run_id)
-                if not calls and llm_picks.LAST_ERROR:
-                    errors.append(f"{h}: {llm_picks.LAST_ERROR}")
+                if not calls and llm_picks.last_error():
+                    errors.append(f"{h}: {llm_picks.last_error()}")
             except Exception as e:  # noqa: BLE001 单周期失败不拖累其余周期，已落库的行保留
                 logger.exception("picks: 周期 %s 失败", h)
                 errors.append(f"{h}: {e}")
@@ -306,7 +306,7 @@ def run_watchlist(market_ctx: dict[str, Any] | None = None, capital: float | Non
         rows, levels = enrich(codes, short=True)
         memory = {c: picks_store.memory_block("watchlist", c, (levels.get(c) or {}).get("price"), today) for c in codes}
         calls = llm_picks.watchlist_points(rows, levels, memory, market_ctx, capital)
-        error = f"llm: {llm_picks.LAST_ERROR}" if not calls and llm_picks.LAST_ERROR else None
+        error = f"llm: {llm_picks.last_error()}" if not calls and llm_picks.last_error() else None
         return {"run_id": run_id, "calls": _persist("watchlist", calls, today, run_id), "error": error}
     except Exception as e:  # noqa: BLE001 整轮失败账本不动
         logger.exception("picks: 自选股运行失败")

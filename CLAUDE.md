@@ -137,7 +137,7 @@ app.py 用显式 import 带回名字，路由调用点与 `app._X` 可达性不�
   不要同时再跑 `scheduler.py`。`ASTOCK_ENV=production` 时 `app.py` 拒绝直接启动。
 - **对 conda 硬偏好的例外**：服务器 systemd 单元用 `/opt/astock/.venv`（无人值守的 nologin 账号下比
   conda 少坑）；本地仍 conda。用户可否决。
-- **待用户做**：在 ECS 上跑 README-deploy 2.5 的东财端点探测；决定是否合并 `multiuser` 到 main。
+- **阿里云 + Tailscale 两个必改项**（2026-09-16 踩过，整机 DNS 断了一小时、18:30 复盘失败）：`tailscale set --accept-dns=false --netfilter-mode=off`。原因与说明在 deploy/README-deploy.md 第 4 节。这台机器是共用机（k3s/docker/nginx/游戏服），`deploy.sh` 用 `ASTOCK_UFW=0` 跳过 ufw，外围防线 = 阿里云安全组 + Tailscale。
 
 ## 数据源 & 坑（改代码前必读）
 
@@ -356,11 +356,13 @@ curl -s -b cj.txt 127.0.0.1:5000/api/review/status      # running / running_else
 
 ## 当前状态 / 待办
 
-**2026-09-16：分支 `multiuser` 有 10 个 commit（`98630d3`..docs），未合并 main、未推送，等用户定。
-`main` 停在 `62cd3f2`（2026-08-15）。19 个离线测试全过；隔离副本里实跑过 Flask 登录闭环、
-gunicorn 两 worker 并发、scheduler 接线、复盘锁与东财节流跨进程。本地 app 未在跑；
-本地 `data/` 仍是旧布局（根目录 `agents.db` 等），切到 `multiuser` 分支后第一次用要先建号并跑
-migrate（见「快速开始」）。**
+**2026-09-16：多用户版已合入 `main`（d3191ae 之后又有 5 个 deploy 修补 commit），并已部署到阿里云 ECS
+（别名 `aliyun_ecs`，Ubuntu 20.04 共用机，Miniconda 3.10 环境在 `/opt/astock/.venv`），只能经 Tailscale 访问：
+`https://astock.tail141314.ts.net`。站长账号 `gresham`，本地 data/ 全部迁上去了（新闻库/全市场池/因子/复盘/
+20 个 agent）。web + scheduler + 新闻 timer（08:40/11:40/14:00/15:30/20:30）+ 备份 cron（23:30）都在跑，
+agent 不自动跑。服务器 IP 上东财端点全通（含家里被封的 clist）。`main` 未推送 GitHub。
+本地 `data/` 仍是旧布局：本地要用多用户版先 `adduser` + `migrate`（见「快速开始」）。
+更新服务器：本地 `bash deploy/push.sh`（用 `~/astock-staging` 中转）。**
 
 复盘模块（`/review`）2026-08-15 端到端建成并已合入 main：取数、8 类硬指标、5 分析师 + 裁判 + 文稿、
 落盘、渲染、情绪周期回填、应用内每日调度。agent 舰队记忆闭环 P1-P3 于 2026-07-18 落地，

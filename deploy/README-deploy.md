@@ -324,10 +324,19 @@ sudo bash /opt/astock/deploy/harden_ssh.sh
 
 ```bash
 curl -fsSL https://tailscale.com/install.sh | sh
-tailscale up                        # 浏览器扫码登录（用 GitHub/Google 账号即可）
-tailscale serve --bg 5000           # 给它一个真正的 https 证书
-tailscale status                    # 记下 https://<机器名>.<tailnet>.ts.net
+sudo tailscale up --hostname astock      # 浏览器打开它打印的链接授权（用 GitHub/Google 账号即可）
+sudo tailscale set --accept-dns=false    # 阿里云必做，见下
+sudo tailscale set --netfilter-mode=off  # 阿里云必做，见下
+sudo tailscale serve --bg 5000           # 首次会提示去后台开启 Serve/HTTPS，点一下再重跑
+tailscale status                         # 记下 https://astock.<tailnet>.ts.net
 ```
+
+阿里云上有两个必须改的默认值（2026-09-16 实测，不改的话整机 DNS 断掉、复盘和 AI 全部失败）：
+阿里云的内网 DNS、元数据、镜像源都在 `100.100.x.x`，落在 Tailscale 认领的 CGNAT 段 `100.64.0.0/10` 里。
+Tailscale 默认会在 iptables 加一条「来自 100.64.0.0/10 但不是从 tailscale0 进来的包一律丢弃」的防伪造规则，
+阿里云 DNS 的应答正好被它丢掉。`--netfilter-mode=off` 让 Tailscale 不碰 iptables（本机也不用 ufw，见上），
+`--accept-dns=false` 让服务器继续用系统解析器（服务器自己不需要解析 `*.ts.net`）。
+这两个设置写进 tailscaled 的状态文件，重启不丢；`tailscale debug prefs` 里 `CorpDNS: false`、`NetfilterMode: 0` 即生效。
 
 `tailscale serve` 会用 `*.ts.net` 的 Let's Encrypt 证书终止 TLS 再转给本机
 5000。是真证书，浏览器不报警告，也不需要域名和备案。这一条同时解决了

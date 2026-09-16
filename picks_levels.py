@@ -23,10 +23,12 @@ def _clean(bars: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out = []
     for b in bars or []:
         try:
-            out.append({"date": b.get("date"), "high": float(b["high"]), "low": float(b["low"]),
-                        "close": float(b["close"])})
+            high, low, close = float(b["high"]), float(b["low"]), float(b["close"])
         except (KeyError, TypeError, ValueError):
             continue
+        if min(high, low, close) <= 0:
+            continue
+        out.append({"date": b.get("date"), "high": high, "low": low, "close": close})
     return out
 
 

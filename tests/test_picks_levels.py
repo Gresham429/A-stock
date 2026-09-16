@@ -58,8 +58,20 @@ def test_fmt():
     s = pl.fmt_levels({"price": 10.0, "atr_pct": 2.5, "levels": [{"px": 9.5, "kind": "lo20"}]})
     ck("lo20=9.5" in s and "现价 10.0" in s, "格式化含价位与现价")
 
+def test_zero_padded_bars_ignored():
+    closes = [10 + (i % 7) * 0.3 for i in range(25)]
+    bars = mkbars(closes)
+    last_close = closes[-1]
+    bars.append({"date": "2026-02-01", "open": 0, "high": 0, "low": 0, "close": 0, "volume": 0})
+    r = pl.candidate_levels(bars)
+    ck(r["price"] == last_close, "停牌补0的尾部K线不改变现价")
+    ck(all(l["px"] > 0 for l in r["levels"]), "候选价位全部为正，零价K线被过滤")
+    ck(pl.candidate_levels([])["levels"] == [], "空输入返回空候选")
+    ck(pl.snap(None, [{"px": 10.0, "kind": "lo20"}]) == (None, False), "px 为 None 时原样返回不调整")
+
 if __name__ == "__main__":
     for fn in (test_too_short, test_levels_contain_window_extremes_and_mas, test_swing_points,
-               test_clusters_merge_within_tol, test_short_adds_clusters, test_snap, test_fmt):
+               test_clusters_merge_within_tol, test_short_adds_clusters, test_snap, test_fmt,
+               test_zero_padded_bars_ignored):
         fn()
     print(f"OK — test_picks_levels 全过（{N[0]} 断言）")

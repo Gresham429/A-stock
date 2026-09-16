@@ -204,9 +204,11 @@ def pending_sector_codes(eligible_only: bool = True) -> list[str]:
 def _claim_backfill() -> bool:
     """跨进程抢锁：db 里写 pid + 心跳。心跳 <_HEARTBEAT_STALE 秒视为他人在跑。
 
-    必须跨进程——`ds.em_get` 的限流器是进程内全局（`_em_last_call`），
-    两个进程同时回填会让东财实际请求速率翻倍；东财已因此封掉 clist 端点，
-    slist 再被封则整个板块归属功能失效。
+    `ds.em_get` 的节流已经通过 `data/.em_last_call` 文件锁跨进程共享（web worker 与
+    scheduler 合起来仍守同一个最小间隔），所以两个进程同时回填不会把东财请求速率翻倍。
+    但抢锁仍然需要：不抢的话两个进程会各自遍历同一批待回填代码，同一只股票
+    被请求两次，回填总耗时翻倍、东财配额白白多花一半；slist 若因此被封，
+    整个板块归属功能失效。
     """
     now = time.time()
     with _LOCK, _conn() as c:

@@ -46,6 +46,32 @@ def save_watchlist(codes: list[str]) -> None:
         encoding="utf-8")
 
 
+def load_all_watchlists() -> list[dict]:
+    """全站自选股并集：遍历 data/users/<uid>/watchlist.json，按 code 去重。
+
+    给无用户上下文的公共任务用（调度器里的新闻回填/增量），那里没有「当前用户」，
+    要照顾的是所有人的自选股。返回 [{"code": "002415", "uids": ["a", "b"]}, ...]，
+    code 按首次出现顺序排；坏文件跳过并记日志，不影响其他人。
+    """
+    by_code: dict[str, list[str]] = {}
+    for uid in userctx.list_uids():
+        path = Path(userctx.USERS_DIR) / uid / "watchlist.json"
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("读取 %s 的 watchlist 失败，跳过: %s", uid, e)
+            continue
+        codes = data.get("codes", []) if isinstance(data, dict) else data
+        if not isinstance(codes, list):
+            logger.warning("%s 的 watchlist 格式不对，跳过", uid)
+            continue
+        for c in codes:
+            by_code.setdefault(str(c), []).append(uid)
+    return [{"code": c, "uids": uids} for c, uids in by_code.items()]
+
+
 def add_code(code: str) -> list[str]:
     """新增一只股票，返回更新后的列表。"""
     codes = load_watchlist()

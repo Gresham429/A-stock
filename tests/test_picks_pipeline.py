@@ -93,10 +93,27 @@ def test_snapshot_cached():
     pp._snapshot()
     ck(calls[0] == 1, f"TTL 内两次调用应只取一次快照: {calls[0]}")
 
+def test_snapshot_failure_not_cached():
+    setup_fakes()
+    pp._snap_cache["ts"] = 0.0
+    pp._snap_cache["rows"] = []
+    calls = [0]
+    def fake_snap():
+        calls[0] += 1
+        if calls[0] == 1:
+            raise RuntimeError("boom")
+        return [{"code": "603010", "name": "万盛股份", "price": 12, "turnover": 20, "amount": 5e8, "pe_ttm": 30, "pb": 3}]
+    pp.ds.sina_all_stocks = fake_snap
+    r1 = pp._snapshot()
+    ck(r1 == [], f"取数失败应返回空表: {r1}")
+    r2 = pp._snapshot()
+    ck(len(r2) == 1 and calls[0] == 2, f"失败不应写入缓存、下一次要真正重试: {r2} calls={calls[0]}")
+
 if __name__ == "__main__":
     for fn in (test_short_pool_prefers_theme_and_turnover, test_mid_pool_uses_sector_leaders_and_flow,
                test_long_pool_filters_by_valuation_and_growth, test_enrich_rows_and_levels,
                test_long_pool_survives_financial_errors, test_mid_pool_visits_all_ranked_sectors,
-               test_enrich_drops_codes_without_quote, test_snapshot_cached):
+               test_enrich_drops_codes_without_quote, test_snapshot_cached,
+               test_snapshot_failure_not_cached):
         fn()
     print(f"OK — test_picks_pipeline 全过（{N[0]} 断言）")

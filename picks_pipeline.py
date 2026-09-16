@@ -30,15 +30,21 @@ _snap_cache: dict[str, Any] = {"ts": 0.0, "rows": []}
 
 
 def _snapshot() -> list[dict[str, Any]]:
-    """全市场快照，带 TTL 缓存——short_pool/long_pool 各调一次，别各拉一遍全市场。"""
+    """全市场快照，带 TTL 缓存——short_pool/long_pool 各调一次，别各拉一遍全市场。
+
+    只缓存取数成功且非空的结果；失败或空结果直接返回空表、不写缓存，
+    好让下一次调用立刻重试，不会把一次瞬时失败锁死成 10 分钟无候选池。
+    """
     now = time.time()
     if now - _snap_cache["ts"] < _SNAP_TTL:
         return _snap_cache["rows"]
     try:
         rows = ds.sina_all_stocks() or []
-    except Exception as e:  # noqa: BLE001 取数失败按空处理，池子退化不崩
+    except Exception as e:  # noqa: BLE001 取数失败按空处理，池子退化不崩，不写缓存以便下次重试
         logger.warning("picks: 全市场快照失败: %s", e)
-        rows = []
+        return []
+    if not rows:
+        return []
     _snap_cache["ts"] = now
     _snap_cache["rows"] = rows
     return rows

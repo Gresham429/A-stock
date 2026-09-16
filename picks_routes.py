@@ -95,7 +95,13 @@ def api_run():  # noqa: ANN202
 def api_run_public():  # noqa: ANN202
     if not _can_manage():
         return jsonify({"error": "需要管理员或站长", "msg": "只有管理员或站长能跑公共三周期"}), 403
-    return jsonify(_spawn("public", lambda: picks_pipeline.run_public(_market_ctx())))
+    # 公共三周期是全站结论，费用记 fleet（只受全站预算），不吃管理员个人的日额度；
+    # 与调度器里 tick() 的做法一致。
+    def _run_as_fleet() -> dict:
+        with userctx.as_fleet():
+            return picks_pipeline.run_public(_market_ctx())
+
+    return jsonify(_spawn("public", _run_as_fleet))
 
 
 @bp.get("/status")

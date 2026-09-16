@@ -32,6 +32,20 @@ def test_validate_snaps_and_drops_unknown():
     ck(json.loads(c["basis_json"])["adjusted"] is True, "被调整过的标 adjusted")
     ck(isinstance(c["basis_json"], str), "basis 存字符串")
 
+def test_validate_survives_malformed_rows():
+    parsed = {"calls": [
+        "not a dict",
+        {"code": "600519", "name": "贵州茅台", "horizon": "short", "stance": "buy", "entry": 9.6, "stop": 9.2,
+         "decision": "new", "trigger": "none", "thesis": "t", "trigger_note": "n", "basis": {}},
+        {"code": "600519", "name": "贵州茅台", "horizon": "short", "stance": "buy", "entry": [9.5, 9.6], "exit": [10.9, 11.3],
+         "stop": 9.2, "decision": "new", "trigger": "none", "thesis": "t", "trigger_note": "n", "basis": {}}]}
+    out = lp.validate_calls(parsed, LEVELS, {"600519"})
+    ck(len(out) == 2, f"非字典项被跳过、其余两条按条通过: {len(out)}")
+    b, c = out
+    ck(b["entry_lo"] == b["entry_hi"] == 9.5, f"标量区间吸附成 [x,x] 再吸附到候选: {b['entry_lo']} {b['entry_hi']}")
+    ck(b["exit_lo"] is None, "缺失 exit 置空而不是抛异常")
+    ck(c["code"] == "600519", "第三条完整行正常通过")
+
 def test_horizon_picks_prompt_and_parse():
     reply = {"calls": [{"code": "600519", "name": "贵州茅台", "horizon": "mid", "stance": "buy", "entry": [9.5, 9.6],
                         "exit": [11.0, 11.0], "stop": 9.2, "decision": "new", "trigger": "none", "thesis": "板块强", "trigger_note": "破位走", "basis": {}}]}
@@ -56,6 +70,7 @@ def test_watchlist_points_bad_json_returns_empty():
         llm._chat = orig
 
 if __name__ == "__main__":
-    for fn in (test_validate_snaps_and_drops_unknown, test_horizon_picks_prompt_and_parse, test_watchlist_points_bad_json_returns_empty):
+    for fn in (test_validate_snaps_and_drops_unknown, test_validate_survives_malformed_rows,
+               test_horizon_picks_prompt_and_parse, test_watchlist_points_bad_json_returns_empty):
         fn()
     print(f"OK — test_llm_picks 全过（{N[0]} 断言）")

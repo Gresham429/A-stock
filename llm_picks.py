@@ -45,44 +45,64 @@ def _levels_block(rows: list[dict[str, Any]], levels: dict[str, dict], memory: d
     return "\n".join(parts)
 
 
+def _range(v: Any) -> list[Any]:
+    """把模型给的区间归一化成两元素列表：标量或单元素列表补成 [x, x]，其余非法形态置 [None, None]。"""
+    if isinstance(v, (int, float)):
+        return [v, v]
+    if isinstance(v, list):
+        if len(v) >= 2:
+            return v
+        if len(v) == 1:
+            return [v[0], v[0]]
+        return [None, None]
+    return [None, None]
+
+
 def validate_calls(parsed: dict[str, Any], levels: dict[str, dict], allowed: set[str]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for c in (parsed or {}).get("calls") or []:
-        code = str(c.get("code", "")).strip()
-        if code not in allowed:
-            logger.info("picks: 丢弃不在候选内的 %s", code)
+        if not isinstance(c, dict):
+            logger.info("picks: 丢弃非字典项 %r", c)
             continue
-        lv = (levels.get(code) or {}).get("levels") or []
-        adjusted = False
+        code = str(c.get("code", "")).strip()
+        try:
+            if code not in allowed:
+                logger.info("picks: 丢弃不在候选内的 %s", code)
+                continue
+            lv = (levels.get(code) or {}).get("levels") or []
+            adjusted = False
 
-        def _s(v: Any) -> float | None:
-            nonlocal adjusted
-            try:
-                px = float(v)
-            except (TypeError, ValueError):
-                return None
-            px2, adj = picks_levels.snap(px, lv)
-            adjusted = adjusted or adj
-            return px2
+            def _s(v: Any) -> float | None:
+                nonlocal adjusted
+                try:
+                    px = float(v)
+                except (TypeError, ValueError):
+                    return None
+                px2, adj = picks_levels.snap(px, lv)
+                adjusted = adjusted or adj
+                return px2
 
-        entry = c.get("entry") or [None, None]
-        exit_ = c.get("exit") or [None, None]
-        basis = c.get("basis") if isinstance(c.get("basis"), dict) else {}
-        row = {
-            "code": code, "name": c.get("name", ""),
-            "horizon": c.get("horizon") if c.get("horizon") in picks_store.HORIZON_DAYS else "short",
-            "stance": c.get("stance") if c.get("stance") in ("buy", "watch", "avoid", "sell") else "watch",
-            "entry_lo": _s(entry[0]), "entry_hi": _s(entry[1] if len(entry) > 1 else entry[0]),
-            "exit_lo": _s(exit_[0]), "exit_hi": _s(exit_[1] if len(exit_) > 1 else exit_[0]),
-            "stop": _s(c.get("stop")),
-            "decision": c.get("decision") if c.get("decision") in picks_store.DECISIONS else "new",
-            "trigger": c.get("trigger") if c.get("trigger") in picks_store.TRIGGERS else "none",
-            "thesis": str(c.get("thesis", ""))[:200], "trigger_note": str(c.get("trigger_note", ""))[:100],
-            "px_at_call": (levels.get(code) or {}).get("price"),
-        }
-        basis["adjusted"] = adjusted
-        row["basis_json"] = json.dumps(basis, ensure_ascii=False)
-        out.append(row)
+            entry = _range(c.get("entry"))
+            exit_ = _range(c.get("exit"))
+            basis = c.get("basis") if isinstance(c.get("basis"), dict) else {}
+            row = {
+                "code": code, "name": c.get("name", ""),
+                "horizon": c.get("horizon") if c.get("horizon") in picks_store.HORIZON_DAYS else "short",
+                "stance": c.get("stance") if c.get("stance") in ("buy", "watch", "avoid", "sell") else "watch",
+                "entry_lo": _s(entry[0]), "entry_hi": _s(entry[1]),
+                "exit_lo": _s(exit_[0]), "exit_hi": _s(exit_[1]),
+                "stop": _s(c.get("stop")),
+                "decision": c.get("decision") if c.get("decision") in picks_store.DECISIONS else "new",
+                "trigger": c.get("trigger") if c.get("trigger") in picks_store.TRIGGERS else "none",
+                "thesis": str(c.get("thesis", ""))[:200], "trigger_note": str(c.get("trigger_note", ""))[:100],
+                "px_at_call": (levels.get(code) or {}).get("price"),
+            }
+            basis["adjusted"] = adjusted
+            row["basis_json"] = json.dumps(basis, ensure_ascii=False)
+            out.append(row)
+        except (TypeError, KeyError, AttributeError, ValueError) as e:
+            logger.warning("picks: 丢弃格式不合规的一条返回 %s: %s", code, e)
+            continue
     return out
 
 

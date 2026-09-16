@@ -33,7 +33,7 @@
 ```mermaid
 flowchart TB
   UI["前端 · 零构建<br/>/ 选股: index.html + app.js<br/>/review 复盘: review.html + review.js"]
-  subgraph BE["后端 · Flask (app.py, 65 路由)"]
+  subgraph BE["后端 · Flask (app.py, 75 路由；登录闸门 auth.py · 按人隔离 userctx.py · 限流 ratelimit.py)"]
     APP[app.py 路由]
     SCR[screening.py 选股/形态打分]
     AIB[ai_blocks.py AI 注入块]
@@ -80,6 +80,13 @@ flowchart TB
 | **② 资金交易**     | `fees.py` · `profile_store.py` · `portfolio.py` · `paper_store.py`                                                     | 费率单一源 · 多档画像 · 真实持仓(lot) · 模拟撮合          |
 | **③ AI 进化**    | `llm.py` · `template_store.py` · `provenance.py` · `rules_store.py` · `ai_cache.py` · `websearch.py`                   | DeepSeek · 提示词版本化 · 溯源校验 · 规则库 · 缓存 · 联网 |
 | **④ Agent 核心** | `agent_loop.py` · `agent_store.py` · `factor_lab.py` · `outcome.py` · `structure.py`                                   | 日循环+调度 · 持久层 · 因子/判罪线 · 结算 · K线结构        |
+
+### 2.1 进程拓扑（2026-09-16 多用户后）
+
+本地：`python3 app.py` 单进程，登录后使用；开着就自动跑 agent 盘中调度与每日复盘。
+服务器：gunicorn（2 worker x 8 线程，只绑 127.0.0.1）+ `scheduler.py`（公共预热、复盘、清理；
+agent 默认不自动跑）+ tailscale serve 终止 TLS。个人数据在 `data/users/<uid>/`，公共数据在 `data/`，
+agent 舰队全站一套、归站长。机制细节在 CLAUDE.md「多用户与部署」节，部署步骤在 `deploy/README-deploy.md`。
 
 ## 3. 两条主数据流
 

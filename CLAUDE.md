@@ -8,6 +8,10 @@
 一个**本地运行**的 A 股看板：多股对比 + 点击深挖（含多周期行情图：分时+K线蜡烛(可选 MA5/10/20/60/120/240)）+ 顶部大盘研判条 + 全市场两级选股 + 持仓盈亏 + DeepSeek AI 推荐/建议（结果落盘缓存带时间戳）+ 近1年新闻/政策库 + 私域笔记 + 交易规则库（价格行为体系 + A股制度特性，可增删改、注入 AI）+ **投资画像本金分级玩法** + **公司叙事(做过/在做/要做)** + **AI 溯源与依据校验** + **全球宏观→板块指向** + 模拟盘 + 名词解释。
 纯本地 Flask 后端代理各数据源，前端零构建（HTML+CSS+原生 JS）。**为什么不是托管网页**：深挖/加股票/调 AI/联网搜索都要实时外部请求，而托管型 Artifact 的 CSP 禁止一切外部请求，做不到。
 
+2026-09-16 起（分支 `multiuser`）支持多人共用：登录、个人数据按人隔离到 `data/users/<uid>/`、
+AI 日预算、gunicorn + 独立调度进程、阿里云部署脚本。本地单人用法不变，只多一次建号。
+机制见下方「多用户与部署」节；部署步骤见 `deploy/README-deploy.md`。
+
 ## 复盘自动化模块（`/review`）
 
 本会话(2026-08-15)新增的**第二个前端路由**，与选股看板 `/` 分栏、独立页面、顶部切换、**不共用主页**。
@@ -20,20 +24,34 @@
   `取数+体检闸 → 纯算情绪硬指标(赚钱效应/晋级率/连板梯队/情绪周期/题材热点/亏钱效应/封板质量) → DeepSeek 5 分析师+复盘裁判 → 生成文稿 → 落盘 → /review 渲染`。九成是硬指标纯计算、秒出；AI 只在研判+文稿两块。
 - **边界**：复盘=客观事实整理，只到板块层面、不荐个股、不给买卖点（与选股/agent 的建议口径分开）。
 - **数据策略**：复用 A-stock 不封IP源 + `a-stock-data` 技能的打板端点（涨停/连板/炸板/跌停四池 + 昨日定稿 + 题材串），**不引 akshare**；指标数学与正确性闸（定稿vs实时/制度10-20-30cm/覆盖率）照搬成熟口径。**详细设计 + 数据缺口分析在本地 `复盘方案/`（不进公开仓库）。**
-- **部署 = 本地 macOS 优先（零配置）**：**应用内每日调度** `app._review_scheduler`（守护线程，交易日 `REVIEW_AUTO_TIME` 默 18:30 到点自动跑一次、幂等，幂等靠 `_review_sched_state.last_auto`）+ **首启自动回填情绪周期** `_review_boot`（history<5 天则后台 `review.backfill.backfill(3)`）→ 用户只需 `python3 app.py`，**复盘每日自动出、情绪周期开箱即用**，无需 cron/launchd。两者都在 `__main__` 起线程（仿 `_agent_scheduler`）。关掉 app 也要跑 = 可选挂 launchd 跑 `run_daily`。**服务器部署 = 更后**（⚠️东财 IP 用真实服务器实测打板四池+板块资金流）。
+- **部署**：本地 `python3 app.py` 时由应用内每日调度 `app._review_scheduler`（守护线程，交易日 `REVIEW_AUTO_TIME` 默 18:30 到点自动跑一次、幂等靠 `_review_sched_state.last_auto`）+ 首启自动回填情绪周期 `_review_boot`（history<5 天则后台 `review.backfill.backfill(3)`）负责，两者在 `__main__` 起线程。服务器上这两个线程跑在 `scheduler.py` 进程里（gunicorn 不执行 `__main__`），生成前先拿 `data/review/.running-<date>` 文件锁，web 的 `/api/review/status` 能看到别的进程在跑（`running_elsewhere`）。服务器 IP 上东财打板四池是否被封仍未实测，`deploy/README-deploy.md` 2.5 节有探测脚本，部署完先跑。
 
 ## 快速开始
 
 ```bash
-pip install -r requirements.txt      # 只依赖 flask
-python app.py                        # http://127.0.0.1:5000
+pip install -r requirements.txt                       # 只依赖 flask
+python3 astockctl.py adduser <你> --admin              # 一次：建账号（首个管理员即舰队站长）
+python3 deploy/migrate_to_multiuser.py <你>            # 一次：把根目录旧数据迁到 data/users/<你>/
+python3 app.py                                        # http://127.0.0.1:5000，先登录
 ```
 
-数据文件（`watchlist.json` / `portfolio.json`）首次运行自动生成，均已 gitignore。
+个人数据（自选股/持仓/画像/笔记/规则/模拟盘/agent）在 `data/users/<uid>/`，公共数据（新闻/全市场池/
+因子/模板/复盘/用量/账号）在 `data/`，均已 gitignore。migrate 要在第一次登录前跑，否则登录会先建出
+空库，migrate 就全部跳过（此时用 `--force`）。本地不要设 `ASTOCK_ENV=production`，否则 cookie 带
+Secure、http 下登不上。
 
 ## 文件地图
 
-**入口**：`app.py`(Flask 路由，65 个) · `templates/index.html`(选股 UI+CSS，路由 `/`) · `static/app.js`(选股前端逻辑) · **`templates/review.html`+`static/review.js`+`review/`(复盘自动化模块，路由 `/review`)**
+**入口**：`app.py`(Flask 路由，75 个) · `templates/index.html`(选股 UI+CSS，路由 `/`) · `static/app.js`(选股前端逻辑) · **`templates/review.html`+`static/review.js`+`review/`(复盘自动化模块，路由 `/review`)** · `wsgi.py`(gunicorn 入口) · `scheduler.py`(web 外定时任务进程)
+
+### 多用户与部署（2026-09-16 加）
+| 文件 | 职责 |
+|------|------|
+| `userctx.py` | 当前用户 contextvar；个人数据目录解析 `user_path`/`shared_path`；跨线程传播 `Thread`/`spawn`/`submit`/`ctx_map`；舰队站长 `fleet_uid`/`as_fleet`/`in_fleet`（环境变量 `ASTOCK_FLEET_OWNER` 优先，否则 auth 注册的 resolver 每 60 秒惰性取最早管理员）；`open_db` 统一开 WAL |
+| `auth.py` / `auth_password.py` | 账号表、服务端会话（存 sha256(token)）、`before_request` 全局闸门（默认全关，白名单 `/login` `/logout` `/healthz` `/static/`）、Origin 同源校验（回环来源信 X-Forwarded-Host）、安全响应头、`/login` `/logout` `/healthz` `/api/me`；密码 scrypt、失败按用户名与 ip 两键锁定 |
+| `ratelimit.py` | 每分钟总请求、AI 最小间隔、AI 日预算（每人 + 全站）、heavy 桶按请求计数；`allow_llm`/`record_ai_call` 是真实计费点（见约定）；库 `data/usage.db`；`/api/usage` |
+| `astockctl.py` | 账号与用量 CLI：`adduser`/`passwd`/`disable`/`enable`/`kick`/`users`/`usage`/`status` |
+| `deploy/` | 阿里云部署：`bootstrap.sh`(首次一键) · `deploy.sh`(服务器侧幂等) · `push.sh`(更新) · `fix_perms.sh`(权限单一源) · 两个 systemd 单元 · `gunicorn.conf.py` · `backup.sh` · `harden_ssh.sh` · `migrate_to_multiuser.py` · `env.example` · `README-deploy.md`(步骤权威) · `mcp/`(让 Claude 桌面端操作服务器的 MCP server，六个固定动作) |
 **app.py 的共享辅助已抽出**(2026-07-16，消除 agent_loop 的 `import app` 循环依赖)：
 `screening.py`(选股/形态初筛：`_screen_rows`/`_pa_score`/`_safe_kline`/`_safe_metrics`…) ·
 `ai_blocks.py`(AI 注入块：`_tier_block`/`_fee_block`/`_lesson_block`/`_agent_blocks`/**`_stock_house_view`**…)。
@@ -82,7 +100,44 @@ app.py 用显式 import 带回名字，路由调用点与 `app._X` 可达性不�
 `test_structure.py`(12) K线结构摘要 · `test_outcome.py`(12) 结果结算 ·
 `test_excess_dist.py`(14) 超额分布+判罪线 · `test_agent_memory.py`(15) 个体记忆+journal(P1/P2/P2c)+regime-view ·
 `test_sector_backfill.py`(13) 板块聚合口径 ·
-**`test_fees.py`(8) / `test_portfolio.py`(8) / `test_paper_store.py`(9) 钱数学(费率/现金/撮合)** —— **共 13 文件**
+**`test_fees.py`(8) / `test_portfolio.py`(8) / `test_paper_store.py`(9) 钱数学(费率/现金/撮合)** ·
+`test_review_metrics.py`(44) 复盘情绪硬指标 ·
+`test_userctx.py`(52) 用户上下文/线程传播/站长解析 · `test_auth.py`(68) 登录闸门/锁定/会话/CSRF ·
+`test_ratelimit.py`(61) 计费门与计数/ai_cache 键 · `test_review_lock.py`(47) 复盘文件锁 ·
+`test_fleet_routes.py`(36) 舰队路由权限/自选股并集 —— **共 19 文件**
+
+## 多用户与部署（2026-09-16，分支 `multiuser`；设计 `plan/2026-09-16-multiuser-deploy-plan.md`）
+
+用户三个决定：继续推进并正式提交（不再以补丁脚本形态存在）；agent 舰队全站只有一套、归站长；
+服务器上 agent 不自动跑（保留「不开 app 就不炒股」）。
+
+- **用户上下文**：`auth._gate` 每个请求 `userctx.set_uid(uid)`，`teardown_request` 清空。个人 store
+  （notes/paper/rules/agents/profiles/watchlist/portfolio）的路径在调用时解析到 `data/users/<uid>/`，
+  无用户时 `require_uid()` 抛 RuntimeError（宁可 500 不串人）。公共库（news/universe/templates/
+  factors/usage/auth）路径不变。后台线程一律 `userctx.Thread`/`spawn`/`submit`，线程池用 `ctx_map`——
+  原生 `threading.Thread`/`ex.map` 拿不到用户，个人 store 会炸（PITFALLS#19）。
+- **舰队 = 站长的数据**：agents.db/paper.db/profiles.db 不搬公共库（一次舰队运行还要读站长的规则与
+  画像）。所有舰队代码路径进 `userctx.as_fleet()`：`app._fleet_route` 包住全部 `/api/agents*`（GET 对
+  登录用户开放，写操作只允许管理员或站长，否则 403；站长未设置 503）、`_agent_tick`、
+  `scheduler._run_fleet_agents`、ai_blocks 的 `_lesson_block`/`_stock_house_view`/`_regime_view`
+  （任何人的请求里都看站长舰队，空则空块）。站长 = `ASTOCK_FLEET_OWNER`，否则最早创建的管理员
+  （停用不换人；建号后最多 60 秒生效、不用重启）。管理员在舰队路由里建 agent 用的是站长的激活画像。
+- **计费点在真实 LLM 调用**：`llm._chat` 发请求前 `ratelimit.allow_llm(uid)`（门故障也拒绝），成功后
+  `record_ai_call`；缓存命中/失败/超时不计。舰队调用记 `fleet`、无用户记 `system`，都只受全站预算
+  `ASTOCK_AI_GLOBAL_DAY`（默认 150，要把舰队一天 40+ 次算进去）；个人预算 `ASTOCK_AI_PER_USER_DAY`
+  默认 40。`before_request` 的 `check()` 对 ai 路径只做门（频率、6 秒最小间隔、预算是否已满），
+  `GET /api/market/overview?refresh=1` 也过这道门。新增会调 LLM 的路由不需要登记，计费自动生效。
+  ai_cache 键带 uid（`macro`/`profile` 两类公开资料例外）。
+- **三进程拓扑**：gunicorn（gthread，2 worker x 8 线程，只绑 127.0.0.1:5000，`max_requests=0`）
+  + `scheduler.py`（公共预热、复盘、每日清理；`ASTOCK_AGENT_AUTO=1` 才在站长上下文跑 agent）
+  + tailscale serve 终止 TLS。跨进程状态只靠文件：复盘 `data/review/.running-<date>`、东财节流
+  `data/.em_last_call`、用户首次建库 `data/users/<uid>/.init.lock`（都是 fcntl 排他锁）。进程内字典
+  （`_review_job`、`_user_inited`、ratelimit 的分钟窗与最小间隔）每个 worker 一份，只做「本进程视角」。
+- **本地开发**：`python3 app.py` 在站长上下文起盘中调度器（开着 app 就每桶自动跑，与从前一致），
+  不要同时再跑 `scheduler.py`。`ASTOCK_ENV=production` 时 `app.py` 拒绝直接启动。
+- **对 conda 硬偏好的例外**：服务器 systemd 单元用 `/opt/astock/.venv`（无人值守的 nologin 账号下比
+  conda 少坑）；本地仍 conda。用户可否决。
+- **待用户做**：在 ECS 上跑 README-deploy 2.5 的东财端点探测；决定是否合并 `multiuser` 到 main。
 
 ## 数据源 & 坑（改代码前必读）
 
@@ -143,6 +198,13 @@ app.py 用显式 import 带回名字，路由调用点与 `app._X` 可达性不�
 
 **按日累积的表一律要有 `purge()`** + 写入路径自动调用 + 容量在前端可见
 （`sector_daily` 曾无清理，10 年会涨到 820MB）。
+
+**多用户下的三条硬约束**（2026-09-16）：新起线程/线程池用 `userctx.Thread`/`spawn`/`ctx_map`，
+不用原生的；碰 agent 数据的代码路径进 `userctx.as_fleet()`；跨进程要共享的状态落文件加 fcntl 锁，
+不放进程内字典。个人库与公共库的边界见「多用户与部署」节，新增 store 先决定归哪边。
+
+**项目文档与代码注释不出现装饰符号**（用户 2026-08-25 规则）：新写内容不用箭头、对勾、感叹号类
+emoji；存量文档里已有的不要成批替换。运行时输出字符串按同一口径处理。
 
 ### 🔴 改代码前必读：`plan/PITFALLS.md`
 
@@ -234,7 +296,14 @@ python3 tests/test_sector_backfill.py    # 板块聚合口径（改 _agg_sector_
 python3 tests/test_fees.py               # 费率数学（改 fees.py 必跑）
 python3 tests/test_portfolio.py          # 持仓现金/盈亏三口径（改 portfolio.py 必跑）
 python3 tests/test_paper_store.py        # 撮合规则 整手/涨跌停/T+1（改 paper_store.py 必跑）
-# 全部零依赖、离线、不打网络。共 13 文件。
+python3 tests/test_review_metrics.py     # 复盘情绪硬指标 44 断言（改 review/metrics 必跑）
+python3 tests/test_userctx.py            # 用户上下文/线程传播/站长解析（改 userctx 必跑）
+python3 tests/test_auth.py               # 登录闸门/锁定/会话/CSRF（改 auth/auth_password 必跑）
+python3 tests/test_ratelimit.py          # 计费门与计数/ai_cache 键（改 ratelimit/llm._chat/ai_cache 必跑）
+python3 tests/test_review_lock.py        # 复盘文件锁（改 review/pipeline 必跑）
+python3 tests/test_fleet_routes.py       # 舰队路由权限/自选股并集（改 _fleet_route/news_store/store 必跑）
+# 全部零依赖、离线、不打网络。共 19 文件。一行跑全部：
+#   for f in tests/test_*.py; do python3 "$f" >/dev/null 2>&1 || echo "FAIL $f"; done
 # 改 agent 记忆(journal/冻结分位/house-view)后：改 agent_store/agent_loop/ai_blocks → 跑 test_agent_memory + test_excess_dist。
 
 # ⚠️ 改**决策提示词/数据面**后，必须实跑一个 debate 档（single 跑通≠debate 跑通，
@@ -244,17 +313,25 @@ python3 tests/test_paper_store.py        # 撮合规则 整手/涨跌停/T+1（�
 #    记忆块合计 ~8261 字符）后实跑 debate——裁判仍产出完整 JSON（intents+skip_reason，
 #    输出仅 263 字），未截断。当前 8000/12000 预算对满记忆有余量，不必调大。
 
-python3 -c "import ast; [ast.parse(open(f).read()) for f in ['app.py','agent_loop.py','screening.py','ai_blocks.py','outcome.py','structure.py','universe_store.py','agent_store.py']]"
-node --check static/app.js
+python3 -c "import ast,glob; [ast.parse(open(f).read()) for f in glob.glob('*.py')+glob.glob('review/*.py')+glob.glob('tests/*.py')+glob.glob('deploy/*.py')]"
+node --check static/app.js && node --check static/review.js
+perl -e 'alarm 90; exec @ARGV' -- env NO_PROXY='*' python3 -c "import app, wsgi, scheduler"   # 零网络
 
 python app.py &                          # ⚠️ 一律用 127.0.0.1 别用 localhost：
                                          #    localhost→::1→AirPlay 403（见 PITFALLS#18）
-curl -s 127.0.0.1:5000/api/config
-curl -s 127.0.0.1:5000/api/universe/status      # 池子：总数/eligible/板块回填进度
-curl -s "127.0.0.1:5000/api/sectors?kind=sw1&limit=5"
-curl -s 127.0.0.1:5000/api/factors              # 因子 IC/方向/翻转/新鲜度
-curl -s 127.0.0.1:5000/api/agents               # agent 存档 + 教训汇总
+# 接口都要登录：先拿 cookie（本地 ASTOCK_ENV 不设 production，cookie 才不带 Secure）
+curl -s -c cj.txt -H 'Origin: http://127.0.0.1:5000' -d 'uid=<你>&password=<密码>' 127.0.0.1:5000/login
+curl -s -b cj.txt 127.0.0.1:5000/api/me                 # uid / is_admin
+curl -s -b cj.txt 127.0.0.1:5000/api/usage              # 今日 AI 次数 / 全站预算
+curl -s -b cj.txt 127.0.0.1:5000/api/config
+curl -s -b cj.txt 127.0.0.1:5000/api/universe/status    # 池子：总数/eligible/板块回填进度
+curl -s -b cj.txt "127.0.0.1:5000/api/sectors?kind=sw1&limit=5"
+curl -s -b cj.txt 127.0.0.1:5000/api/factors            # 因子 IC/方向/翻转/新鲜度
+curl -s -b cj.txt 127.0.0.1:5000/api/agents             # 站长舰队 + 教训汇总（未设站长 503）
+curl -s -b cj.txt 127.0.0.1:5000/api/review/status      # running / running_elsewhere
 # AI 类接口 30~90s → --max-time 200；有代理 → --noproxy '*'
+# 服务器三进程冒烟（隔离副本里做，2026-09-16 实测过）：
+#   gunicorn -c deploy/gunicorn.conf.py -b 127.0.0.1:5002 wsgi:application  +  python3 scheduler.py
 ```
 
 ## 安全（提交前必做）
@@ -264,8 +341,12 @@ curl -s 127.0.0.1:5000/api/agents               # agent 存档 + 教训汇总
   ```bash
   git ls-files --error-unmatch .env    # 必须报错(=未跟踪)
   git ls-files -z | xargs -0 grep -lE "sk-[A-Za-z0-9]{16,}"   # 必须无输出
+  git diff --cached -U0 | grep -E '^\+[^+]' | grep -nE '([0-9]{1,3}\.){3}[0-9]{1,3}|/Volumes/|/Users/' \
+    | grep -vE '127\.0\.0\.1|0\.0\.0\.0|203\.0\.113'          # 公网 IP / 本机绝对路径：必须无输出
   ```
-- 绝不把 key / 个人邮箱 / 本地绝对路径写进被跟踪文件。
+- 绝不把 key / 个人邮箱 / 本地绝对路径 / 服务器公网 IP / 服务器登录名写进被跟踪文件
+  （2026-09-11 的 deploy 文档曾含真实 IP 与登录名，2026-09-16 入库前改成占位符；前两条 grep 拦不住
+  这类泄露，所以加了第三条）。测试里的 IP 用 203.0.113.x 文档保留段。
 - 远程 `git@github.com:Gresham429/A-stock.git`（main 分支，MIT，Conventional Commits）。`gh` 未登录，推送走 SSH（已配好）。
 
 ## 代码风格
@@ -275,43 +356,38 @@ curl -s 127.0.0.1:5000/api/agents               # agent 存档 + 教训汇总
 
 ## 当前状态 / 待办
 
-**主线 `main` 干净、13 个测试离线全过；本会话新增的复盘模块在分支 `feat/review-module`（commit `2be73d8`，未合并 main、未推送——待用户定）。app 单进程在跑。**
+**2026-09-16：分支 `multiuser` 有 10 个 commit（`98630d3`..docs），未合并 main、未推送，等用户定。
+`main` 停在 `62cd3f2`（2026-08-15）。19 个离线测试全过；隔离副本里实跑过 Flask 登录闭环、
+gunicorn 两 worker 并发、scheduler 接线、复盘锁与东财节流跨进程。本地 app 未在跑；
+本地 `data/` 仍是旧布局（根目录 `agents.db` 等），切到 `multiuser` 分支后第一次用要先建号并跑
+migrate（见「快速开始」）。**
 
-### 本会话(2026-08-15)：复盘自动化模块 端到端建成
-- **`/review` 复盘模块从骨架做到可跑**：`review/` 包 + `/api/review/*` + `review.js` 真渲染。打板四池取数 spike 实机验证六源全通（涨停/炸板/跌停/昨日定稿/题材串/龙虎榜）→ 移植 8 类情绪硬指标（纯函数、44 断言离线测）→ 接 DeepSeek v4-pro 裁判研判+文稿 → 落盘+前端渲染。实测 20260814 全链路成功（退潮档/837字文稿）。见上「复盘自动化模块」节。
-- **DeepSeek 官网核对**：选股用的 `deepseek-v4-pro` 已是最新正式 pro（Pro-0813），代码无需改。
-- **两路由分栏**：`/` 选股 · `/review` 复盘，顶部切换、独立页面。
-- **文档同步**：`README.md` / `framework.md` / 本文；复盘详细设计/数据缺口在本地 `复盘方案/`（不进公开仓库）。
-- **情绪周期回填**：同花顺爬近 3 个月（66 交易日）→ 情绪周期已可用（实测 20260814：第2天、低点 20260813、回升中；喂进 AI 后档位从「退潮」修正为「修复」）。
-- **下一步**：5 分析师 fan-out（二期）· 收盘后定时器接入（systemd/cron）· 服务器部署（⚠️东财 IP 用真实服务器实测打板四池）。
-
-> 上一会话(2026-07-18)7 个 commit：4 项 🟢 自主优化(regime-view · 选股偏差分析 · debate 校验 · DOM 验证) + **cohort-aware 方向修复**(3 commit)。
-
-### 本会话做了什么（给下个会话的时间线，2026-07-18）
-
-1. **regime-view（P3 收尾）**(fee320f)：`agent_store.journal_for_regime` + `ai_blocks._regime_view`
-   + `agent_loop.current_regime`，注入大盘研判/选股 AI，按「同类行情」回看全舰队战绩。journal 空时空块。
-2. **`_PRESCREEN` 选股偏差覆盖分析**(d4f749a，只出结论)：mcap 预筛丢 88%，反转因子 range_pos/cum20
-   **只在被丢的小盘有效**(IC t−12~−16)、在保留的大盘方向翻转。见 `plan/2026-07-18-prescreen-coverage-analysis.md`。
-3. **debate token 校验**：agent 18 记忆塞到显示上限(~8261 字符)实跑 debate，裁判仍产出完整 JSON、未截断
-   → 8000/12000 预算有余量（结论记入「冒烟测试」✅ 行）。
-4. **板块面板 DOM 真机验证**(fc3f87e)：playwright headless chromium，11/11 断言 + 截图目视，零 console error。
-   ⚠️ 再做 DOM 测要：`env -u HTTP_PROXY... NO_PROXY='*'` 绕代理 + `page.goto(wait_until='domcontentloaded')`
-   不用 `networkidle`（本页持续轮询永不 idle）。playwright 已装入 miniconda（可 pip uninstall 回退）。
-5. **cohort-aware 方向修复**(5710387 底座 + e99749b 接线 + 0270642 文档，承接 #2)：无 focus 全市场选股改用
-   **大盘 cohort 方向**打分——range_pos 大盘 +1 vs 全池 −1，近高点大盘股形态分 +33。`factor_lab`
-   加 `ic_cohort`/`backtest_large`/`scoring_directions`。**只影响用户面全市场选股**(agent 永远 focus、
-   不受影响；excess_dist/判罪线/教训门未动)。见 `plan/2026-07-18-cohort-aware-direction-plan.md`。
-   **顺带挖出 `codes_of()` 无 focus 按代码号排序非市值的坑(PITFALLS#5b)**。
-
-> 上一会话(2026-07-17→18)：盘中调度器 · 板块走势(回填/分栏/窗口) · agent 记忆重构 P1–P3 · 钱数学补测 · 阈值验证。
-> 详见对应 commit 与 `plan/`；机制说明在下方「关键机制速查」。
+复盘模块（`/review`）2026-08-15 端到端建成并已合入 main：取数、8 类硬指标、5 分析师 + 裁判 + 文稿、
+落盘、渲染、情绪周期回填、应用内每日调度。agent 舰队记忆闭环 P1-P3 于 2026-07-18 落地，
+`journal`/教训库靠真实交易日填充（app 最后一次跑约 2026-08-17）。历史细节看 git log 与 `plan/`。
 
 ### 🔴 下一步 / 下个会话可直接执行的 backlog
 
-**分两类：🟡 需用户签字才改 · ⏳ 卡时间。**
-（上一批 🟢 自主项 #1–#4 + cohort 修复本会话已全部完成，见上「本会话做了什么」。）
-每做一项：补离线单测 → 跑全套件(13 文件) → 若改后端则重启 app 验 boot → 单独 commit 推送。**🟡 未经用户确认不要改。**
+**分三类：多用户收尾 · 需用户签字才改（下方标 🟡 的存量条目） · 卡时间（标 ⏳）。**
+每做一项：补离线单测，跑全套件(19 文件)，若改后端则重启 app 验 boot，单独 commit 推送。**标 🟡 的未经用户确认不要改。**
+
+**多用户收尾（2026-09-16 review 里判定可延后的项，都有明确修法）**
+- 合并与推送：`multiuser` 分支 `git merge --no-ff` 到 main 后推送，用户定。
+- 部署前在 ECS 上跑 `deploy/README-deploy.md` 2.5 的东财端点探测（打板四池 / push2ex / slist）。
+- `ratelimit.allow_llm` 与 `record_ai_call` 非原子：并发下日预算可超出，上限是同时在飞的调用数
+  （2 worker x 8 线程不超过 15 次）。严格版把读和加放进同一事务并在 record 时返回是否超限。
+- `agent_loop.sweep_conditions` 跨进程非原子：两个管理员同时在不同 worker 点 run_all 可能重复补判
+  条件单。修法 `agent_store.claim_condition(cid)`（`UPDATE ... WHERE status='live'` 按 rowcount）。
+- 复盘流水线中途被预算门拒绝时，带「已达上限」文案的 stub 会落盘为 done，当天不再自动重跑
+  （存量行为，`force=1` 可重跑）。修法：预算类 LLMError 不落盘。
+- `run_all` 里某 agent 撞预算后其余 agent 仍逐个尝试（有界空转）。可用共享 Event 让后续直接 skipped。
+- 登录失败按 ip 键锁定：NAT 共享出口时朋友连错 5 次会把同 IP 的站长也锁 5 分钟（设计取舍，
+  README-deploy 已写明）。
+- 大文件：`app.py` 1536 / `agent_loop.py` 1025 / `datasources.py` 877 行超 800 硬限。可先把
+  `datasources` 的 `_em_*` 五个函数挪 `em_throttle.py`，`app.py` 的 `_fleet_route`/`ensure_user_stores`
+  挪 `fleet_routes.py`。
+- 仍无单测：`template_store` / `provenance` / `rules_store` / `profile_store` / `news_store` /
+  `notes_store` / `astockctl` / `scheduler`。
 
 🟡 **需用户签字才改（自主会话只分析列建议，别直接改）**
 - **`sample_codes` 市值分层实为代码分层**（cohort 修复时挖出，PITFALLS#5b）：`codes_of()` 无 focus 按
@@ -319,9 +395,6 @@ curl -s 127.0.0.1:5000/api/agents               # agent 存档 + 教训汇总
   冻结分位，敏感）。要修须重排样本 + 重跑分布 + 确认冻结分位不受影响。
 - **阈值改动**：`CHASE_HIGH_POS` 85→80（只用于 detect_failures 教训门、被 `bad('range_pos')` 门控，
   非打分；85 是线性惩罚上的任意切点）；纪律参数见下。**建议保持 85**（降到 80 只多记追高教训）。
-- **#4 拆大文件**：`app.py`(1240)/`agent_loop.py`(1040) 超 <400 规则。**高风险重构、纯维护性收益**，
-  live 攒数据期不划算，建议延后；真做先拆 agent_loop（deciders→agent_deciders.py、风控/结算→
-  agent_risk.py，函数缝清晰无 Flask 路由风险），独立分支 + 完整回滚方案。
 
 ⏳ **卡时间（唯一主线，代码全就位）**
 - **让 20 个 agent 攒数据**：记忆闭环(P1–P3)全落地但 `journal`/教训库仍空，要真实交易日填充。
@@ -346,8 +419,9 @@ curl -s 127.0.0.1:5000/api/agents               # agent 存档 + 教训汇总
   仍无单测：`template_store` / `provenance` / `rules_store` / `profile_store` / `news_store` / `notes_store`。
 - **`DebateDecider` 默认不启用**（UI 可选）：先用 single 拿基线，用数据证明需要再切。
 - **launchd 定时全不挂**（用户决定）：agent「不开 app 就意味着那天不炒股」——但**只要 app 开着**，
-  盘中调度器就每桶自动跑（无需在交易时段启动，2026-07-17 修）。
-  板块统计「每交易日都开 app，`_universe_boot` 已覆盖」。
+  盘中调度器就每桶自动跑（无需在交易时段启动，2026-07-17 修）。服务器上同样不自动跑
+  （`ASTOCK_AGENT_AUTO` 默认 0，2026-09-16 用户再次确认）。
+  板块统计「每交易日都开 app，`_universe_boot` 已覆盖」；服务器上由 `scheduler.py` 覆盖。
 
 ### 🔒 卡在数据源（代码已就位，拿到源即接；用户要求提醒他加）
 
@@ -358,9 +432,12 @@ curl -s 127.0.0.1:5000/api/agents               # agent 存档 + 教训汇总
 
 ### 本地数据文件（全部 gitignore）
 
-`watchlist.json` · `portfolio.json`(按画像隔离+lot 模型) · `ai_cache.json` ·
-`data/`: `news.db` `notes.db` `rules.db` `paper.db` `profiles.db` `universe.db`
-`templates.db` `agents.db` `factors.db`
+公共 `data/`: `news.db` `universe.db` `factors.db` `templates.db` `auth.db` `usage.db` `review/`
+`.em_last_call`；根目录 `ai_cache.json`（键带 uid）。
+个人 `data/users/<uid>/`: `watchlist.json` `portfolio.json`(按画像隔离+lot 模型) `notes.db` `rules.db`
+`paper.db` `profiles.db` `agents.db` `.init.lock`。舰队只读站长目录里的 `agents.db`/`paper.db`/`profiles.db`。
+旧布局（根目录 `watchlist.json`、`data/agents.db` 等）由 `deploy/migrate_to_multiuser.py <uid>` 复制进
+站长目录，原文件不删。
 
 ### 用户侧待办（我做不了）
 

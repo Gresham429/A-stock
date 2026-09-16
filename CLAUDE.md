@@ -52,6 +52,16 @@ Secure、http 下登不上。
 | `ratelimit.py` | 每分钟总请求、AI 最小间隔、AI 日预算（每人 + 全站）、heavy 桶按请求计数；`allow_llm`/`record_ai_call` 是真实计费点（见约定）；库 `data/usage.db`；`/api/usage` |
 | `astockctl.py` | 账号与用量 CLI：`adduser`/`passwd`/`disable`/`enable`/`kick`/`users`/`usage`/`status` |
 | `deploy/` | 阿里云部署：`bootstrap.sh`(首次一键) · `deploy.sh`(服务器侧幂等) · `push.sh`(更新) · `fix_perms.sh`(权限单一源) · systemd 单元 web / scheduler / `astock-news.timer`(每天五次 `fetch_news.py`，同本地 launchd) · `gunicorn.conf.py` · `backup.sh` · `harden_ssh.sh` · `migrate_to_multiuser.py` · `env.example` · `README-deploy.md`(步骤权威) · `mcp/`(让 Claude 桌面端操作服务器的 MCP server，六个固定动作) |
+
+### 三周期选股与观点账本（2026-09-16 加，设计 `plan/2026-09-16-picks-ledger-design.md`）
+| 文件 | 职责 |
+|------|------|
+| `picks_levels.py` | K 线算候选价位（纯函数），模型只能从候选里挑，返回后 `snap` 校验 |
+| `picks_store.py` | 观点账本 `data/picks_public.db`（公共三周期）与 `data/users/<uid>/picks.db`（自选股）；修改链、改口规则强制、到期、结果贴回、两层记忆块 |
+| `llm_picks.py` | 两个提示词（三周期选股 / 自选股买卖点）+ 返回按条校验 |
+| `picks_pipeline.py` | 候选池（短线=复盘题材池+换手；中线=板块龙头+资金；长线=估值+财报）、运行、结算、文件锁、16:00 / 09:05 定时循环 |
+| `picks_routes.py` | `/api/picks/*` Blueprint（public / watchlist / chain / run / run_public / status） |
+
 **app.py 的共享辅助已抽出**(2026-07-16，消除 agent_loop 的 `import app` 循环依赖)：
 `screening.py`(选股/形态初筛：`_screen_rows`/`_pa_score`/`_safe_kline`/`_safe_metrics`…) ·
 `ai_blocks.py`(AI 注入块：`_tier_block`/`_fee_block`/`_lesson_block`/`_agent_blocks`/**`_stock_house_view`**…)。
@@ -104,7 +114,10 @@ app.py 用显式 import 带回名字，路由调用点与 `app._X` 可达性不�
 `test_review_metrics.py`(44) 复盘情绪硬指标 ·
 `test_userctx.py`(52) 用户上下文/线程传播/站长解析 · `test_auth.py`(68) 登录闸门/锁定/会话/CSRF ·
 `test_ratelimit.py`(61) 计费门与计数/ai_cache 键 · `test_review_lock.py`(47) 复盘文件锁 ·
-`test_fleet_routes.py`(36) 舰队路由权限/自选股并集 —— **共 19 文件**
+`test_fleet_routes.py`(36) 舰队路由权限/自选股并集 ·
+`test_picks_levels.py`(30) 候选价位纯函数 · `test_picks_store.py`(25) 账本改口规则/结果贴回 ·
+`test_llm_picks.py`(13) 提示词返回校验 · `test_picks_pipeline.py`(32) 候选池/运行/结算/文件锁 ·
+`test_picks_routes.py`(11) `/api/picks/*` 路由 —— **共 24 文件**
 
 ## 多用户与部署（2026-09-16，分支 `multiuser`；设计 `plan/2026-09-16-multiuser-deploy-plan.md`）
 
@@ -138,6 +151,10 @@ app.py 用显式 import 带回名字，路由调用点与 `app._X` 可达性不�
 - **对 conda 硬偏好的例外**：服务器 systemd 单元用 `/opt/astock/.venv`（无人值守的 nologin 账号下比
   conda 少坑）；本地仍 conda。用户可否决。
 - **阿里云 + Tailscale 两个必改项**（2026-09-16 踩过，整机 DNS 断了一小时、18:30 复盘失败）：`tailscale set --accept-dns=false --netfilter-mode=off`。原因与说明在 deploy/README-deploy.md 第 4 节。这台机器是共用机（k3s/docker/nginx/游戏服），`deploy.sh` 用 `ASTOCK_UFW=0` 跳过 ufw，外围防线 = 阿里云安全组 + Tailscale。
+- **三周期选股运行时**：交易日 16:00 全量跑一次（公共三周期记 `system`、各账号自选股各跑一次），
+  09:05 只刷短线。手动点 `/api/picks/run` 走 ai 门、计入个人日额度。跨进程用文件锁
+  `data/.picks-running-<scope>` 防重跑。账本落公共库 `data/picks_public.db`（三周期）与
+  `data/users/<uid>/picks.db`（自选股）；改口规则在 `picks_store._enforce` 里强制，不留后门。
 
 ## 数据源 & 坑（改代码前必读）
 
@@ -302,7 +319,12 @@ python3 tests/test_auth.py               # 登录闸门/锁定/会话/CSRF（改
 python3 tests/test_ratelimit.py          # 计费门与计数/ai_cache 键（改 ratelimit/llm._chat/ai_cache 必跑）
 python3 tests/test_review_lock.py        # 复盘文件锁（改 review/pipeline 必跑）
 python3 tests/test_fleet_routes.py       # 舰队路由权限/自选股并集（改 _fleet_route/news_store/store 必跑）
-# 全部零依赖、离线、不打网络。共 19 文件。一行跑全部：
+python3 tests/test_picks_levels.py       # 候选价位纯函数 30 断言（改 picks_levels 必跑）
+python3 tests/test_picks_store.py        # 账本改口规则/结果贴回 25 断言（改 picks_store 必跑）
+python3 tests/test_llm_picks.py          # 提示词返回按条校验 13 断言（改 llm_picks 必跑）
+python3 tests/test_picks_pipeline.py     # 候选池/运行/结算/文件锁 32 断言（改 picks_pipeline 必跑）
+python3 tests/test_picks_routes.py       # /api/picks/* 路由 11 断言（改 picks_routes 必跑）
+# 全部零依赖、离线、不打网络。共 24 文件。一行跑全部：
 #   for f in tests/test_*.py; do python3 "$f" >/dev/null 2>&1 || echo "FAIL $f"; done
 # 改 agent 记忆(journal/冻结分位/house-view)后：改 agent_store/agent_loop/ai_blocks → 跑 test_agent_memory + test_excess_dist。
 
@@ -435,9 +457,9 @@ agent 不自动跑。服务器 IP 上东财端点全通（含家里被封的 cli
 ### 本地数据文件（全部 gitignore）
 
 公共 `data/`: `news.db` `universe.db` `factors.db` `templates.db` `auth.db` `usage.db` `review/`
-`.em_last_call`；根目录 `ai_cache.json`（键带 uid）。
+`picks_public.db` `.em_last_call` `.picks-running-*`；根目录 `ai_cache.json`（键带 uid）。
 个人 `data/users/<uid>/`: `watchlist.json` `portfolio.json`(按画像隔离+lot 模型) `notes.db` `rules.db`
-`paper.db` `profiles.db` `agents.db` `.init.lock`。舰队只读站长目录里的 `agents.db`/`paper.db`/`profiles.db`。
+`paper.db` `profiles.db` `agents.db` `picks.db` `.init.lock`。舰队只读站长目录里的 `agents.db`/`paper.db`/`profiles.db`。
 旧布局（根目录 `watchlist.json`、`data/agents.db` 等）由 `deploy/migrate_to_multiuser.py <uid>` 复制进
 站长目录，原文件不删。
 

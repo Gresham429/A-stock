@@ -412,6 +412,22 @@
   .paper-tbl td:first-child,.paper-tbl th:first-child{text-align:left}
   .ord-log{font-size:11.5px;font-family:var(--mono);color:var(--muted);padding:4px 0;border-bottom:1px solid var(--line)}
   .ord-log.rej{color:var(--down)}
+  .picks{margin:12px 0;padding:12px;border:1px solid var(--line,#333);border-radius:10px}
+  .picksHead{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+  .picksHead .sub{font-size:12px;opacity:.7;margin-left:8px}
+  .picksCols{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+  .picksCol h4{margin:4px 0 6px;font-size:13px;opacity:.85}
+  .pickCard{border:1px solid var(--line,#333);border-radius:8px;padding:8px;margin-bottom:6px;font-size:12px}
+  .pickCard .nm{font-weight:600;font-size:13px}
+  .pickCard .lv{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0}
+  .pickCard .lv span{background:rgba(127,127,127,.12);padding:1px 6px;border-radius:4px}
+  .pickCard .tag{font-size:11px;opacity:.75}
+  .picksTbl{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
+  .picksTbl th,.picksTbl td{padding:4px 6px;border-bottom:1px solid var(--line,#333);text-align:left}
+  .picksTbl tr{cursor:pointer}
+  .picksChain{margin-top:8px;font-size:12px;white-space:pre-wrap;opacity:.9}
+  .stance-buy{color:var(--up,#e33)} .stance-sell{color:var(--down,#3a3)} .stance-watch,.stance-avoid{opacity:.8}
+  @media (max-width:900px){.picksCols{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -463,6 +479,24 @@
       <button class="mkt-toggle" id="mktToggle" title="展开/收起 大盘研判">▾</button>
     </div>
     <div class="mkt-detail" id="mktDetail"></div>
+  </section>
+
+  <section class="picks" id="picksPanel">
+    <div class="picksHead">
+      <div class="t">三周期推荐 <span class="sub" id="picksGen"></span></div>
+      <div class="acts">
+        <button class="mini" onclick="runPicks('watchlist')">刷新自选股买卖点</button>
+        <button class="mini" id="picksPubBtn" onclick="runPicks('public')">刷新三周期</button>
+      </div>
+    </div>
+    <div class="picksCols" id="picksCols"></div>
+    <div class="picksWl">
+      <div class="t2">自选股买卖点</div>
+      <table class="picksTbl"><thead><tr>
+        <th>股票</th><th>周期</th><th>立场</th><th>买点</th><th>卖点</th><th>止损</th><th>有效到</th><th>本次</th><th>结果</th>
+      </tr></thead><tbody id="picksWlRows"></tbody></table>
+    </div>
+    <div class="picksChain" id="picksChain" style="display:none"></div>
   </section>
 
   <!-- AI 推荐 / 全市场筛选 -->

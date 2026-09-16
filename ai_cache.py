@@ -60,7 +60,7 @@ def _load() -> dict[str, Any]:
         try:
             with open(path, encoding="utf-8") as f:
                 return json.load(f)
-        except (FileNotFoundError, ValueError):
+        except (OSError, ValueError):   # 不存在、没权限（旧根目录文件归 root）、内容坏了都当没有
             continue
     return {}
 

@@ -159,6 +159,37 @@ def test_lock_and_due():
     ck(pp.due_slot(dt.datetime(2026, 9, 16, 9, 10), {}) == "morning", "09:10 到点早盘")
     ck(pp.due_slot(dt.datetime(2026, 9, 16, 12, 0), {"morning": "2026-09-16"}) == "", "午间无事")
 
+def test_run_public_isolates_horizon_failure():
+    setup_fakes(); setup_store()
+    def hp(horizon, cands, levels, memory, mctx, cap):
+        if horizon == "mid":
+            raise RuntimeError("boom")
+        return [{"code": cands[0]["code"], "name": cands[0]["name"], "horizon": horizon, "stance": "buy", "entry_lo": 9.8, "entry_hi": 10.0,
+                 "exit_lo": 10.5, "exit_hi": 10.8, "stop": 9.5, "decision": "new", "trigger": "none", "thesis": "t", "trigger_note": "n",
+                 "basis_json": "{}", "px_at_call": 10.0}]
+    llm_picks.horizon_picks = hp
+    r = pp.run_public(horizons=("short", "mid"))
+    ck(r["calls"] == 1, f"short 成功的一条应保留计数: {r}")
+    ck(r["error"] is not None and "mid" in r["error"], f"error 应点名失败的周期: {r}")
+    ck(len(ps.current("public")) == 1, "账本只留成功落库的那一条，不因 mid 失败被清空")
+
+def test_loop_isolates_user_failure():
+    setup_store()
+    pp.due_slot = lambda now, last: "full"
+    pp.run_public = lambda *a, **k: {"calls": 0, "error": None}
+    done = []
+    def rw(market_ctx=None, capital=None):
+        uid = pp.userctx.get_uid()
+        if uid == "a":
+            raise RuntimeError("boom")
+        done.append(uid)
+        return {"calls": 0, "error": None}
+    pp.run_watchlist = rw
+    slot = pp.tick(lambda: ["a", "b"], None)
+    ck(slot == "full", f"到点应跑 full: {slot}")
+    ck(done == ["b"], f"a 失败不拖累 b，b 应正常跑到: {done}")
+    ck(pp._last["full"] == dt.date.today().isoformat(), "桶一旦开始就标记今天已处理")
+
 if __name__ == "__main__":
     for fn in (test_short_pool_prefers_theme_and_turnover, test_mid_pool_uses_sector_leaders_and_flow,
                test_long_pool_filters_by_valuation_and_growth, test_enrich_rows_and_levels,
@@ -166,6 +197,7 @@ if __name__ == "__main__":
                test_enrich_drops_codes_without_quote, test_snapshot_cached,
                test_snapshot_failure_not_cached, test_run_public_persists_calls,
                test_run_watchlist_uses_user_watchlist, test_run_public_llm_failure_keeps_ledger,
-               test_lock_and_due):
+               test_lock_and_due, test_run_public_isolates_horizon_failure,
+               test_loop_isolates_user_failure):
         fn()
     print(f"OK — test_picks_pipeline 全过（{N[0]} 断言）")

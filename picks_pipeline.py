@@ -8,7 +8,6 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import os
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
@@ -223,6 +222,8 @@ def _persist(scope: str, calls: list[dict[str, Any]], today: str, run_id: str) -
 
 def run_public(market_ctx: dict[str, Any] | None = None,
                horizons: tuple[str, ...] = ("short", "mid", "long"), capital: float = 10000) -> dict[str, Any]:
+    """跑公共三周期。每个周期独立 try/except：一个周期失败不影响其余周期，也不回滚
+    已经成功落库的行——`calls`/`error` 都如实反映实际发生的事。"""
     today = dt.date.today().isoformat()
     run_id = f"pub-{today}-{int(time.time())}"
     picks_store.init("public")
@@ -231,16 +232,18 @@ def run_public(market_ctx: dict[str, Any] | None = None,
     try:
         settle("public", today)
         total = 0
+        errors: list[str] = []
         for h in horizons:
-            pool = {"short": short_pool, "mid": mid_pool, "long": long_pool}[h]()
-            rows, levels = enrich(pool, short=(h == "short"))
-            memory = {r["code"]: picks_store.memory_block("public", r["code"], (levels.get(r["code"]) or {}).get("price"), today) for r in rows}
-            calls = llm_picks.horizon_picks(h, rows, levels, memory, market_ctx, capital)
-            total += _persist("public", calls, today, run_id)
-        return {"run_id": run_id, "calls": total, "horizons": list(horizons), "error": None}
-    except Exception as e:  # noqa: BLE001 整轮失败账本不动
-        logger.exception("picks: 公共运行失败")
-        return {"run_id": run_id, "calls": 0, "horizons": list(horizons), "error": str(e)}
+            try:
+                pool = {"short": short_pool, "mid": mid_pool, "long": long_pool}[h]()
+                rows, levels = enrich(pool, short=(h == "short"))
+                memory = {r["code"]: picks_store.memory_block("public", r["code"], (levels.get(r["code"]) or {}).get("price"), today) for r in rows}
+                calls = llm_picks.horizon_picks(h, rows, levels, memory, market_ctx, capital)
+                total += _persist("public", calls, today, run_id)
+            except Exception as e:  # noqa: BLE001 单周期失败不拖累其余周期，已落库的行保留
+                logger.exception("picks: 周期 %s 失败", h)
+                errors.append(f"{h}: {e}")
+        return {"run_id": run_id, "calls": total, "horizons": list(horizons), "error": "; ".join(errors) or None}
     finally:
         release_lock("public")
 
@@ -278,22 +281,39 @@ def due_slot(now: dt.datetime, last: dict[str, str]) -> str:
     return ""
 
 
+def tick(uids_fn: Callable[[], list[str]],
+        market_ctx_fn: Callable[[], dict[str, Any] | None] | None = None) -> str:
+    """单次到点判定与执行，供 `loop_forever` 每 60 秒调用一次；返回实际跑的 slot（或 ""）。
+
+    到点即把 `_last[slot]` 标记为今天已处理——仓库「错过不补」的约定，桶一旦开始就
+    算数，不因为账号内部失败而当天重跑。随后每个账号的自选股运行各自 try/except：
+    一个账号出错（无论是 `run_watchlist` 本身还是它调用的取数）只记日志、跳到下一个
+    账号，不拖累其余账号那一桶。
+    """
+    slot = due_slot(dt.datetime.now(), _last)
+    if not slot:
+        return ""
+    _last[slot] = dt.date.today().isoformat()
+    mctx = market_ctx_fn() if market_ctx_fn else None
+    horizons = ("short", "mid", "long") if slot == "full" else ("short",)
+    logger.info("picks: 到点 %s，公共三周期 %s", slot, horizons)
+    run_public(mctx, horizons)
+    for uid in uids_fn():
+        try:
+            with userctx.as_user(uid):
+                r = run_watchlist(mctx)
+                logger.info("picks: [%s] 自选股 %s", uid, r)
+        except Exception as e:  # noqa: BLE001 一个账号出错不能拖累其他账号
+            logger.warning("picks: [%s] 自选股运行异常: %s", uid, e)
+    return slot
+
+
 def loop_forever(uids_fn: Callable[[], list[str]],
                  market_ctx_fn: Callable[[], dict[str, Any] | None] | None = None) -> None:
-    """定时循环：每 60 秒探一次到点。full = 三周期 + 每个账号自选股；morning = 短线 + 自选股。"""
+    """定时循环：每 60 秒探一次到点，调用 tick()。"""
     while True:
         try:
-            slot = due_slot(dt.datetime.now(), _last)
-            if slot:
-                _last[slot] = dt.date.today().isoformat()
-                mctx = market_ctx_fn() if market_ctx_fn else None
-                horizons = ("short", "mid", "long") if slot == "full" else ("short",)
-                logger.info("picks: 到点 %s，公共三周期 %s", slot, horizons)
-                run_public(mctx, horizons)
-                for uid in uids_fn():
-                    with userctx.as_user(uid):
-                        r = run_watchlist(mctx)
-                        logger.info("picks: [%s] 自选股 %s", uid, r)
+            tick(uids_fn, market_ctx_fn)
         except Exception as e:  # noqa: BLE001 循环绝不停摆
             logger.warning("picks: 定时循环异常: %s", e)
         time.sleep(60)

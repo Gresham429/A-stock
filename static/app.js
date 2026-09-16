@@ -1544,7 +1544,7 @@ function fmtRange(lo, hi){
 function fmtOutcome(r){
   if(r.max_up==null) return '';
   let s = `最高${r.max_up>0?'+':''}${r.max_up}% 最低${r.max_dn}%`;
-  if(r.touched && r.touched!=='none') s += ` 碰到${esc(({entry:'买点',exit:'卖点',stop:'止损'})[r.touched]||r.touched)}`;
+  if(r.touched && r.touched!=='none') s += ` 碰到${({entry:'买点',exit:'卖点',stop:'止损'})[r.touched]||r.touched}`;
   return s;
 }
 function pickCard(r){
@@ -1583,8 +1583,8 @@ async function runPicks(kind){
   const url = kind==='public' ? '/api/picks/run_public' : '/api/picks/run';
   const j = await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(r=>r.json()).catch(()=>({}));
   document.getElementById('picksGen').textContent = j.status==='started' ? '生成中（约 1 到 2 分钟）' : (j.status==='running' ? '已在生成' : (j.msg||j.error||'刷新失败'));
-  if(picksPoll){ clearInterval(picksPoll); picksPoll=null; }
-  if(j.status==='started'){
+  if(j.status==='started'||j.status==='running'){
+    if(picksPoll){ clearInterval(picksPoll); picksPoll=null; }
     picksPollN = 0;
     picksPoll = setInterval(async ()=>{
       picksPollN++;

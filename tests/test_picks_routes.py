@@ -1,5 +1,5 @@
 """tests/test_picks_routes.py  Blueprint：临时目录 + Flask 测试客户端，不 import app.py。"""
-import os, sys, tempfile, json
+import os, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["NO_PROXY"] = "*"
 from flask import Flask, g
@@ -31,6 +31,27 @@ def prop(code):
             "exit_lo": 10.8, "exit_hi": 11.2, "stop": 9.2, "thesis": "t", "trigger_note": "n", "basis_json": "{}",
             "decision": "new", "trigger": "none", "px_at_call": 9.9}
 
+def test_public_and_chain_on_fresh_db():
+    """首次部署/重启后 16:00 跑批之前，表还没建过——读路由不能 500（Fix round 1 critical）。"""
+    orig_public, orig_watchlist = ps.DB_PATHS["public"], ps.DB_PATHS["watchlist"]
+    fresh = tempfile.mkdtemp()
+    ps.DB_PATHS["public"] = os.path.join(fresh, "pub_fresh.db")
+    ps.DB_PATHS["watchlist"] = os.path.join(fresh, "wl_fresh.db")
+    try:
+        c = app.test_client()
+        r = c.get("/api/picks/public")
+        j = r.get_json()
+        ck(r.status_code == 200 and j["calls"] == [] and j["generated_at"] is None, "空库 public 不 500")
+        r = c.get("/api/picks/chain/600519?scope=public")
+        ck(r.status_code == 200 and r.get_json()["chain"] == [], "空库 chain(public) 不 500")
+        r = c.get("/api/picks/chain/600519?scope=watchlist")
+        ck(r.status_code == 200, "空库 chain(watchlist) 不 500")
+        r = c.get("/api/picks/chain/600519?scope=bogus")
+        ck(r.status_code == 400, "非法 scope 仍 400")
+    finally:
+        ps.DB_PATHS["public"] = orig_public
+        ps.DB_PATHS["watchlist"] = orig_watchlist
+
 def test_public_and_chain():
     ps.apply("public", prop("600519"), "2026-09-16", "r1")
     c = app.test_client()
@@ -61,6 +82,7 @@ def test_run_permissions_and_status():
     ck("public_running" in j and "watchlist_running" in j, "状态字段")
 
 if __name__ == "__main__":
-    for fn in (test_public_and_chain, test_watchlist_is_per_user, test_run_permissions_and_status):
+    for fn in (test_public_and_chain_on_fresh_db, test_public_and_chain,
+               test_watchlist_is_per_user, test_run_permissions_and_status):
         fn()
     print(f"OK — test_picks_routes 全过（{N[0]} 断言）")

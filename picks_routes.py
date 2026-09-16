@@ -26,6 +26,7 @@ def _can_manage() -> bool:
 
 @bp.get("/public")
 def api_public():  # noqa: ANN202
+    picks_store.init("public")
     h = request.args.get("horizon", "")
     rows = [r for r in picks_store.current("public") if not h or r["horizon"] == h]
     gen = max((r["created_at"] for r in rows), default=None)
@@ -43,6 +44,7 @@ def api_chain(code: str):  # noqa: ANN202
     scope = request.args.get("scope", "watchlist")
     if scope not in picks_store.SCOPES:
         return jsonify({"error": "scope 只能是 watchlist 或 public"}), 400
+    picks_store.init(scope)
     return jsonify({"chain": picks_store.chain(scope, code)})
 
 
@@ -59,7 +61,8 @@ def _spawn(kind: str, fn, uid: str = "") -> dict[str, str]:
     def _run() -> None:
         try:
             r = fn()
-            _state["last"][kind if kind == "public" else f"watchlist:{uid}"] = r
+            with _lock:
+                _state["last"][kind if kind == "public" else f"watchlist:{uid}"] = r
         finally:
             with _lock:
                 if kind == "public":
@@ -67,7 +70,15 @@ def _spawn(kind: str, fn, uid: str = "") -> dict[str, str]:
                 else:
                     _state["watchlist_running"][uid] = False
 
-    userctx.Thread(target=_run, daemon=True).start()
+    try:
+        userctx.Thread(target=_run, daemon=True).start()
+    except Exception:
+        with _lock:
+            if kind == "public":
+                _state["public_running"] = False
+            else:
+                _state["watchlist_running"][uid] = False
+        raise
     return {"status": "started"}
 
 
@@ -87,9 +98,11 @@ def api_run_public():  # noqa: ANN202
 @bp.get("/status")
 def api_status():  # noqa: ANN202
     uid = getattr(g, "uid", "")
-    return jsonify({"public_running": bool(_state["public_running"]),
-                    "watchlist_running": bool(_state["watchlist_running"].get(uid)),
-                    "last": {k: v for k, v in _state["last"].items() if k == "public" or k == f"watchlist:{uid}"}})
+    with _lock:
+        last = {k: v for k, v in _state["last"].items() if k == "public" or k == f"watchlist:{uid}"}
+        return jsonify({"public_running": bool(_state["public_running"]),
+                        "watchlist_running": bool(_state["watchlist_running"].get(uid)),
+                        "last": last})
 
 
 def _market_ctx() -> dict[str, Any] | None:

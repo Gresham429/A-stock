@@ -18,9 +18,19 @@ from typing import Any
 import fees
 import profile_store
 
+import userctx
+
 logger = logging.getLogger(__name__)
 
-PORTFOLIO_PATH = Path(__file__).parent / "portfolio.json"
+# 测试钩子：设成某个 Path 即全局覆盖（tests/test_portfolio.py 用它做隔离）。
+# 留 None ＝按当前登录用户解析，生产时走的是这一支。
+PORTFOLIO_PATH: Path | None = None
+
+
+def _path() -> Path:
+    """当前登录用户的 portfolio.json（多用户隔离，见 userctx.py）。"""
+    return PORTFOLIO_PATH or Path(userctx.user_path("portfolio.json"))
+
 
 
 def _pid() -> str:
@@ -84,10 +94,10 @@ def _migrate_holding(h: dict[str, Any]) -> dict[str, Any]:
 
 def _read_raw() -> dict[str, list]:
     """整份 {pid: [holding(lots 模型)]}；自动迁移旧格式。"""
-    if not PORTFOLIO_PATH.exists():
+    if not _path().exists():
         return {}
     try:
-        data = json.loads(PORTFOLIO_PATH.read_text(encoding="utf-8"))
+        data = json.loads(_path().read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as e:
         logger.error("读取 portfolio 失败: %s", e)
         return {}
@@ -104,10 +114,10 @@ def _read_raw() -> dict[str, list]:
 
 def _read_realized() -> dict[str, list]:
     """整份 {pid: [已实现交易]} 卖出盈亏流水；无则空。与 by_profile 同文件、互不干扰。"""
-    if not PORTFOLIO_PATH.exists():
+    if not _path().exists():
         return {}
     try:
-        data = json.loads(PORTFOLIO_PATH.read_text(encoding="utf-8"))
+        data = json.loads(_path().read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return {}
     return data.get("realized", {}) if isinstance(data, dict) else {}
@@ -117,7 +127,7 @@ def _write_all(by_pid: dict[str, list], realized: dict[str, list] | None = None)
     """写 {by_profile, realized}。realized 省略 → 保留磁盘上已有的（add/remove 不清空流水）。"""
     if realized is None:
         realized = _read_realized()
-    PORTFOLIO_PATH.write_text(
+    _path().write_text(
         json.dumps({"by_profile": by_pid, "realized": realized}, ensure_ascii=False, indent=2),
         encoding="utf-8")
 

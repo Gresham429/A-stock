@@ -419,6 +419,10 @@
   <header>
     <div class="brand"><h1><span class="dot"></span>观察台</h1><div class="sub">A-Share Watchdesk</div></div>
     <div class="tools">
+      <!-- 多用户：当前账号 + 今日 AI 余额 + 退出 -->
+      <span class="chip" id="mechip" title="当前登录账号">…</span>
+      <span class="chip" id="quotachip" title="今日 AI 分析剩余次数">…</span>
+      <a class="btn" href="/logout" title="退出登录" style="text-decoration:none">退出</a>
       <span class="chip" id="aichip">🤖 …</span>
       <span class="stamp" id="stamp">—</span>
       <button class="btn ai ai-only" onclick="runDaily()">🤖 自选推荐</button>
@@ -699,5 +703,28 @@
 
 <div id="tip"></div>
 <script src="/static/app.js"></script>
+<script>
+// 多用户改造：在页头显示当前账号和今天还剩多少次 AI 分析。
+// 把余额显式摆出来，是为了让「今天的 AI 用完了」变成看得见的状态，
+// 而不是等到点下去才收到一个 429。
+(function () {
+  const put = (id, txt, cls) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = txt;
+    if (cls) el.classList.add(cls);
+  };
+  fetch('/api/me').then(r => r.ok ? r.json() : null).then(d => {
+    if (d) put('mechip', '👤 ' + (d.display_name || d.uid));
+  }).catch(() => {});
+  const refreshQuota = () => fetch('/api/usage').then(r => r.ok ? r.json() : null).then(d => {
+    if (!d) return;
+    const left = Math.max(0, d.ai_limit - d.ai_used);
+    put('quotachip', `AI ${left}/${d.ai_limit}`, left > 0 ? 'ok' : null);
+  }).catch(() => {});
+  refreshQuota();
+  setInterval(refreshQuota, 60000);
+})();
+</script>
 </body>
 </html>

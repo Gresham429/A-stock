@@ -23,10 +23,23 @@ from datetime import date as date_cls
 from datetime import datetime, timedelta
 from typing import Any
 
+import userctx
+
 logger = logging.getLogger(__name__)
 
 _DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-DB_PATH = os.path.join(_DIR, "agents.db")
+_DB_NAME = "agents.db"
+# 测试钩子：设成某个绝对路径即全局覆盖（tests/ 里用它做隔离）。
+# 留空＝按当前登录用户解析，这是生产时唯一该走的分支。
+DB_PATH = ""
+
+
+def _db() -> str:
+    """当前登录用户的库路径。个人数据按人隔离到 data/users/<用户名>/，
+    见 userctx.py 里关于「为什么用路径隔离而不是加 user_id 列」的说明。"""
+    return DB_PATH or userctx.user_path(_DB_NAME)
+
+
 _LOCK = threading.Lock()
 
 RUN_DETAIL_KEEP_DAYS = 90    # LLM 原文（最占空间）
@@ -150,10 +163,8 @@ CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
 
 
 def _conn() -> sqlite3.Connection:
-    os.makedirs(_DIR, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=20)
-    conn.row_factory = sqlite3.Row
-    return conn
+    # 统一走 userctx.open_db：开 WAL，让多 worker 并发读写不互相阻塞
+    return userctx.open_db(_db(), timeout=20)
 
 
 def init() -> None:
@@ -485,7 +496,7 @@ def status() -> dict[str, Any]:
         logger.warning("agent status 失败: %s", e)
         return {"ready": False}
     try:
-        db_mb = round(os.path.getsize(DB_PATH) / 1048576, 2)
+        db_mb = round(os.path.getsize(_db()) / 1048576, 2)
     except OSError:
         db_mb = 0.0
     return {"ready": True, "agents": n_agent, "runs": n_run, "lessons": n_les,

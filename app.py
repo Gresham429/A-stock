@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 import sqlite3
 import threading
 import time
@@ -25,7 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, g, jsonify, render_template, request
 
 import agent_loop
 import agent_store
@@ -48,6 +49,11 @@ import template_store
 import universe
 import universe_store
 import websearch
+
+# ── 多用户改造引入的三个模块（见 README-deploy.md）──
+import auth        # 登录闸门：默认全关，白名单极短
+import ratelimit   # 按人限流 + AI 日预算：保护 DeepSeek 余额
+import userctx     # 当前用户上下文 + 个人数据目录解析
 # 选股与形态初筛（2026-07-16 抽出 screening.py）。显式带回名字，路由调用点不用改；
 # `app._pa_score` / `app._FACTOR_RANGE` 等仍可达（测试与 agent 依赖）。
 from screening import (  # noqa: E402,F401
@@ -69,14 +75,57 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-news_store.init()  # 确保 news.db 表存在（廉价，幂等）
-notes_store.init()  # 私域笔记表
-rules_store.init()  # 交易规则库（首次灌入蒸馏种子）
-paper_store.init()  # 模拟交易存档
-profile_store.init()  # 本地多档投资画像（现金本金→按总资产分级玩法）
-agent_store.init()  # agent 配置/日志/教训/条件单（表是增量加的，靠 IF NOT EXISTS 自愈）
+# 本项目的登录会话在 auth 的服务端 token 表里，不用 Flask 自带的签名 cookie
+# session；secret_key 只是留个底，以免将来用到 flash/session 时踩空。
+app.secret_key = os.environ.get("ASTOCK_SECRET_KEY") or secrets.token_hex(32)
+# 请求体上限：本项目最大的写入是一条笔记，1MB 绰绰有余。不设上限的话，
+# 一个几百 MB 的 POST 就能把内存吃光。
+app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024
+
+# ── 公共数据：进程起来建一次表，所有人共用 ──
+news_store.init()      # 确保 news.db 表存在（廉价，幂等）
 template_store.init()  # 提示词模板版本化
-factor_lab.init()  # 因子 IC 回测
+factor_lab.init()      # 因子 IC 回测
+
+# ── 个人数据：每人一个目录，建表必须等到知道「当前是谁」 ──
+_user_inited: set[str] = set()
+_user_init_lock = threading.Lock()
+
+
+def ensure_user_stores(uid: str) -> None:
+    """首次见到某个用户时，在他自己的目录里建好个人库的表。
+
+    这几个 init() 原来是模块级调用的（单人本地跑，全局一份库）。多用户后库
+    路径依赖「当前是谁」，模块级调用时还没有用户，只能推迟到该用户的第一个
+    请求。用集合缓存，之后每个请求只多一次 set 查找。
+    """
+    if uid in _user_inited:
+        return
+    with _user_init_lock:
+        if uid in _user_inited:      # 双检：并发的第一个请求只建一次
+            return
+        with userctx.as_user(uid):
+            notes_store.init()    # 私域笔记表
+            rules_store.init()    # 交易规则库（首次灌入蒸馏种子）
+            paper_store.init()    # 模拟交易存档
+            profile_store.init()  # 多档投资画像
+            agent_store.init()    # agent 配置/日志/教训/条件单
+        _user_inited.add(uid)
+        logger.info("已为用户 %s 初始化个人数据目录", uid)
+
+
+auth.init_app(app)        # 登录闸门 —— 必须先注册，后面的钩子依赖它设的 g.uid
+ratelimit.init_app(app)   # 按人限流 + AI 日预算
+
+
+@app.before_request
+def _ensure_stores():  # noqa: ANN202
+    """登录用户的个人库懒建表。auth 闸门已经放行才会走到这里。"""
+    uid = getattr(g, "uid", "")
+    if uid:
+        ensure_user_stores(uid)
+
+
 _news_refreshing = [False]
 
 
@@ -156,7 +205,7 @@ def api_review_run():
         if _review_job["running"]:
             return jsonify({"status": "running", "date": _review_job["date"]})
         _review_job.update(running=True, error=None, finished_at=None)
-        threading.Thread(target=_run_review_bg,
+        userctx.Thread(target=_run_review_bg,
                          args=(body.get("date"), bool(body.get("force"))),
                          daemon=True).start()
     return jsonify({"status": "started"})
@@ -268,7 +317,7 @@ def news_refresh():
         finally:
             _news_refreshing[0] = False
 
-    threading.Thread(target=_job, daemon=True).start()
+    userctx.Thread(target=_job, daemon=True).start()
     return jsonify({"ok": True, "running": True})
 
 
@@ -283,7 +332,7 @@ def news_deepen():
     code = ds.normalize((request.get_json(silent=True) or {}).get("code", ""))
     if not (code.isdigit() and len(code) == 6):
         return jsonify({"ok": False, "msg": "代码无效"}), 400
-    threading.Thread(target=news_store.deepen, args=(code,), daemon=True).start()
+    userctx.Thread(target=news_store.deepen, args=(code,), daemon=True).start()
     return jsonify({"ok": True, "running": True, "code": code})
 
 
@@ -1029,7 +1078,7 @@ def api_universe_status():
 def api_universe_refresh():
     """刷新全A名单（新浪 hs_a，~12s）+ 后台续跑板块回填（断点续传）。"""
     n = universe_store.refresh_roster()
-    threading.Thread(target=universe_store.backfill_sectors, daemon=True).start()
+    userctx.Thread(target=universe_store.backfill_sectors, daemon=True).start()
     return jsonify({"refreshed": n, **universe_store.status()})
 
 
@@ -1064,7 +1113,7 @@ def api_sectors_backfill():
     except (TypeError, ValueError):
         days = 95
     days = max(10, min(days, 250))  # 夹在 [10, 250] 交易日
-    threading.Thread(target=universe_store.backfill_sector_daily,
+    userctx.Thread(target=universe_store.backfill_sector_daily,
                      kwargs={"days": days}, daemon=True).start()
     return jsonify({"ok": True, "running": True, "days": days})
 
@@ -1134,7 +1183,7 @@ def api_factor_stops():
 def api_factors_backtest():
     """重跑因子回测（299 只 × 600 日 ≈ 14s）。后台线程。"""
     n = int((request.get_json(silent=True) or {}).get("stocks") or 300)
-    threading.Thread(target=factor_lab.backtest, args=(n,), daemon=True).start()
+    userctx.Thread(target=factor_lab.backtest, args=(n,), daemon=True).start()
     return jsonify({"ok": True, "running": True, "stocks": n})
 
 
@@ -1217,7 +1266,7 @@ def api_agents_run_all():
     """跑所有启用的 agent（多档位/同档多账户并行实验）。后台线程，不阻塞。"""
     b = request.get_json(silent=True) or {}
     dry = bool(b.get("dry"))
-    threading.Thread(target=agent_loop.run_all, args=(dry,), daemon=True).start()
+    userctx.Thread(target=agent_loop.run_all, args=(dry,), daemon=True).start()
     return jsonify({"ok": True, "running": True,
                     "agents": len(agent_store.list_agents(active_only=True))})
 
@@ -1307,17 +1356,19 @@ def _universe_boot() -> None:
         universe_store.snapshot_daily()
         template_store.init()
         template_store.purge()   # 按日累积的表一律配清理
-        agent_store.init()
-        agent_store.purge()
+        # agent_store 是个人库（data/users/<用户名>/agents.db），不能在这里的
+        # 「无当前用户」上下文里建表或清理。建表由 ensure_user_stores 在该用户的
+        # 首个请求时完成；按日清理由 scheduler.py 遍历每个账号各做一次。
         factor_lab.init()
         factor_lab.purge()
         # 因子 IC 惰性自动刷新：过期才重跑(14s)。判过期已扣除 IC 的 20 交易日结构性滞后
         r = factor_lab.refresh_if_stale()
         if r.get("skipped"):
             logger.info("因子 IC: %s", r["skipped"])
-        # 启动即跑一次 + 之后每 5 分钟探一次（长期挂机也能每桶自动跑，见
-        # plan/2026-07-17-intraday-agent-scheduler-design.md）。守护线程，不阻塞预热。
-        threading.Thread(target=_agent_scheduler, daemon=True).start()
+        # agent 日循环调度已搬到独立的 scheduler.py 进程。原因：gunicorn 起多个
+        # worker 时，每个 worker 都会各起一份调度器，同一个 agent 会被并发决策、
+        # 重复下单、重复写教训。这是正确性问题不是性能问题，所以必须单实例。
+        # 下面这两个函数（_agent_tick / _agent_scheduler）保留，手动触发仍可用。
     except (OSError, ValueError, sqlite3.Error) as e:
         logger.warning("全市场池预热失败（不影响其余功能）: %s", e)
 
@@ -1351,7 +1402,7 @@ def _review_scheduler() -> None:
                     if not _review_job["running"]:
                         _review_sched_state["last_auto"] = today
                         _review_job.update(running=True, error=None, finished_at=None)
-                        threading.Thread(target=_run_review_bg, args=(None, False),
+                        userctx.Thread(target=_run_review_bg, args=(None, False),
                                          daemon=True).start()
                         logger.info("复盘调度：交易日 %s 到点(%s)，自动生成当日复盘",
                                     today, _REVIEW_AUTO_TIME)
@@ -1369,14 +1420,25 @@ def _review_boot() -> None:
             _rb.backfill(3)
     except Exception as e:  # noqa: BLE001 回填失败不影响其余功能
         logger.warning("情绪周期回填失败（不影响其余）：%s", e)
-    threading.Thread(target=_review_scheduler, daemon=True).start()
+    userctx.Thread(target=_review_scheduler, daemon=True).start()
 
 
 if __name__ == "__main__":
+    # 仅供本机开发。服务器上用：
+    #   gunicorn -c deploy/gunicorn.conf.py wsgi:application   （web）
+    #   python3 scheduler.py                                    （定时任务）
+    # Flask 自带的开发服务器没有并发控制、没有请求超时、会泄漏版本号，
+    # 不能对外提供服务——哪怕只对着几个朋友。
+    if os.environ.get("ASTOCK_ENV") == "production":
+        raise SystemExit(
+            "生产环境请用 gunicorn 启动，不要直接跑 app.py：\n"
+            "  gunicorn -c deploy/gunicorn.conf.py wsgi:application")
+
     if news_store.stats()["total"] == 0:  # 首次运行：后台一次性回填新闻库(不阻塞启动)
-        threading.Thread(target=news_store.backfill, daemon=True).start()
+        userctx.Thread(target=news_store.backfill, daemon=True).start()
         logger.info("首次运行：后台回填新闻库…（1–2 季度，约几分钟）")
-    threading.Thread(target=_universe_boot, daemon=True).start()
-    threading.Thread(target=_review_boot, daemon=True).start()   # 复盘：首启回填情绪周期 + 每日自动调度
+    userctx.Thread(target=_universe_boot, daemon=True).start()
+    userctx.Thread(target=_review_boot, daemon=True).start()
+    logger.warning("开发模式：仅监听 127.0.0.1，定时任务请另跑 scheduler.py")
     logger.info("A股观察台启动 -> http://127.0.0.1:5000")
     app.run(host="127.0.0.1", port=5000, debug=False)

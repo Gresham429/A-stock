@@ -19,6 +19,24 @@ import template_store
 
 logger = logging.getLogger(__name__)
 
+def _record_usage(usage: dict) -> None:
+    """把这次调用真实消耗的 token 记到当前用户名下。
+
+    限额本身是按「次数」封顶的（次数才挡得住失控的循环），这里记 token 是为了
+    让账单可归因——月底看到余额掉得快时，能查出是谁、哪天、哪个模型花的。
+    记账失败绝不能影响正常功能，所以整段吞掉异常。
+    """
+    try:
+        import ratelimit
+        import userctx
+        uid = userctx.get_uid()
+        if uid and usage:
+            ratelimit.record_llm_tokens(uid, usage.get("prompt_tokens", 0),
+                                        usage.get("completion_tokens", 0))
+    except Exception:  # noqa: BLE001 记账是旁路，出错静默
+        pass
+
+
 _DISCLAIMER = (
     "你是严谨、理性、克制的A股投资研究助手。硬性要求："
     "① 只依据提示词中给定的客观数据推理，绝不编造、外推或引用未提供的数字与事实；"
@@ -76,6 +94,7 @@ def _chat(messages: list[dict[str, str]], *, json_mode: bool = True,
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
+        _record_usage(data.get("usage") or {})
         choice = data["choices"][0]
         content = choice["message"].get("content") or ""
         if not content.strip():

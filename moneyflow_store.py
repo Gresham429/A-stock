@@ -47,8 +47,12 @@ _FFLOW = ("https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?"
 
 # 全市场当日快照：clist 一次给一页（实测 pz 被钉死在 100），全 A 约 56 页。
 # 这条路每天只要几十次请求，是「持续积累」的正路；上面的 daykline 是低频历史种子。
-_CLIST = ("https://push2.eastmoney.com/api/qt/clist/get?pn={pn}&pz=100&po=1&np=1&fltt=2&invt=2&fid=f3"
+_CLIST = ("{host}/api/qt/clist/get?pn={pn}&pz=100&po=1&np=1&fltt=2&invt=2&fid=f3"
           "&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23&fields=f12,f14,f62,f184")
+# clist 的备用主机。`push2` 在部分网络（2026-09-17 实测：阿里云服务器 IP）上整条连不上，
+# TCP 层就被拒（curl 000 / Empty reply），而它的延迟镜像 `push2delay` 返回 200。
+# 收盘后取的是定盘数据，延迟几分钟对「日频快照」没有影响，所以主站不通就换镜像。
+_CLIST_HOSTS = ("https://push2.eastmoney.com", "https://push2delay.eastmoney.com")
 CLIST_MAX_PAGES = 80
 
 _SCHEMA = """
@@ -102,27 +106,39 @@ def _secid(code: str) -> str:
 
 
 def fetch_snapshot() -> list[dict[str, Any]]:
-    """抓全市场**当天**的资金流快照（clist 分页）。中途失败返回已拿到的部分。"""
+    """抓全市场**当天**的资金流快照（clist 分页）。中途失败返回已拿到的部分。
+
+    主机按 `_CLIST_HOSTS` 顺序试，第一台能出数据就用它翻完所有页。这一点在服务器上是必需的：
+    `push2` 从阿里云 IP 连不通，只有镜像 `push2delay` 能用。
+    """
     out: list[dict[str, Any]] = []
-    total: int | None = None
-    for pn in range(1, CLIST_MAX_PAGES + 1):
-        try:
-            data = (json.loads(ds.em_get(_CLIST.format(pn=pn))).get("data") or {})
-        except Exception as e:  # noqa: BLE001 单页失败保留已拿到的部分
-            logger.warning("资金流快照第 %d 页失败: %s", pn, e)
-            break
-        if total is None:
-            total = data.get("total") or 0
-        diff = data.get("diff") or []
-        if not diff:
-            break
-        for r in diff:
-            code = str(r.get("f12") or "")
-            if len(code) != 6:
-                continue
-            out.append({"code": code, "main_net": _num(r.get("f62")), "main_pct": _num(r.get("f184"))})
-        if total and len(out) >= total:
-            break
+    for host in _CLIST_HOSTS:
+        out = []
+        total: int | None = None
+        for pn in range(1, CLIST_MAX_PAGES + 1):
+            try:
+                data = (json.loads(ds.em_get(_CLIST.format(host=host, pn=pn))).get("data") or {})
+            except Exception as e:  # noqa: BLE001 单页失败保留已拿到的部分
+                logger.warning("资金流快照 %s 第 %d 页失败: %s", host, pn, e)
+                break
+            if total is None:
+                total = data.get("total") or 0
+            diff = data.get("diff") or []
+            if not diff:
+                break
+            for r in diff:
+                code = str(r.get("f12") or "")
+                if len(code) != 6:
+                    continue
+                out.append({"code": code, "main_net": _num(r.get("f62")),
+                            "main_pct": _num(r.get("f184"))})
+            if total and len(out) >= total:
+                break
+        if out:
+            if host != _CLIST_HOSTS[0]:
+                logger.info("资金流快照走备用主机 %s（主站不通）", host)
+            return out
+    logger.warning("资金流快照所有主机都没拿到数据")
     return out
 
 

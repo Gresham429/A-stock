@@ -5,7 +5,7 @@
 #   sudo bash /opt/astock/deploy/fix_perms.sh
 #
 # 原则：应用账号 astock 只能写数据，不能写代码。
-#   代码目录      root:astock，去掉组/其他的写位。应用被攻破也改不了自己的代码。
+#   代码目录      root:astock，**可读**、去掉组/其他的写位。应用被攻破也改不了自己的代码。
 #   data/         astock:astock 700，所有人的持仓和笔记都在这里。
 #   AI 输出缓存 ai_cache.json 在 data/ 下，随 data/ 一起归 astock。
 #   .env          root:astock 640。systemd 以 root 读 EnvironmentFile，config.py 以
@@ -23,6 +23,11 @@ BACKUP_DIR="${ASTOCK_BACKUP_DIR:-/var/backups/astock}"
 [ -d "$APP_DIR" ] || { echo "$APP_DIR 不存在"; exit 1; }
 
 chown -R "root:$APP_USER" "$APP_DIR"
+# 先给足读位与目录穿越位，再收回组/其他的写位。
+# 2026-09-17 踩过：本地新建的文件被 umask 收成 600，rsync -a 连权限一起带过来，
+# astock 读不了自己的代码，gunicorn 起不来（PermissionError: cap_layers.py）。
+# 只收写位不收读位，是这条脚本原先的漏洞。
+chmod -R a+rX "$APP_DIR"
 chmod -R g-w,o-w "$APP_DIR"
 chmod 750 "$APP_DIR"
 

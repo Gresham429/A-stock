@@ -220,7 +220,13 @@ migrate 要在第一次登录前跑，否则登录会先建出空库，migrate �
 nginx、java 同机），站长账号 `<站长账号>`。systemd 单元 `astock-web`、`astock-scheduler`、`astock-news.timer`
 （08:40 / 11:40 / 14:00 / 15:30 / 20:30 抓新闻），备份 cron 23:30 以 astock 身份跑。更新服务器：本地
 `bash deploy/push.sh`（经 `~/astock-staging` 中转）。非 `astock` 的登录账号不能 `cd /opt/astock`，用
-`sudo -u astock /opt/astock/.venv/bin/python3 /opt/astock/...` 绝对路径。服务器 IP 上东财端点全通（含家里被封的 clist）。
+`sudo -u astock /opt/astock/.venv/bin/python3 /opt/astock/...` 绝对路径。
+服务器上的东财端点**不是全通**（2026-09-17 实测）：`datacenter-web`、`push2ex` 通，
+`push2.eastmoney.com` 与 `push2his.eastmoney.com` 在 TCP 层就被拒（curl 000 / Empty reply，
+换 UA 与 Referer 一样，强制 IPv4 也一样，家里 IP 反而通），所以 clist 类请求一律带镜像备用主机
+`push2delay.eastmoney.com`（`moneyflow_store._CLIST_HOSTS`、`review.fetch._SECTOR_HOSTS`）。
+另外这台机器的 DNS 对 `push2*` 会回 AAAA（trafficmanager 的 IPv6 池），而它没有 IPv6 默认路由，
+所以别依赖系统地址选择。历史资金流种子（`push2his`）只能在家里跑。
 
 ## 数据源与坑（改代码前必读）
 
@@ -232,9 +238,9 @@ nginx、java 同机），站长账号 `<站长账号>`。systemd 单元 `astock-
 | 波动率、资金流 | 新浪 MoneyFlow | 返回里带每日收盘价 `trade`，波动率与资金流一份数据两用 |
 | 日 K 线 OHLC | 新浪 `getKLineData` | 腾讯 `hqkline` 端点已失效（`code:11`） |
 | 研报、龙虎榜、解禁 | 东财 `reportapi` / `datacenter` | 走 `em_get()` 串行限流（间隔 1 秒以上） |
-| 个股资金流 push2 / push2his | 东财 | 部分住宅 IP 间歇封锁，所以资金流一律用新浪，别依赖 push2his |
+| 个股资金流 push2 / push2his | 东财 | 部分住宅 IP 间歇封锁，所以资金流一律用新浪，别依赖 push2his。服务器（阿里云 IP）上 `push2` 与 `push2his` 整条不通，只有延迟镜像 `push2delay` 通：clist 类请求用 `moneyflow_store._CLIST_HOSTS` 的主备切换，历史种子只能在家里跑 |
 | 全 A 名单 | 新浪 `hs_a` | `getHQNodeStockCount` 拿总数 + `getHQNodeData` 分页（80 / 页并发）。返回自带行情字段，名单与板块统计共用 |
-| 板块归属 | 东财 `slist`（逐股） | 东财按端点封 IP：`clist`（批量）对住宅 IP 间歇封锁，`slist`（逐股）放行 0.2 秒一只，所以逐股回填约 100 分钟。服务器 IP 上 clist 通（PITFALLS #14） |
+| 板块归属 | 东财 `slist`（逐股） | 东财按端点封 IP：`clist`（批量）对住宅 IP 间歇封锁，`slist`（逐股）放行 0.2 秒一只，所以逐股回填约 100 分钟。服务器 IP 上 `push2` 的 clist 不通、镜像 `push2delay` 通（PITFALLS #14） |
 | 行业分类 | 新浪 `newSinaHy.php` | 仅 49 类、覆盖约 54%，表老旧，已弃用 |
 | 历史资金流 | 新浪 MoneyFlow | 只给 30 天（传 `num=260` 也只回 30），所以 `_pa_score` 的 `net20` 分量无法回测、不参与打分。见 `plan/BACKLOG.md` |
 | 美元指数 / VIX | 无 | 新浪外盘 `hf_DX` 返回空、VIX 无代码，`macro_digest` 缺这两个风险指标。见 `plan/BACKLOG.md` |

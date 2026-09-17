@@ -342,10 +342,26 @@ GET 一律不计、也不做最小间隔，任何登录用户循环 GET 就能�
 ### 14. 东财按端点封 IP
 
 `clist`（批量出数）**间歇封锁、按 IP**——带/不带代理、走/不走 `em_get()` 都可能遇到
-`RemoteDisconnected`，但不是对所有 IP 恒定封死：住宅 IP 时开时封，服务器 IP 全通（2026-08
-复盘模块 `review.fetch.sector_flow` 就走 `push2 clist`，带退避重试）。
+`RemoteDisconnected`，但不是对所有 IP 恒定封死：住宅 IP 时开时封，服务器 IP **不是全通**
+（2026-08 曾记「服务器 IP 全通」，2026-09-17 实测推翻，见下）。
 `slist`（逐股）放行 0.2s，仍是板块归属回填的稳妥选择，故板块归属继续逐股回填 ~100min；
 批量 `clist` 换 IP/环境后要重新探测才能用，不要假定它在新环境里也通。
+
+**2026-09-17 实测（三台环境对比，同一 URL、同一 UA 与 Referer）**：
+
+| 环境 | `push2` clist | `push2his` | `push2delay` clist | `datacenter-web` | `push2ex` |
+|---|---|---|---|---|---|
+| 家里（住宅 IP） | 302 转 `push2delay` 后 200，拿到 5560 只 | 未测 | 200 | 200 | 200 |
+| 阿里云服务器 | **TCP 层就被拒**（curl 000 / Empty reply，强制 IPv4 也一样） | 同左 | **200** | 200 | 200 |
+
+所以「服务器 IP 全通」只在 `datacenter-web` 与 `push2ex` 上成立。`push2` 系（clist 与 push2his）
+在云 IP 上整条不通，而它的延迟镜像 `push2delay` 通。**修法**：clist 类请求带主备主机切换
+（`moneyflow_store._CLIST_HOSTS`、`review.fetch._SECTOR_HOSTS`），主站不通就用镜像；收盘后取的
+本来就是定盘数据，几分钟延迟对日频快照没有影响。历史资金流种子走 `push2his`，只能在家里跑。
+
+附带一个 DNS 陷阱：这台服务器的解析对 `push2*` 只回 AAAA（CNAME 是 `push2ipv6.trafficmanager.cn`），
+而它**没有 IPv6 默认路由**，urllib 按 getaddrinfo 顺序试到 AAAA 就整条失败。同一个域名 `getent ahostsv4`
+能拿到 A 记录，所以别用「DNS 能解析」判断可达性。
 
 **封锁范围比原先记的大**（2026-07-16 实测）：不止个股 `clist`，**行业板块 `clist`
 (`fs=m:90+t:2`) 同样被封**，`ds.market_breadth()` 的 `advancers`/`decliners`/

@@ -236,15 +236,25 @@ def dragon_tiger(date_dash: str) -> Optional[list[dict]]:
 
 
 # ── 板块资金流（实时快照，无 date 参数）──────────────────────────────
+# 板块资金流的主机顺序。`push2` 在部分网络（2026-09-17 实测：阿里云服务器 IP）上整条连不通，
+# 延迟镜像 `push2delay` 返回 200；收盘后取的是定盘数据，几分钟延迟不影响当日复盘。
+_SECTOR_HOSTS = ("https://push2.eastmoney.com", "https://push2delay.eastmoney.com")
+
+
 def sector_flow(kind: str = "concept", top: int = 15) -> Optional[list[dict]]:
-    """板块主力净流入（东财 push2 clist）。**实时快照、无历史**——收盘后当天取即当日定盘；
+    """板块主力净流入（东财 clist）。**实时快照、无历史**——收盘后当天取即当日定盘；
     历史重跑会取到当时实时值（故 pipeline 仅在最新场次调用）。按主力净流入降序。
     kind: 'concept'(概念 m:90+t:3) / 'industry'(行业 m:90+t:2)。net 单位亿元。"""
     fs = "m:90+t:3" if kind == "concept" else "m:90+t:2"
-    d = _get_json("https://push2.eastmoney.com/api/qt/clist/get",
-                  {"pn": 1, "pz": max(top, 20), "po": 1, "np": 1, "fltt": 2, "invt": 2,
-                   "fid": "f62", "fs": fs, "fields": "f12,f14,f3,f62,f164,f128"},
-                  referer="https://quote.eastmoney.com/", throttle=True)
+    d = None
+    for host in _SECTOR_HOSTS:
+        d = _get_json(f"{host}/api/qt/clist/get",
+                      {"pn": 1, "pz": max(top, 20), "po": 1, "np": 1, "fltt": 2, "invt": 2,
+                       "fid": "f62", "fs": fs, "fields": "f12,f14,f3,f62,f164,f128"},
+                      referer="https://quote.eastmoney.com/", throttle=True)
+        if d is not None and (d.get("data") or {}).get("diff"):
+            break
+        d = None
     if d is None:
         return None
     items = (d.get("data") or {}).get("diff") or []

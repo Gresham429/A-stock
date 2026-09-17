@@ -94,6 +94,28 @@ def test_fetch_failure_is_isolated():
     ck(mf.status()["rows"] == 0, "失败不应写脏数据")
 
 
+def test_snapshot_falls_back_to_mirror_host():
+    """主站 push2 连不通时（2026-09-17 实测：阿里云服务器 IP 被拒）要自动换镜像 push2delay。
+
+    第一台返回空 data 视为不可用，第二台出数据就用它，否则服务器上的日频资金流快照永远是 0 行。
+    """
+    setup()
+    seen = []
+
+    def fake_em_get(url, ref="https://data.eastmoney.com/", timeout=20):
+        seen.append(url.split("/api")[0])
+        if mf._CLIST_HOSTS[1] not in url:
+            return json.dumps({"data": None})
+        return json.dumps({"data": {"total": 1, "diff": [{"f12": "600519", "f62": 100.0,
+                                                          "f184": 5.0}]}})
+
+    mf.ds.em_get = fake_em_get
+    n = mf.snapshot("2026-09-16")
+    ck(n == 1, f"备用主机应拿到 1 只: {n}")
+    ck(mf._CLIST_HOSTS[1] in seen, f"未尝试备用主机: {seen}")
+    ck(mf._CLIST_HOSTS[0] in seen[0], f"应先试主站: {seen}")
+
+
 def test_snapshot_from_clist_pages():
     """clist 分页快照：两页拼全、按 (date, code) 落库、has() 幂等判定。"""
     setup()

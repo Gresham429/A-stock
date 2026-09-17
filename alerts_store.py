@@ -12,6 +12,7 @@ AI 的点位不落这张库，检查时现读观点账本；有手动覆盖就�
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import threading
 from datetime import date as date_cls
@@ -21,7 +22,7 @@ from typing import Any
 import userctx
 
 KINDS = ("buy", "sell", "stop")
-CHANNELS = ("bark", "wecom", "dingtalk", "log")
+CHANNELS = ("ntfy", "bark", "wecom", "dingtalk", "log")
 DB_PATH: str | None = None      # 测试用覆盖；正常走 userctx.user_path
 KEEP_DAYS = 365
 
@@ -78,8 +79,43 @@ def targets(only_enabled: bool = False) -> list[dict[str, Any]]:
         return [dict(r) for r in c.execute(sql + " ORDER BY id")]
 
 
+# 免填渠道：认得出这些地址属于哪个渠道，用户直接粘地址就行（用户 2026-09-17：
+# 「加手机提醒那个太繁琐了」）。裸串按 ntfy 主题处理——那是唯一一种「不带任何特征」
+# 的地址，而且是最省事的用法（装 App、订阅同名主题，不注册不备案）。
+# ntfy 主题名的合法字符集（与官方一致）：裸串只有长这样才当主题，别的一律报错
+_TOPIC_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{5,63}")
+_HOST_HINTS = (("qyapi.weixin.qq.com", "wecom"),
+               ("oapi.dingtalk.com", "dingtalk"),
+               ("ntfy.sh", "ntfy"),
+               ("api.day.app", "bark"))
+
+
+def infer_target(addr: str) -> tuple[str, str]:
+    """从地址猜渠道。返回 (channel, address)；认不出返回 ("", "")。"""
+    a = (addr or "").strip()
+    if not a:
+        return "", ""
+    for hint, ch in _HOST_HINTS:
+        if hint in a:
+            return ch, a
+    if a.startswith("bark:"):            # bark key 的一种常见写法
+        return "bark", a.split(":", 1)[1]
+    # 裸串：只有当它「长得像主题」才当 ntfy 主题，判据是含连字符/下划线/数字——
+    # 也就是官方允许、但英文单词一般不带的那几类字符。
+    # 为什么这么保守：`telegram`、`barkk` 这种打错的渠道名也是 ASCII 裸串，一旦宽松接受，
+    # 就会被当成一个永远没人订阅的主题存下去，用户以为配好了、其实永远收不到
+    # （2026-09-17 两轮测试各抓到一次）。宁可报错让他写成 `ntfy 主题名`。
+    if _TOPIC_RE.fullmatch(a) and re.search(r"[-_0-9]", a):
+        return "ntfy", a
+    return "", ""
+
+
 def replace_targets(lines: list[str]) -> dict[str, Any]:
-    """整表替换通知目标。每行 `渠道 地址 [备注]`，`log` 渠道可只写渠道名。
+    """整表替换通知目标。两种写法都收：
+
+    - `渠道 地址 [备注]`，渠道 ntfy / bark / wecom / dingtalk / log，`log` 可只写渠道名；
+    - **只写地址**（一行一个），渠道自动认（企业微信/钉钉 webhook、ntfy 主题或 ntfy.sh 链接、
+      Bark key）。
 
     整体替换而不是逐条增删：用户的原话是「我们自己罗列就行」，罗列式编辑最不容易出现
     「删了这台却不知道另一台还在」的状态。解析失败的行走 errors 返回，**整批不落库**
@@ -95,13 +131,21 @@ def replace_targets(lines: list[str]) -> dict[str, Any]:
         parts = line.split(maxsplit=2)
         channel = parts[0].lower()
         if channel not in CHANNELS:
-            errors.append(f"第 {i} 行：渠道只能是 {'/'.join(CHANNELS)}，收到 {parts[0]!r}")
+            # 不是已知渠道名 → 当成地址，猜渠道（猜不出才报错）
+            ch, addr = infer_target(parts[0])
+            if not ch:
+                errors.append(f"第 {i} 行：认不出 {parts[0]!r} 是哪家的地址。"
+                              f"可以直接粘贴 webhook 链接或 ntfy 主题名，也可以写成 "
+                              f"「{'/'.join(CHANNELS)} 地址」")
+                continue
+            label = parts[1] if len(parts) > 1 else ""
+            parsed.append((ch, addr, label))
             continue
         if channel == "log":
             parsed.append((channel, "", parts[1] if len(parts) > 1 else ""))
             continue
         if len(parts) < 2 or not parts[1]:
-            errors.append(f"第 {i} 行：{channel} 需要一个地址（key 或 webhook）")
+            errors.append(f"第 {i} 行：{channel} 需要一个地址（key / webhook / 主题名）")
             continue
         parsed.append((channel, parts[1], parts[2] if len(parts) > 2 else ""))
     if errors:

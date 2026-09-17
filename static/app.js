@@ -1562,12 +1562,35 @@ function pickCard(r){
     <div class="tag">本次${dec}${trg?'（'+esc(trg)+'）':''} ${esc(fmtOutcome(r))}</div>
   </div>`;
 }
+// 三周期推荐整块的展开/收起。默认收起（用户 2026-09-17：最上方的推荐太占位置），
+// 点开过就一直开着——状态记在本机，不替他决定第二次。
+const PICKS_KEY = 'astock-picks-open';
+function picksOpen(){
+  try { return localStorage.getItem(PICKS_KEY) === '1'; } catch(e){ return false; }
+}
+function paintPicksPanel(){
+  const open = picksOpen();
+  const el = document.getElementById('picksPanel');
+  if(!el) return;
+  el.classList.toggle('collapsed', !open);
+  const btn = document.getElementById('picksToggle');
+  if(btn) btn.textContent = open ? '收起' : '展开';
+}
+function togglePicksPanel(){
+  try { localStorage.setItem(PICKS_KEY, picksOpen() ? '0' : '1'); } catch(e){ /* 隐私模式忽略 */ }
+  paintPicksPanel();
+}
+
 async function loadPicks(){
   const gen = ++picksSeq;
   try{
     const [pub, wl] = await Promise.all([fetch('/api/picks/public').then(r=>r.json()), fetch('/api/picks/watchlist').then(r=>r.json())]);
     if(gen!==picksSeq) return;
     document.getElementById('picksGen').textContent = pub.generated_at ? `生成于 ${pub.generated_at}` : '尚未生成';
+    const cnt = {}; (pub.calls||[]).forEach(r=>{ cnt[r.horizon]=(cnt[r.horizon]||0)+1; });
+    const wlN = (wl.calls||[]).length;
+    document.getElementById('picksSum').textContent =
+      PICKS_HZ.map(h=>`${HZ_CN[h]} ${cnt[h]||0}`).join(' · ') + (wlN ? ` · 自选股 ${wlN}` : '');
     document.getElementById('picksCols').innerHTML = PICKS_HZ.map(h=>{
       const rows = (pub.calls||[]).filter(r=>r.horizon===h);
       return `<div class="picksCol"><h4>${esc(HZ_CN[h])}</h4>${rows.length ? rows.map(pickCard).join('') : '<div class="tag">暂无</div>'}</div>`;
@@ -1603,6 +1626,17 @@ async function _alertPost(url, body, what){
   loadAlerts();
   return j;
 }
+// 生成一个只属于这个账号的 ntfy 主题：ntfy.sh 是公开服务器，主题名就是密码，
+// 所以用随机串而不是 astock 这种谁都能猜到、别人一订阅就能看到你持仓提醒的名字。
+function genNtfyTopic(){
+  const rand = (Math.random().toString(36).slice(2, 8) + Math.random().toString(36).slice(2, 6));
+  const topic = `ntfy astock-${rand} 我的手机`;
+  const el = document.getElementById('alertTargets');
+  if(!el.value.trim()){ el.value = topic; }
+  else if(!/^\s*ntfy\b/m.test(el.value)){ el.value = el.value.replace(/\s*$/, '\n') + topic; }
+  document.getElementById('alertMsg').textContent =
+    `已生成主题 astock-${rand}：手机装 ntfy App → 订阅这个主题 → 回来点「发测试」。记得点「保存手机」。`;
+}
 function saveAlertTargets(){ return _alertPost('/api/alerts/targets',{targets:document.getElementById('alertTargets').value},'保存手机'); }
 function saveAlertPoints(){ return _alertPost('/api/alerts/points',{points:document.getElementById('alertPoints').value},'保存点位'); }
 function testAlert(){ return _alertPost('/api/alerts/test',{},'发测试'); }
@@ -1634,6 +1668,7 @@ loadConfig();
 load();
 loadPortfolio();
 loadMarket();   // 顶部大盘研判条
+paintPicksPanel();   // 三周期推荐整块的展开/收起（默认收起，状态记本机）
 loadPicks();    // 三周期推荐 + 自选股买卖点
 loadAlerts();   // 到点提醒的配置（手机列表 + 手设点位）
 toggleAuto();   // 默认开启自动刷新（30s）

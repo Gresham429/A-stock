@@ -240,6 +240,52 @@ def test_notify_payloads_per_channel():
     ck("timestamp=" in calls[-1][0] and "sign=" in calls[-1][0], f"加签应拼到 URL: {calls[-1][0]}")
 
 
+def test_infer_channel_from_address():
+    """只贴地址也能认出来（用户嫌填渠道繁琐）。裸串按 ntfy 主题处理。"""
+    cases = [("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abc", "wecom"),
+             ("https://oapi.dingtalk.com/robot/send?access_token=x", "dingtalk"),
+             ("ntfy.sh/astock-abc123", "ntfy"),
+             ("https://ntfy.sh/astock-abc123", "ntfy"),
+             ("https://api.day.app/mykey", "bark"),
+             ("bark:mykey", "bark"),
+             ("astock-7k3f9q2x", "ntfy"),      # 页面「生成主题」就是这种形状
+             ("mytopic", ""),                   # 纯英文单词不当主题：宁可报错，别静默失效
+             ("telegram", ""),                  # 打错的渠道名尤其不能当成主题收下
+             ("barkk", "")]
+    for addr, want in cases:
+        ck(alerts_store.infer_target(addr)[0] == want, f"{addr} 应认成 {want}")
+    ck(alerts_store.infer_target("随便写的一句话 这里有空格")[0] == "",
+       "认不出要给空、不能瞎猜")
+
+
+def test_replace_targets_accepts_bare_address():
+    """一行只写地址也能存：识别成功就落库，识别失败整批拒绝并说明怎么改。"""
+    alerts_store.DB_PATH = os.path.join(tempfile.mkdtemp(), "alerts.db")
+    alerts_store.init()
+    r = alerts_store.replace_targets(["astock-abc123 我的手机",
+                                      "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=x 家用群"])
+    ck(r["ok"] and r["count"] == 2, f"只写地址应能存: {r}")
+    got = alerts_store.targets()
+    ck({t["channel"] for t in got} == {"ntfy", "wecom"}, f"渠道应自动识别: {got}")
+    ck(got[0]["label"] == "我的手机", "备注要留住")
+    bad = alerts_store.replace_targets(["这不是地址 有空格且认不出"])
+    ck(bad["ok"] is False and "认不出" in bad["errors"][0], f"认不出要报错: {bad}")
+
+
+def test_ntfy_payload():
+    """ntfy 用 JSON POST 到服务器根：中文标题走 body，不能塞 HTTP 头（latin-1 会乱码）。"""
+    calls = []
+    notify._post = lambda url, payload: (calls.append((url, payload)) or (True, "200"))
+    notify.send("ntfy", "astock-abc", "买点 贵州茅台", "现价 1690")
+    ck(calls[-1][0] == "https://ntfy.sh", f"公共 ntfy 应 POST 到根: {calls[-1][0]}")
+    ck(calls[-1][1]["topic"] == "astock-abc" and calls[-1][1]["message"] == "现价 1690",
+       f"载荷应带主题与正文: {calls[-1][1]}")
+    ck(calls[-1][1]["title"] == "买点 贵州茅台", "中文标题要留在 JSON 里")
+    notify.send("ntfy", "https://ntfy.mydomain.com/astock-abc", "t", "b")
+    ck(calls[-1][0] == "https://ntfy.mydomain.com" and calls[-1][1]["topic"] == "astock-abc",
+       f"自建 ntfy 要拆地址与主题: {calls[-1]}")
+
+
 def test_send_all_isolates_failures():
     notify.send_all = _REAL_SEND_ALL        # 还原真实现（前面的用例把它换成了假的）
 

@@ -101,6 +101,9 @@ html[data-theme="light"] #tip{
   .dbody{ padding:16px 14px calc(36px + env(safe-area-inset-bottom)) }
   .modal{ padding:12px }
   .modalcard{ padding:18px 15px; border-radius:12px }
+  /* 「自选股对比」标题行：手机上让加自选自成一行，别把标题挤断成两行 */
+  .sectitle{ flex-wrap:wrap; row-gap:8px }
+  #addboxInline{ width:100%; margin-left:0 }
   /* 栅格一律单列 */
   .picksCols,.alertGrid,.mgrid,.sec-split,.ai-slot{ grid-template-columns:1fr }
   .ai-slot{ min-width:0 }

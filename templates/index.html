@@ -417,7 +417,12 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("ast
   .ord-log{font-size:11.5px;font-family:var(--mono);color:var(--muted);padding:4px 0;border-bottom:1px solid var(--line)}
   .ord-log.rej{color:var(--down)}
   .picks{margin:12px 0;padding:12px;border:1px solid var(--line,#333);border-radius:10px}
-  .picksHead{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+  .picksHead{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:8px;flex-wrap:wrap}
+  /* 收起状态：整块只剩标题行（默认收起，用户嫌占位置；点「展开」后记在本机）*/
+  #picksPanel.collapsed .picksCols,#picksPanel.collapsed .picksWl,
+  #picksPanel.collapsed .picksAlert,#picksPanel.collapsed .picksChain{display:none}
+  #picksPanel.collapsed{padding-bottom:10px}
+  .addbox#addboxInline{margin-left:auto;font-weight:400}
   .picksHead .sub{font-size:12px;opacity:.7;margin-left:8px}
   .picksCols{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
   .picksCol h4{margin:4px 0 6px;font-size:13px;opacity:.85}
@@ -463,10 +468,6 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("ast
       <button class="btn" onclick="openRules()">📐 规则</button>
       <button class="btn" onclick="openPaper()">💰 模拟盘</button>
       <button class="btn" onclick="openGloss()">📖 名词解释</button>
-      <div class="addbox">
-        <input id="addcode" placeholder="加自选 代码/名称" maxlength="9" onkeydown="if(event.key==='Enter')addStock()">
-        <button onclick="addStock()">＋加入</button>
-      </div>
       <button class="btn on" id="autobtn" onclick="toggleAuto()">自动刷新 开·30s</button>
       <button class="btn" onclick="load();loadPortfolio()">↻ 刷新</button>
       <button class="btn themebtn" id="themeBtn" type="button">深色</button>
@@ -496,10 +497,12 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("ast
 
   <section class="picks" id="picksPanel">
     <div class="picksHead">
-      <div class="t">三周期推荐 <span class="sub" id="picksGen"></span></div>
+      <div class="t">三周期推荐 <span class="sub" id="picksGen"></span>
+        <span class="sub" id="picksSum"></span></div>
       <div class="acts">
         <button class="mini" onclick="runPicks('watchlist')">刷新自选股买卖点</button>
         <button class="mini" id="picksPubBtn" onclick="runPicks('public')">刷新三周期</button>
+        <button class="mini" id="picksToggle" onclick="togglePicksPanel()">展开</button>
       </div>
     </div>
     <div class="picksCols" id="picksCols"></div>
@@ -515,9 +518,13 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("ast
       <div class="alertGrid">
         <div>
           <div class="t2">推到哪些手机（一行一台）</div>
-          <div class="tag" style="margin:4px 0">格式：<code>渠道 地址 备注</code>。渠道有 bark / wecom / dingtalk / log，
-            log 只写服务器日志，用来先验证触发逻辑。</div>
-          <textarea id="alertTargets" rows="3" placeholder="bark 你的key 我的iPhone&#10;wecom https://qyapi.weixin.qq.com/... 家用群"></textarea>
+          <div class="tag" style="margin:4px 0">
+            最省事：手机装 <b>ntfy</b> App（安卓苹果都有，免费、不用注册、不用备案），
+            点下面的按钮生成一个只属于你的主题，在 App 里订阅同一个主题即可。
+            也可以直接粘贴企业微信 / 钉钉群机器人 webhook，或 Bark 的 key（iPhone）。
+            备注可写可不写。</div>
+          <textarea id="alertTargets" rows="3" placeholder="ntfy astock-7k3f9q2x 我的手机&#10;https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx 家用群"></textarea>
+          <button class="mini" onclick="genNtfyTopic()">生成 ntfy 主题</button>
           <button class="mini" onclick="saveAlertTargets()">保存手机</button>
           <button class="mini" onclick="testAlert()">发测试</button>
         </div>
@@ -555,7 +562,12 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("ast
   </section>
 
   <!-- 自选股对比 -->
-  <div class="sectitle">自选股对比 <span class="tag2">WATCHLIST</span></div>
+  <div class="sectitle">自选股对比 <span class="tag2">WATCHLIST</span>
+    <span class="addbox" id="addboxInline">
+      <input id="addcode" placeholder="加自选 代码/名称" maxlength="9" onkeydown="if(event.key==='Enter')addStock()">
+      <button onclick="addStock()">＋加入</button>
+    </span>
+  </div>
   <div class="ov-note">📊 这是<b>客观指标总览</b>（用于横向对比、点行深挖），<b>不是买卖建议</b>。要意见：点「🤖 自选推荐」看组合速览，或对持仓用「🤖 何时卖」看权威判断。</div>
   <div class="tablecard">
     <table><thead><tr id="head"></tr></thead>

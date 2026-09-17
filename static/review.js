@@ -11,25 +11,53 @@
 
   // ── 载入 ──
   async function load() {
-    let env = null;
+    let env = null, dates = [];
     try { env = await (await fetch("/api/review/latest")).json(); } catch (e) { /* offline */ }
+    try { dates = ((await (await fetch("/api/review/dates")).json()).dates) || []; } catch (e) { /* offline */ }
     if (!env || env.empty || !env.metrics) { setEmpty(); return; }
-    render(env);
+    render(env, dates);
+  }
+
+  // 复盘场次横条：这是哪一天的复盘、是哪一场（用户 2026-09-17 要求突出显示）。
+  // 看的不是最新一场时要显眼地提示，免得以为看的是今天的盘面。
+  function renderDateBar(env, dates) {
+    const d = env.target_date_dash || env.target_date || "";
+    const wd = ["日","一","二","三","四","五","六"];
+    let main = "尚无复盘";
+    if (d) {
+      const dt = new Date(d + "T00:00:00");
+      const m = dt.getMonth() + 1, day = dt.getDate();
+      main = `${dt.getFullYear()} 年 ${m} 月 ${day} 日 · 周${wd[dt.getDay()]} 复盘场次`;
+    }
+    $("rdMain").textContent = main;
+    const parts = [];
+    if (env.generated_at) parts.push(`本场生成于 ${env.generated_at}`);
+    if (dates.length) {
+      const latest = dates[0].replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3");
+      const isLatest = (env.target_date || "").replace(/-/g, "") === dates[0];
+      parts.push(`共 ${dates.length} 场存档`);
+      if (!isLatest) parts.push(`不是最新一场（最新 ${latest}）`);
+      const el = $("revDate");
+      if (el) el.classList.toggle("stale", !isLatest);
+    }
+    $("rdSub").textContent = parts.join(" · ");
   }
 
   function setEmpty() {
+    if ($("rdMain")) { $("rdMain").textContent = "尚无复盘"; $("rdSub").textContent = "点右上「↻ 生成今日复盘」"; }
     $("statusChip").textContent = "🚧 尚无数据";
     $("stamp").textContent = "还没有复盘 —— 点右上「↻ 生成今日复盘」";
   }
 
   // ── 渲染 ──
-  function render(env) {
+  function render(env, dates) {
     const m = env.metrics, ai = env.ai || {}, focus = ai.focus || null;
     const d = env.target_date_dash || env.target_date || "";
     $("stamp").textContent = `复盘 ${d} · 生成于 ${env.generated_at || ""}`;
     $("statusChip").textContent = focus ? "✅ 已生成 · AI 研判" : "✅ 已生成 · 仅硬指标";
     $("statusChip").style.borderStyle = "solid";
 
+    renderDateBar(env, dates || []);
     renderPhase(m, focus);
     renderMetrics(m);
     renderAI(focus);

@@ -56,6 +56,14 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("ast
   .navswitch a.on{background:linear-gradient(135deg,#3a2a08,#241a06);color:var(--gold);box-shadow:inset 0 0 0 1px var(--gold-dim)}
 
   /* 情绪档位条 */
+  .revdate{margin-top:16px;display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;
+    border:1px solid var(--gold-dim);border-left:4px solid var(--gold);border-radius:10px;
+    background:var(--panel);padding:12px 16px}
+  .revdate .rd-main{font-family:var(--sans);font-size:20px;font-weight:800;color:var(--txt);letter-spacing:.3px}
+  .revdate .rd-sub{font-family:var(--mono);font-size:12px;color:var(--muted)}
+  .revdate.stale{border-color:var(--up);border-left-color:var(--up)}
+  .revdate.stale .rd-main{color:var(--up)}
+  @media (max-width:640px){.revdate .rd-main{font-size:17px}}
   .phasebar{margin-top:18px;border:1px solid var(--line);border-radius:12px;background:linear-gradient(180deg,var(--panel),var(--bg2));padding:16px 18px;box-shadow:0 20px 50px -30px rgba(0,0,0,.9)}
   .phasebar .ph-h{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
   .phasebar .ph-t{font-size:15px;font-weight:800}
@@ -125,6 +133,12 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("ast
     <a href="/">📈 选股自动化</a>
     <a href="/review" class="on">🔁 复盘自动化</a>
   </nav>
+
+  <!-- 复盘场次（用户 2026-09-17：要一眼看出这是哪一天的复盘）-->
+  <section class="revdate" id="revDate">
+    <div class="rd-main" id="rdMain">—</div>
+    <div class="rd-sub" id="rdSub">正在读取…</div>
+  </section>
 
   <!-- 情绪档位条（复盘头条：今天处在情绪周期的哪一档 / 第几天） -->
   <section class="phasebar">

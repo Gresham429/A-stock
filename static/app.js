@@ -1046,7 +1046,11 @@ let NOTE_DRAFT=null;
 function openNotes(){ NOTE_DRAFT=null; document.getElementById('noteInput').value=''; document.getElementById('noteDraft').innerHTML=''; loadNotesList(); document.getElementById('notesModal').classList.add('open'); }
 function closeNotes(){ document.getElementById('notesModal').classList.remove('open'); }
 
-/* ── 🤖 Agent 模拟盘 ───────────────────────────────────────────────────── */
+/* ── Agent 模拟盘（已暂停 2026-09-17）─────────────────────────────────────
+   页面入口与弹窗已从 index.html 移除、agents.db 里的 agent 置为 active=0；
+   下面这些函数与后端 /api/agents* 一起保留作 backup（自动交易的纪律线）。
+   要恢复：把工具条按钮与弹窗加回 index.html，再把 agent 置回 active=1。
+   注意：函数依赖 agentsModal / agList / agDetail 等 DOM，入口没加回来之前不要调用。 */
 function openAgents(){ document.getElementById('agDetail').innerHTML=''; document.getElementById('agentsModal').classList.add('open'); loadAgents(); }
 function closeAgents(){ document.getElementById('agentsModal').classList.remove('open'); }
 

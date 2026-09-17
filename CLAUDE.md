@@ -22,7 +22,7 @@ A 股看板，Flask 后端代理各数据源，前端零构建（HTML + CSS + �
 持仓盈亏、DeepSeek 推荐与建议（结果落盘缓存带时间戳）、近 1 年新闻与政策库、私域笔记、交易规则库
 （价格行为体系 + A 股制度特性，可增删改、注入 AI）、投资画像与本金分级玩法、公司叙事、AI 溯源与依据
 校验、全球宏观到板块指向、模拟盘、每日复盘（`/review`）、三周期选股与自选股买卖点（观点账本）、
-20 个模拟盘 agent 组成的舰队。
+20 个模拟盘 agent 组成的舰队（已暂停，代码保留作 backup）。
 
 多人共用：登录、个人数据按人隔离到 `data/users/<uid>/`、AI 日预算、gunicorn + 独立调度进程、
 阿里云部署脚本。本地单人用法不变，只多一次建号。生产实例只能经 Tailscale 访问：
@@ -169,6 +169,10 @@ migrate 要在第一次登录前跑，否则登录会先建出空库，migrate �
   调用时解析到 `data/users/<uid>/`，无用户时 `require_uid()` 抛 RuntimeError（宁可 500 不串人）。公共库
   路径不变。后台线程一律 `userctx.Thread`/`spawn`/`submit`，线程池用 `ctx_map`；原生 `threading.Thread`/
   `ex.map` 拿不到用户，个人 store 会炸（PITFALLS #19）。
+- 舰队（已暂停，2026-09-17 用户决定）：20 个 agent 全部置 `active=0`，`templates/index.html` 的工具条
+  入口与弹窗、`static/app.js` 的调用点已移除；后端 `/api/agents*`、`agent_loop`/`agent_store`/`factor_lab`
+  与自动交易的纪律线全部保留作 backup（不进调用链，`_agent_boot` 见无启用 agent 即返回）。
+  要恢复：把入口与弹窗加回页面，再把 `agents.db` 里的 agent 置回 `active=1`。
 - 舰队 = 站长的数据：agents.db / paper.db / profiles.db 不搬公共库（一次舰队运行还要读站长的规则与画像）。
   所有舰队代码路径进 `userctx.as_fleet()`：`app._fleet_route` 包住全部 `/api/agents*`（GET 对登录用户开放，
   写操作只允许管理员或站长，否则 403；站长未设置 503）、`_agent_tick`、`scheduler._run_fleet_agents`、

@@ -444,7 +444,6 @@
       <button class="btn ai ai-only" onclick="runDaily()">🤖 自选推荐</button>
       <button class="btn ai ai-only" onclick="openScreen()">🔍 全市场选股</button>
       <button class="btn" onclick="openSectors()">🧭 板块</button>
-      <button class="btn ai ai-only" onclick="openAgents()">🤖 Agent</button>
       <button class="btn" onclick="openNews()">📰 新闻</button>
       <button class="btn" onclick="openProfiles()">💼 画像</button>
       <button class="btn" onclick="openNotes()">📝 笔记</button>
@@ -606,29 +605,9 @@
   </div>
 </div>
 
-<div class="modal" id="agentsModal" onclick="if(event.target===this)closeAgents()">
-  <div class="modalcard" style="width:min(980px,97vw)">
-    <div style="display:flex;justify-content:space-between;align-items:flex-start">
-      <div><h2>🤖 Agent 模拟盘</h2>
-        <div class="sub2">AI 每交易日自主选股/买卖 · 真实撮合(整手/涨跌停/T+1/真实费率) · 只从<b>失败</b>学教训。
-          启动 app 时自动跑一次（非交易日与重复打开会跳过）。</div></div>
-      <button class="xclose" onclick="closeAgents()">×</button>
-    </div>
-    <div class="sec-bar">
-      <input id="agName" placeholder="存档名（如 微型A）" style="background:transparent;border:1px solid var(--line2);border-radius:6px;color:var(--txt);padding:7px 10px;font-size:12px;width:130px">
-      <input id="agCap" placeholder="启动资金" value="10000" style="background:transparent;border:1px solid var(--line2);border-radius:6px;color:var(--txt);font-family:var(--mono);padding:7px 10px;font-size:12px;width:90px">
-      <select id="agDecider" style="background:var(--panel);border:1px solid var(--line2);border-radius:6px;color:var(--txt);padding:7px 8px;font-size:12px">
-        <option value="single">单决策(默认·快)</option>
-        <option value="debate">多空辩论(慢3倍)</option>
-      </select>
-      <button class="btn" onclick="createAgent()">＋ 建存档</button>
-      <button class="btn ai" onclick="runAllAgents(true)">▶ 全部试跑(不下单)</button>
-      <span class="sec-status" id="agStatus">…</span>
-    </div>
-    <div id="agList"></div>
-    <div id="agDetail"></div>
-  </div>
-</div>
+<!-- 舰队（Agent 模拟盘）已暂停 2026-09-17：工具条入口与弹窗移除，agent 记录置为 active=0，
+     后端 /api/agents* 与 static/app.js 里的相关函数保留作 backup（含自动交易的纪律线）。
+     要恢复：把工具条上的 Agent 按钮与这段弹窗加回来，再把 agents.db 里的 agent 置回 active=1。 -->
 
 <div class="modal" id="sectorsModal" onclick="if(event.target===this)closeSectors()">
   <div class="modalcard" style="width:min(1200px,97vw)">

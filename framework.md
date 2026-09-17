@@ -71,7 +71,7 @@ flowchart TB
     FL[factor_lab.py 因子回测/判罪线]
     TPL[template_store 提示词版本]
   end
-  subgraph AGENT["④ Agent 舰队（系统核心）"]
+  subgraph AGENT["④ Agent 舰队（已暂停，代码保留作 backup）"]
     AL[agent_loop.py 日循环+调度器]
     AS[agent_store.py 持久层]
     OUT[outcome.py 结算/超额]

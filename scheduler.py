@@ -47,6 +47,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import agent_loop          # noqa: E402
 import agent_store         # noqa: E402
+import alerts              # noqa: E402
 import app as web          # noqa: E402  复用 app 里已有的预热/复盘逻辑，不重复实现
 import auth                # noqa: E402
 import news_store          # noqa: E402
@@ -167,6 +168,8 @@ def main() -> None:
 
     _shared_boot()
     userctx.spawn(_housekeeping_forever)
+    # 到点提醒：每 ASTOCK_ALERT_TICK_SEC 秒给每个配了目标的账号扫一遍（非交易时段空转）
+    userctx.spawn(alerts.loop_forever, lambda: auth.list_uids())
     if AGENT_AUTO:
         _agent_loop_forever()      # 前台阻塞，systemd 以此判断进程存活
     else:

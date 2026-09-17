@@ -1581,6 +1581,32 @@ async function loadPicks(){
       || '<tr><td colspan="9" class="tag">还没有自选股买卖点，点「刷新自选股买卖点」生成</td></tr>';
   }catch(e){ console.warn('picks load', e); }
 }
+async function loadAlerts(){
+  try{
+    const j = await fetch('/api/alerts').then(r=>r.json());
+    document.getElementById('alertTargets').value = (j.targets||[]).join('\n');
+    document.getElementById('alertPoints').value = (j.points||[]).join('\n');
+    const st = j.status||{};
+    document.getElementById('alertSum').textContent =
+      `手机 ${st.targets||0} 台 · 手设点位 ${st.points||0} 只 · 今日已发 ${st.sent_today||0} 条`;
+    document.getElementById('alertEff').textContent =
+      `当前生效 ${ (j.effective||[]).length } 只；接近容差 ${j.approach_pct}%（纪律参数，可用 ASTOCK_ALERT_APPROACH_PCT 调）；`+
+      `只看面板已上线的周期：${ (j.horizons||[]).map(h=>HZ_CN[h]||h).join(' / ') }`;
+  }catch(e){ console.warn('alerts load', e); }
+}
+async function _alertPost(url, body, what){
+  const j = await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})}).then(r=>r.json()).catch(()=>({ok:false,error:'网络错误'}));
+  const el = document.getElementById('alertMsg');
+  el.textContent = j.ok===false
+    ? `${what}失败：${(j.errors&&j.errors.length? j.errors.join('；') : (j.error||''))}`
+    : `${what}：${j.count!=null? j.count+' 条' : (j.sent!=null? '触发 '+j.sent+' 条'+(j.pushed!=null?'，已发 '+j.pushed+' 台':'') : (j.sent_ok||'完成'))}`;
+  loadAlerts();
+  return j;
+}
+function saveAlertTargets(){ return _alertPost('/api/alerts/targets',{targets:document.getElementById('alertTargets').value},'保存手机'); }
+function saveAlertPoints(){ return _alertPost('/api/alerts/points',{points:document.getElementById('alertPoints').value},'保存点位'); }
+function testAlert(){ return _alertPost('/api/alerts/test',{},'发测试'); }
+function checkAlert(){ return _alertPost('/api/alerts/check',{},'立即检查'); }
 async function showChain(code, scope){
   const j = await fetch(`/api/picks/chain/${code}?scope=${scope}`).then(r=>r.json());
   const el = document.getElementById('picksChain');
@@ -1609,4 +1635,5 @@ load();
 loadPortfolio();
 loadMarket();   // 顶部大盘研判条
 loadPicks();    // 三周期推荐 + 自选股买卖点
+loadAlerts();   // 到点提醒的配置（手机列表 + 手设点位）
 toggleAuto();   // 默认开启自动刷新（30s）

@@ -11,6 +11,7 @@ def ck(cond, msg):
     assert cond, msg
 
 tmp = tempfile.mkdtemp()
+userctx.USERS_DIR = os.path.join(tmp, "users")   # 同 test_picks_pipeline：别往仓库 data/users/ 写
 ps.DB_PATHS["public"] = os.path.join(tmp, "pub.db"); ps.DB_PATHS["watchlist"] = os.path.join(tmp, "wl.db")
 ps.init("public"); ps.init("watchlist"); pp.LOCK_DIR = tmp
 picks_routes.auth.get_user = lambda uid: {"uid": uid, "is_admin": uid == "boss"}

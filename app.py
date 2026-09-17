@@ -32,6 +32,8 @@ from flask import Flask, g, jsonify, render_template, request
 
 import agent_loop
 import agent_store
+import alerts
+import alerts_routes
 import ai_cache
 import config
 import datasources as ds
@@ -145,6 +147,7 @@ def _init_user_stores(uid: str) -> None:
 auth.init_app(app)        # 登录闸门 —— 必须先注册，后面的钩子依赖它设的 g.uid
 ratelimit.init_app(app)   # 按人限流 + AI 日预算
 app.register_blueprint(picks_routes.bp)   # 选股与观点账本（/api/picks/*，在 auth 闸门之后自动受保护）
+app.register_blueprint(alerts_routes.bp)  # 到点提醒（/api/alerts/*，同一闸门之后）
 
 
 @app.before_request
@@ -1652,6 +1655,10 @@ if __name__ == "__main__":
     # 本地开发：只给站长跑自选股；服务器上由 scheduler.py 遍历账号
     userctx.Thread(target=picks_pipeline.loop_forever,
                    args=(lambda: [userctx.fleet_uid()] if userctx.fleet_uid() else [], picks_routes._market_ctx),
+                   daemon=True).start()
+    # 到点提醒：同样本地只盯站长自己的配置；没配目标时循环里直接跳过，成本接近零
+    userctx.Thread(target=alerts.loop_forever,
+                   args=(lambda: [userctx.fleet_uid()] if userctx.fleet_uid() else [],),
                    daemon=True).start()
     # 本地开发模式保留「开着 app 就每桶自动跑 agent」。舰队 = 站长的库，所以在站长
     # 上下文里起线程（userctx.Thread 构造时复制上下文）。服务器上不走这里，agent 只由站长手动触发。

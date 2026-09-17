@@ -426,6 +426,12 @@
   .picksTbl th,.picksTbl td{padding:4px 6px;border-bottom:1px solid var(--line,#333);text-align:left}
   .picksTbl tr{cursor:pointer}
   .picksChain{margin-top:8px;font-size:12px;white-space:pre-wrap;opacity:.9}
+  .picksAlert{margin-top:10px;font-size:12px}
+  .picksAlert summary{cursor:pointer;opacity:.9;margin-bottom:6px}
+  .alertGrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .alertGrid textarea{width:100%;box-sizing:border-box;font-family:ui-monospace,Menlo,monospace;font-size:11px;
+    background:transparent;color:inherit;border:1px solid var(--line,#333);border-radius:6px;padding:6px}
+  @media (max-width:900px){.alertGrid{grid-template-columns:1fr}}
   .stance-buy{color:var(--up,#e33)} .stance-sell{color:var(--down,#3a3)} .stance-watch,.stance-avoid{opacity:.8}
   @media (max-width:900px){.picksCols{grid-template-columns:1fr}}
 </style>
@@ -496,6 +502,29 @@
       </tr></thead><tbody id="picksWlRows"></tbody></table>
     </div>
     <div class="picksChain" id="picksChain" style="display:none"></div>
+    <details class="picksAlert" id="alertBox">
+      <summary>到点提醒 <span class="tag" id="alertSum">读取中</span></summary>
+      <div class="alertGrid">
+        <div>
+          <div class="t2">推到哪些手机（一行一台）</div>
+          <div class="tag" style="margin:4px 0">格式：<code>渠道 地址 备注</code>。渠道有 bark / wecom / dingtalk / log，
+            log 只写服务器日志，用来先验证触发逻辑。</div>
+          <textarea id="alertTargets" rows="3" placeholder="bark 你的key 我的iPhone&#10;wecom https://qyapi.weixin.qq.com/... 家用群"></textarea>
+          <button class="mini" onclick="saveAlertTargets()">保存手机</button>
+          <button class="mini" onclick="testAlert()">发测试</button>
+        </div>
+        <div>
+          <div class="t2">自己设的点位（留空就用 AI 分析的点位）</div>
+          <div class="tag" style="margin:4px 0">格式：<code>代码 买下 买上 卖下 卖上 止损 备注</code>，没设的点写 <code>-</code>。
+            写了一只就覆盖那一只，其余继续用 AI 的。</div>
+          <textarea id="alertPoints" rows="3" placeholder="600519 1680 1700 1850 1880 1600 等回踩&#10;000001 11.5 - - - 10.8"></textarea>
+          <button class="mini" onclick="saveAlertPoints()">保存点位</button>
+          <button class="mini" onclick="checkAlert()">立即检查一次</button>
+        </div>
+      </div>
+      <div class="tag" id="alertMsg" style="margin-top:6px"></div>
+      <div class="tag" id="alertEff" style="margin-top:6px"></div>
+    </details>
   </section>
 
   <!-- AI 推荐 / 全市场筛选 -->

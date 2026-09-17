@@ -1,7 +1,13 @@
 """tests/test_picks_pipeline.py  候选池与富化：全部取数 monkeypatch。"""
-import os, sys
+import os, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import picks_pipeline as pp
+import userctx
+
+# 个人库全落临时目录：user_dir() 用的是 import 时由 DATA_DIR 算出的 USERS_DIR，
+# 只改 store 的 DB_PATHS 不够，run_watchlist 之类仍会经 user_path 建出仓库目录
+# （2026-09-17 清理：原先会留下 data/users/lockuser、tester 这类空目录）。
+userctx.USERS_DIR = os.path.join(tempfile.mkdtemp(), "users")
 
 N = [0]
 def ck(cond, msg):

@@ -55,6 +55,7 @@ flowchart TB
     LLP[llm_picks.py 提示词与校验]
     CAP[cap_layers.py 市值分层与名额]
     PTR[picks_track.py 前向超额追踪]
+    ALT[alerts.py 到点提醒 + notify.py 发送]
   end
   subgraph DATA["① 数据源与池子"]
     DS[datasources.py 行情/K线/新闻/龙虎榜]

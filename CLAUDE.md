@@ -22,6 +22,7 @@ A 股看板，Flask 后端代理各数据源，前端零构建（HTML + CSS + �
 持仓盈亏、DeepSeek 推荐与建议（结果落盘缓存带时间戳）、近 1 年新闻与政策库、私域笔记、交易规则库
 （价格行为体系 + A 股制度特性，可增删改、注入 AI）、投资画像与本金分级玩法、公司叙事、AI 溯源与依据
 校验、全球宏观到板块指向、模拟盘、每日复盘（`/review`）、三周期选股与自选股买卖点（观点账本）、
+到点提醒（价格摸到买点/卖点/止损就推手机，一个账号可配多台，点位默认取 AI 分析、可自己改）、
 20 个模拟盘 agent 组成的舰队（已暂停，代码保留作 backup）。
 
 多人共用：登录、个人数据按人隔离到 `data/users/<uid>/`、AI 日预算、gunicorn + 独立调度进程、
@@ -79,6 +80,10 @@ migrate 要在第一次登录前跑，否则登录会先建出空库，migrate �
 | `picks_track.py` | 候选名单前向超额追踪 `data/picks_track.db`：每天记同层候选深度集（基准）与三周期名单，按 5 / 10 / 20 个交易日结算超额（对比同层基准中位数）。设计第七节第二层验收，不带 AI、不做回测假设。`python3 picks_track.py record\|settle\|status` |
 | `cap_layers.py` | 流通市值分层与名额（零依赖纯模块）：大盘 ≥500 亿 / 中盘 100 到 500 亿 / 小盘 30 到 100 亿，30 亿以下不纳入；`layer_of` / `select`（每层名额 + 申万二级上限，层内计数）。`factor_lab`、`screening`、`picks_pipeline` 共用同一套边界 |
 | `picks_routes.py` | `/api/picks/*` Blueprint（public / watchlist / chain / run / run_public / status） |
+| `alerts.py` | 到点提醒的触发逻辑：把账本里 AI 的点位与用户手改的点位合并，价格进入或接近（默认 1% 容差，纪律参数）就推手机；同一标的同一类每天只发一次；只看 `visible_horizons()`（面板上还 mask 着的周期不推） |
+| `alerts_store.py` | 提醒配置与去重（个人库 `data/users/<uid>/alerts.db`）：`targets`（多台手机）、`points`（手改点位，整表替换、错一行整批不落）、`sent`（当天已发）。只存手动覆盖，AI 点位检查时现读账本，避免两边打架 |
+| `alerts_routes.py` | `/api/alerts` Blueprint（读配置 / 存手机 / 存点位 / 发测试 / 立即检查），5 条路由 |
+| `notify.py` | 发送层：bark / wecom / dingtalk（含加签）/ log 四个渠道，零 SDK 纯 urllib，逐台发、逐台记结果，永不抛异常影响调度 |
 
 ### 数据与池子
 
@@ -139,7 +144,7 @@ migrate 要在第一次登录前跑，否则登录会先建出空库，migrate �
 改判罪/分布跑 `test_excess_dist`；改 `agent_store`/`agent_loop`/`ai_blocks` 的记忆部分跑 `test_agent_memory`
 与 `test_excess_dist`；改板块聚合跑 `test_sector_backfill`；改 `fees`/`portfolio`/`paper_store` 跑同名测试；
 改复盘指标跑 `test_review_metrics`；改 `userctx`/`auth`/`ratelimit`/复盘锁/舰队路由跑同名测试；
-改 picks 模块跑 `test_picks_*` 与 `test_llm_picks`；改分层边界或行业上限跑 `test_cap_layers`；改前向超额追踪跑 `test_picks_track`；改 `fundamentals_store` 跑 `test_fundamentals_store`；改 `moneyflow_store` 跑 `test_moneyflow_store`。
+改 picks 模块跑 `test_picks_*` 与 `test_llm_picks`；改分层边界或行业上限跑 `test_cap_layers`；改提醒的触发算术/文本解析/发送载荷跑 `test_alerts` 与 `test_alerts_routes`；改前向超额追踪跑 `test_picks_track`；改 `fundamentals_store` 跑 `test_fundamentals_store`；改 `moneyflow_store` 跑 `test_moneyflow_store`。
 
 ## 复盘模块（`/review`）
 
@@ -215,6 +220,9 @@ migrate 要在第一次登录前跑，否则登录会先建出空库，migrate �
   `raw_theme`），复盘没生成时短线池只剩分层因子选股那一段（不再退化成纯换手榜：换手率没有历史分位，
   已不参与选股）。到点记录落 `data/.picks-last.json`（跨进程、重启不丢），
   避免 scheduler 在 16:00 后重启把当天 full 槽再跑一轮。
+- 到点提醒：`scheduler.py` 与本地 `python3 app.py` 各起一个 `alerts.loop_forever`，
+  每 `ASTOCK_ALERT_TICK_SEC`（默认 300）秒给每个配了目标的账号扫一遍，非交易时段空转。
+  没配目标时整个循环等于空转，不产生任何请求。
 
 服务器现状（部署级事实，改了就改这里）：阿里云 ECS 别名 `aliyun_ecs`，Ubuntu 20.04 共用机（k3s、docker、
 nginx、java 同机），站长账号 `<站长账号>`。systemd 单元 `astock-web`、`astock-scheduler`、`astock-news.timer`
@@ -330,6 +338,12 @@ agent 交易与学习闭环的端到端全景见 `plan/2026-07-18-agent-logic-ma
   判罪线漂移重算。视图：交易 agent 看 `_agent_journal_block`（自己近 8 条）+ 自己教训 + 全舰队只读层
   （`_lesson_block()`，标签区分本账户与全体）；用户面深挖看 `_stock_house_view(code)`；大盘研判与选股看
   `_regime_view`（同类行情下全舰队战绩）。只喂事实原话，不让 agent 写事后反思。
+- 到点提醒（`alerts.py`）：点位 = 手动覆盖优先，其余用账本里 AI 的 `entry_lo/hi`、`exit_lo/hi`、`stop`。
+  「接近」的容差 `APPROACH_PCT`（默认 1%，环境变量 `ASTOCK_ALERT_APPROACH_PCT`）是**纪律参数**，
+  提醒正文里会写清「已进入」还是「接近」，并标点位来自手动还是 AI。三类触发每天每标的各一次，
+  止损优先于买点（同时摸到时先报风险）。跑批期间不开提醒（非交易时段直接跳过），
+  面板上被 mask 的中长线也不推，免得面板不显示、手机却响。渠道配置在页面「三周期」下的
+  「到点提醒」里按行罗列，一台一行；先填 `log` 可以只写服务器日志验证逻辑。
 - 观点账本改口规则（`picks_store._enforce`）：有效期内只在触发事件（止损触发、目标达成、周期到期、
   新信息推翻）时允许 revise / withdraw，否则降为 keep；`stop_hit` / `target_hit` 还要与结果贴回的
   `touched` 一致。记忆块两层：近 60 天全文最多 12 条，远期只放确定性汇总加最多 3 条相关性挑选。
@@ -389,7 +403,7 @@ curl -s -b cj.txt 127.0.0.1:5000/api/picks/public       # 三周期各 5 只
 公共 `data/`：`news.db` `universe.db` `factors.db` `templates.db` `auth.db` `usage.db` `review/`
 `picks_public.db` `picks_track.db` `ai_cache.json` `fundamentals.db` `moneyflow.db` `.em_last_call` `.picks-running-public` `.picks-last.json`。
 个人 `data/users/<uid>/`：`watchlist.json` `portfolio.json` `notes.db` `rules.db` `paper.db` `profiles.db`
-`agents.db` `picks.db` `.init.lock` `.picks-running`。舰队只读站长目录里的 `agents.db` / `paper.db` / `profiles.db`。
+`agents.db` `picks.db` `alerts.db` `.init.lock` `.picks-running`。舰队只读站长目录里的 `agents.db` / `paper.db` / `profiles.db`。
 旧布局（根目录 `watchlist.json`、`data/agents.db` 等）由 `deploy/migrate_to_multiuser.py <uid>` 复制进
 站长目录，原文件不删。
 

@@ -541,10 +541,19 @@ def sweep_conditions(agent_id: int) -> list[dict[str, Any]]:
     乐观假设会系统性高估策略表现（这正是回测最常见的自欺）。
 
     局限：同日既触发止损又触发止盈时，无法判定孰先孰后 → 按**止损优先**处理（保守）。
+
+    **跨进程互斥**：补判可能被两个进程同时触发（两个 worker 的管理员各点一次 run_all、
+    或 scheduler 撞手动触发）。每张条件单先原子占为 settling（`claim_condition`）再动手，
+    抢不到就跳过；取数或撮合失败时放回 live 供下次重试，不留无人负责的占位。
     """
     ag = agent_store.get_agent(agent_id)
     if not ag:
         return []
+    # 进程若在补判中途被杀，会留下没人负责的 settling：先把陈旧的放回 live
+    stale = agent_store.reclaim_stale_conditions()
+    if stale:
+        logger.warning("条件单：回滚 %d 张陈旧占位（超过 %d 分钟）",
+                       stale, agent_store.STALE_CLAIM_MIN)
     conds = agent_store.live_conditions(agent_id)
     if not conds:
         return []
@@ -568,16 +577,26 @@ def sweep_conditions(agent_id: int) -> list[dict[str, Any]]:
                 (c["kind"] == "take_profit" and float(k["high"]) >= c["trigger_price"]))), None)
             if not bar:
                 continue
-            pos = next((p for p in paper_store.positions_of(ag["account_id"])
-                        if p["code"] == code), None)
-            if not pos or (pos.get("sellable") or 0) <= 0:
-                agent_store.close_condition(c["id"], "cancelled")
+            # 原子认领：两个进程同时补判时只有一个能处理这张条件单，避免输家把
+            # 赢家写好的 triggered 覆盖成 cancelled（止损成交了、账本却显示已撤销）。
+            if not agent_store.claim_condition(c["id"]):
+                logger.info("条件单 %s 已被其它进程认领，跳过", c["id"])
                 continue
-            shares = min(c["shares"], pos["sellable"])
-            q = ds.tencent_quote([code]).get(code, {}) or {}
-            r = paper_store.order(ag["account_id"], code, c["name"] or code, "sell", "limit",
-                                  c["trigger_price"], shares,
-                                  {**q, "price": c["trigger_price"]}, True, sched=sched)
+            try:
+                pos = next((p for p in paper_store.positions_of(ag["account_id"])
+                            if p["code"] == code), None)
+                if not pos or (pos.get("sellable") or 0) <= 0:
+                    agent_store.close_condition(c["id"], "cancelled")
+                    continue
+                shares = min(c["shares"], pos["sellable"])
+                q = ds.tencent_quote([code]).get(code, {}) or {}
+                r = paper_store.order(ag["account_id"], code, c["name"] or code, "sell", "limit",
+                                      c["trigger_price"], shares,
+                                      {**q, "price": c["trigger_price"]}, True, sched=sched)
+            except Exception as e:  # noqa: BLE001 取数/撮合失败不该把条件单卡死在 settling
+                logger.warning("条件单 %s 补判失败，放回 live: %s", c["id"], e)
+                agent_store.release_condition(c["id"])
+                continue
             agent_store.close_condition(c["id"], "triggered" if r.get("ok") else "cancelled",
                                         bar["date"], c["trigger_price"])
             if r.get("ok"):

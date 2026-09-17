@@ -101,8 +101,9 @@ CREATE TABLE IF NOT EXISTS conditions(
   kind TEXT NOT NULL,              -- stop_loss | take_profit
   trigger_price REAL NOT NULL, shares INTEGER NOT NULL,
   created_date TEXT NOT NULL,      -- 挂单日：补判只看这之后的日K
-  status TEXT DEFAULT 'live',      -- live | triggered | cancelled
-  triggered_date TEXT DEFAULT '', fill_price REAL DEFAULT 0, note TEXT DEFAULT ''
+  status TEXT DEFAULT 'live',      -- live | settling | triggered | cancelled
+  triggered_date TEXT DEFAULT '', fill_price REAL DEFAULT 0, note TEXT DEFAULT '',
+  claimed_at TEXT DEFAULT ''       -- settling 起始时刻，用于回滚卡住的占位
 );
 CREATE INDEX IF NOT EXISTS idx_cond_agent ON conditions(agent_id, status);
 CREATE TABLE IF NOT EXISTS pending(
@@ -179,6 +180,10 @@ def init() -> None:
         have_e = {r["name"] for r in c.execute("PRAGMA table_info(entries)")}
         if "x20_pctile" not in have_e:
             c.execute("ALTER TABLE entries ADD COLUMN x20_pctile INTEGER")
+        # 旧库迁移：conditions.claimed_at 是条件单原子占位（跨进程重复补判）后加的。
+        have_c = {r["name"] for r in c.execute("PRAGMA table_info(conditions)")}
+        if "claimed_at" not in have_c:
+            c.execute("ALTER TABLE conditions ADD COLUMN claimed_at TEXT DEFAULT ''")
 
 
 # ── agent 配置 ─────────────────────────────────────────────────────────────
@@ -540,11 +545,52 @@ def conditions_of(agent_id: int, limit: int = 50) -> list[dict[str, Any]]:
             (agent_id, limit))]
 
 
-def close_condition(cid: int, status: str, triggered_date: str = "",
-                    fill_price: float = 0.0) -> None:
+# 条件单补判的原子占位：两个进程同时补判时，同一张条件单只能有一个动手。
+# 与 claims 表的时段占位同一套思路（PITFALLS #7：幂等必须原子，不能靠「查有没有跑过」）。
+STALE_CLAIM_MIN = 30
+
+
+def claim_condition(cid: int) -> bool:
+    """把一张 live 条件单原子占为 settling。抢不到（已被别的进程拿走）返回 False。"""
     with _LOCK, _conn() as c:
-        c.execute("UPDATE conditions SET status=?, triggered_date=?, fill_price=? WHERE id=?",
+        b = c.total_changes
+        c.execute("UPDATE conditions SET status='settling', claimed_at=? "
+                  "WHERE id=? AND status='live'",
+                  (datetime.now().isoformat(timespec="seconds"), cid))
+        return c.total_changes - b == 1
+
+
+def release_condition(cid: int) -> None:
+    """补判中途放弃（取数或撮合异常）时把 settling 放回 live，供下次重试。"""
+    with _LOCK, _conn() as c:
+        c.execute("UPDATE conditions SET status='live', claimed_at='' "
+                  "WHERE id=? AND status='settling'", (cid,))
+
+
+def reclaim_stale_conditions(minutes: int = STALE_CLAIM_MIN) -> int:
+    """回滚卡住的 settling：进程在补判中途被杀会留下无人负责的占位。"""
+    cutoff = (datetime.now() - timedelta(minutes=minutes)).isoformat(timespec="seconds")
+    with _LOCK, _conn() as c:
+        b = c.total_changes
+        c.execute("UPDATE conditions SET status='live', claimed_at='' "
+                  "WHERE status='settling' AND (claimed_at='' OR claimed_at < ?)",
+                  (cutoff,))
+        return c.total_changes - b
+
+
+def close_condition(cid: int, status: str, triggered_date: str = "",
+                    fill_price: float = 0.0) -> bool:
+    """条件单收尾。**只允许从 live/settling 迁移**，返回是否真的改了。
+
+    状态守卫是必需的：补判可能有两个进程同时在跑，输家不能把赢家写好的
+    triggered 覆盖成 cancelled（否则止损已成交，账本却显示「已撤销」）。
+    """
+    with _LOCK, _conn() as c:
+        b = c.total_changes
+        c.execute("UPDATE conditions SET status=?, triggered_date=?, fill_price=?, "
+                  "claimed_at='' WHERE id=? AND status IN ('live','settling')",
                   (status, triggered_date, round(fill_price, 3), cid))
+        return c.total_changes - b == 1
 
 
 def cancel_conditions(agent_id: int, code: str) -> int:

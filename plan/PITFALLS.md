@@ -203,6 +203,12 @@ fcntl 不可用时各自回退进程内行为）与 **O_EXCL 存在性锁**（�
 实测发生过：10:19:58 与 10:20:08 各起一轮，两轮都跑完(179s/177s)，两个 agent 各跑 2 次。
 **已修**：`claims` 表 `PRIMARY KEY (agent_id,date,slot)` 冲突做原子占位；跑失败 `release_slot()` 释放以便重试。
 
+**同类第二例（2026-09-17 修）**：条件单补判也是「读 `live` 再写回」——两个进程同时补判时，输家最后把
+赢家写好的 `triggered` 覆盖成 `cancelled`（止损明明成交了，账本却显示「已撤销」）。
+修法：`claim_condition` 原子占为 `settling`、`close_condition` 加状态守卫（只允许从 live/settling 迁移）、
+失败 `release_condition` 放回 live、超 30 分钟没动静的 `settling` 由 `reclaim_stale_conditions` 回滚。
+判据同本条：**先占位再动手**，别读状态做决定。
+
 ### 8. 非交易时段跑决策 = 纯烧钱
 
 `paper_store.order` 在 `market_open=False` 时一律拒单，半夜开 app 跑 12 个 agent，**16 次 v4-pro 全部产出后被拒**，一笔不成。

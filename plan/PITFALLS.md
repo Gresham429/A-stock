@@ -197,7 +197,7 @@ _pa_score 按 vol 正向 IC 选出高波动股 -> AI 听话买入
 
 - `universe_store.mcap_of()` 是唯一的换算出口（统一转亿元），要分层的调用方走它或腾讯的
   `float_mcap_yi`。
-- 复核手段：分层边界算完与设计文档的实测只数对一遍（5004 只 eligible → 356 / 1265 / 2250 / 1133）。
+- 复核手段：分层边界算完与设计文档的实测只数对一遍（5004 只 eligible 落成 356 / 1265 / 2250 / 1133）。
 
 ### 19. 线程池不带 contextvars：原生 ThreadPoolExecutor 里「当前用户」是空的
 

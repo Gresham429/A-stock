@@ -205,7 +205,7 @@ def settle(today: str = "", cycle: str = "") -> dict[str, Any]:
         stale = c.execute("UPDATE track SET settled_at=? WHERE settled_at='' AND date < ?",
                           (now, (date_cls.fromisoformat(day) - timedelta(days=MAX_LOOKBACK_DAYS)
                                  ).isoformat())).rowcount
-        # 基准中位数（同日同层）→ 写进该日所有行，再算超额
+        # 基准中位数（同日同层）写进该日所有行，再算超额
         n_ex = 0
         for (d, layer) in c.execute(
                 "SELECT DISTINCT date, layer FROM track WHERE settled_at=? AND cycle=?",

@@ -19,10 +19,8 @@
 
 - `ratelimit.allow_llm` 与 `record_ai_call` 非原子：并发下日预算可超出，上限是同时在飞的调用数
   （2 worker x 8 线程不超过 15 次）。严格版把读和加放进同一事务，record 时返回是否超限。
-- `run_all` 里某 agent 撞预算后其余 agent 仍逐个尝试（有界空转）。用共享 Event 让后续直接 skipped。
 - 登录失败按 ip 键锁定：NAT 共享出口时朋友连错 5 次会把同 IP 的站长也锁 5 分钟（设计取舍，
   README-deploy 已写明）。
-- `deploy/mcp` 的 `astock_check` 只查 web 与 scheduler 两个单元，没覆盖 `astock-news.timer`。
 - 大文件：`app.py`、`agent_loop.py`、`datasources.py`、`static/app.js` 超过 400 行目标
   （行数见 `python3 tools/status.py`）。可先把 `datasources` 的 `_em_*` 五个函数挪 `em_throttle.py`，
   `app.py` 的 `_fleet_route`/`ensure_user_stores` 挪 `fleet_routes.py`。高风险纯维护性收益，

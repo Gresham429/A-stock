@@ -368,6 +368,21 @@ def sectors_map(codes: list[str]) -> dict[str, tuple[str, str]]:
     return out
 
 
+def codes_by_mcap(eligible_only: bool = True) -> list[str]:
+    """全池按流通市值降序的代码表。
+
+    `codes_of()` 无 focus 时是 `ORDER BY code`（PITFALLS #5b），凡是要「按市值分层/抽样/切 cohort」
+    的地方都得用本函数，别拿 codes_of 的顺序当真。
+    """
+    if not _ready():
+        return universe.all_codes()
+    cond = " AND eligible=1" if eligible_only else ""
+    with _conn() as c:
+        return [r["code"] for r in c.execute(
+            f"SELECT code FROM stocks WHERE active=1{cond} AND float_mcap>0 "
+            "ORDER BY float_mcap DESC")]
+
+
 def codes_of(focus: str = "", eligible_only: bool = True) -> list[str]:
     """板块名（申万一级/细分/概念）-> 成分股代码；空 focus -> 全池。db 未就绪时降级手工池。"""
     if not _ready():

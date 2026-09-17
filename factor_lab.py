@@ -164,8 +164,14 @@ def _spearman(xs: list[float], ys: list[float]) -> float | None:
 
 # ── 回测 ───────────────────────────────────────────────────────────────────
 def sample_codes(n: int = 300) -> list[str]:
-    """从全市场 eligible 池按流通市值分层抽样——避免只取大盘股导致结论不可推广。"""
-    codes = universe_store.codes_of()  # 已按流通市值降序
+    """按流通市值降序等距抽样（跨全市场分层）。
+
+    必须显式按市值排序：`codes_of()` 无 focus 时是 `ORDER BY code`（PITFALLS #5b），照它等距取到的
+    是「代码号跨度均匀」，不是「市值跨度均匀」。2026-09-17 实测两者结论差异很小（市值构成几乎一致，
+    IC 均值最大差 0.013、超额分位最大差 0.47 个百分点），但显式排序能让实现与注释一致，
+    也避免将来 codes_of 改排序时结论悄悄漂移。
+    """
+    codes = universe_store.codes_by_mcap()
     if len(codes) <= n:
         return codes
     step = len(codes) / n

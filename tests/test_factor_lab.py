@@ -69,6 +69,24 @@ def test_factors_have_range_anchors():
         assert lo < hi, f"{f} 锚点区间非法"
 
 
+def test_sample_codes_is_market_cap_stratified():
+    """抽样必须显式按流通市值降序等距 —— codes_of 是代码号排序，直接用它等于代码分层。"""
+    import tempfile
+    import universe_store as us
+    us.DB_PATH = os.path.join(tempfile.mkdtemp(), "universe.db")
+    us.init()
+    with us._conn() as c:
+        c.executemany(
+            "INSERT INTO stocks(code,name,board,price,float_mcap,eligible,active) "
+            "VALUES(?,?,'',?,?,1,1)",
+            [(f"60000{i}", f"股{i}", 10.0, (10 - i) * 100.0) for i in range(10)])
+    assert us.codes_of()[:3] == ["600000", "600001", "600002"], (
+        "前提变了：codes_of 应该按代码号排序，本用例靠这个对照")
+    got = fl.sample_codes(5)
+    assert got[0] == "600000", f"首个样本应是市值最大的那只: {got}"
+    assert got == ["600000", "600002", "600004", "600006", "600008"], got
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

@@ -108,6 +108,27 @@ def of(code: str, limit: int = 8) -> list[dict[str, Any]]:
             "FROM financials WHERE code=? ORDER BY period DESC LIMIT ?", (code, limit))]
 
 
+def latest_map(codes: list[str] | None = None) -> dict[str, dict[str, Any]]:
+    """代码 -> 最新一期的营收、利润同比（本地一次读全表，不做 N 次查询）。
+
+    长线筛选要在全池上问「营收与利润是否双正」，逐只 `of()` 是 5000 次 SQL；这里一次读完
+    （约两万行、几十毫秒）在内存里取每个代码最新一期。`codes` 为空表示全池。
+    面板里没有的代码不会出现在结果里，调用方按「无数据即不合格」处理（与逐只取数失败同口径）。
+    """
+    _ensure()
+    out: dict[str, dict[str, Any]] = {}
+    want = set(codes) if codes else None
+    with _conn() as c:
+        for r in c.execute("SELECT code, period, revenue_yoy, profit_yoy FROM financials "
+                           "ORDER BY period"):
+            code = r["code"]
+            if want is not None and code not in want:
+                continue
+            out[code] = {"period": r["period"], "revenue_yoy": r["revenue_yoy"],
+                         "profit_yoy": r["profit_yoy"]}     # ORDER BY period：后面的覆盖前面的
+    return out
+
+
 def status() -> dict[str, Any]:
     """面板进度：行数、覆盖股票数、最新报告期、上次跑完一轮的时间。"""
     _ensure()

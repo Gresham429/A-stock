@@ -383,6 +383,26 @@ def codes_by_mcap(eligible_only: bool = True) -> list[str]:
             "ORDER BY float_mcap DESC")]
 
 
+def mcap_of(codes: list[str]) -> dict[str, float]:
+    """代码 -> 流通市值（**亿元**）。取不到的代码不出现在结果里。
+
+    注意单位：本表 `stocks.float_mcap` 来自新浪 `nmc`，是**万元**（工商银行实测 203826832 万），
+    而腾讯行情与 `cap_layers` 用的是**亿元**。这里统一换算成亿元再交出去，别让调用方各自
+    猜单位（2026-09-17 差点把 30 亿门槛当成 30 万元用）。
+    """
+    if not codes or not _ready():
+        return {}
+    out: dict[str, float] = {}
+    with _conn() as c:
+        for i in range(0, len(codes), 800):     # 保守切块，避开 SQLite 变量数上限
+            chunk = [str(x) for x in codes[i:i + 800]]
+            q = ",".join("?" * len(chunk))
+            for r in c.execute(f"SELECT code, float_mcap FROM stocks WHERE code IN ({q})", chunk):
+                if r["float_mcap"]:
+                    out[r["code"]] = round(float(r["float_mcap"]) / 10000.0, 2)
+    return out
+
+
 def codes_of(focus: str = "", eligible_only: bool = True) -> list[str]:
     """板块名（申万一级/细分/概念）-> 成分股代码；空 focus -> 全池。db 未就绪时降级手工池。"""
     if not _ready():

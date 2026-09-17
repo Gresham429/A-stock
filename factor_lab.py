@@ -31,6 +31,7 @@ from datetime import date as date_cls
 from datetime import datetime, timedelta
 from typing import Any
 
+import cap_layers
 import datasources as ds
 import universe_store
 
@@ -52,12 +53,14 @@ HORIZONS = (5, 10, 20)   # 未来收益天数
 BENCH_SYM = "sh000001"
 
 # 待验因子：只含**确定性、只吃日K**的分量。net20(资金) 因数据源只给 30 天，无法回测。
-FACTORS = ("vol", "cum20", "range_pos")
+# 2026-09-17 由 3 个扩到 6 个（设计第五节）：cum5 给短线、cum60 给中线、cum120 给长线，
+# 全部只吃日K、可回测。窗口长于序列时该因子单独缺样本，不影响别的因子（见 `_daily_ic_rows`）。
+FACTORS = ("vol", "cum5", "cum20", "cum60", "cum120", "range_pos")
 
-# cohort-aware 方向：打分对象是预筛后的大盘池，其因子方向可与「小盘主导的全池」相反
-# （2026-07-18 覆盖分析：h=10 range_pos 全池 −1 vs 大盘 +1）。大盘 cohort = 按流通市值前 N。
-# **镜像 `screening._PRESCREEN`**：两者是同一条预筛边界，改一个要同步改另一个。
-LARGE_COHORT_N = 600
+# 大盘层的密集样本量。层边界取 `cap_layers` 的大盘层（≥500 亿），不再是「市值前 600」——
+# 那个 600 原先一身两职（选股预筛 + cohort 边界），是设计第二节列的问题 2；预筛已由分层池取代。
+# 回测主循环抽 300 只跨全市场，落在大盘层只剩 ~40 只，横截面偏薄，故大盘层单独密采一次。
+LARGE_COHORT_N = 360
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ic_daily(
@@ -66,8 +69,10 @@ CREATE TABLE IF NOT EXISTS ic_daily(
   PRIMARY KEY (date, factor, horizon)
 );
 CREATE INDEX IF NOT EXISTS idx_ic_date ON ic_daily(date);
--- cohort 逐日 IC：与 ic_daily 并存、互不干扰。只存非「全池」cohort（当前只有 'large'）。
--- 打分/教训门按池子选方向读它；excess_dist/判罪线永远走全池(ic_daily)、不 cohort 化。
+-- cohort 逐日 IC：与 ic_daily 并存、互不干扰。存三种市值层 cohort（layer_large / layer_mid /
+-- layer_small）；打分/教训门按池子选方向读它，excess_dist/判罪线永远走全池(ic_daily)、不 cohort 化。
+-- layer_large 只由 backtest_large() 写（大盘层密采），layer_mid/small 由 backtest() 写：
+-- 两个函数不写同一个 key，免得同一 (date,factor,horizon) 被薄样本与厚样本轮流覆盖。
 CREATE TABLE IF NOT EXISTS ic_cohort(
   date TEXT NOT NULL, factor TEXT NOT NULL, horizon INTEGER NOT NULL,
   cohort TEXT NOT NULL, ic REAL, n INTEGER,
@@ -121,15 +126,29 @@ def _ann_vol(closes: list[float]) -> float | None:
     return math.sqrt(var) * math.sqrt(252) * 100
 
 
+def _cum(closes: list[float], n: int) -> float | None:
+    """近 n 个交易日涨幅（%）。窗口不足或起点非正返回 None。"""
+    if len(closes) <= n or closes[-n - 1] <= 0:
+        return None
+    return (closes[-1] / closes[-n - 1] - 1) * 100
+
+
 def factors_at(closes: list[float]) -> dict[str, float | None]:
-    """给定截至 t 日的收盘序列（含 t），算三个因子。**只用 t 及之前的数据**——不可窥视未来。"""
+    """给定截至 t 日的收盘序列（含 t），算全部因子。**只用 t 及之前的数据**——不可窥视未来。
+
+    窗口长于序列的因子（如只有 100 根时的 cum120）返回 None，由调用方按列屏蔽，
+    不因此丢掉整行（PITFALLS：一个长窗口因子把短窗口因子的样本一起吃光）。
+    """
     if len(closes) < 21:
         return {f: None for f in FACTORS}
     w = closes[-20:]
     lo, hi = min(w), max(w)
     return {
         "vol": _ann_vol(closes),
-        "cum20": ((closes[-1] / closes[-21] - 1) * 100 if closes[-21] > 0 else None),
+        "cum5": _cum(closes, 5),
+        "cum20": _cum(closes, 20),
+        "cum60": _cum(closes, 60),
+        "cum120": _cum(closes, 120),
         "range_pos": ((closes[-1] - lo) / (hi - lo) * 100 if hi > lo else 50.0),
     }
 
@@ -238,19 +257,28 @@ def rank_of(horizon: int, x: float, dist: dict[int, dict[int, float]] | None = N
 def _daily_ic_rows(per_day: dict[str, dict[str, list]]) -> list[tuple]:
     """每日横截面 IC → [(date, factor, horizon, ic, n)]。
 
-    纯函数、无网络无库——`backtest`(全池) 与 `backtest_large`(大盘 cohort) **共用同一口径**，
-    避免两处 IC 逻辑漂移。存哪张表由调用方决定（cohort 由调用方补）。
+    每个因子列与 `fwd{h}` 列**同序等长**，取不到值的位置放 None；本函数按位置配对并屏蔽 None，
+    所以长窗口因子（cum120）缺样本只让自己那几天不产行，不会顺带吃掉短窗口因子的样本。
+    两列长度不齐视作写入端 bug，跳过该组合、不产错行。
+
+    纯函数、无网络无库——`backtest`(全池与各层) 与 `backtest_large`(大盘层密采) **共用同一口径**，
+    避免两处 IC 逻辑漂移。存哪张表、标哪个 cohort 由调用方决定。
     """
     rows: list[tuple] = []
     for date, d in per_day.items():
         for f in FACTORS:
+            col = d.get(f)
+            if not col:
+                continue
             for h in HORIZONS:
-                xs, ys = d.get(f) or [], d.get(f"fwd{h}") or []
-                if len(xs) != len(ys):
+                ys = d.get(f"fwd{h}")
+                if not ys or len(ys) != len(col):
                     continue
-                ic = _spearman(xs, ys)
+                pairs = [(col[i], ys[i]) for i in range(len(col))
+                         if col[i] is not None and ys[i] is not None]
+                ic = _spearman([p[0] for p in pairs], [p[1] for p in pairs])
                 if ic is not None:
-                    rows.append((date, f, h, round(ic, 6), len(xs)))
+                    rows.append((date, f, h, round(ic, 6), len(pairs)))
     return rows
 
 
@@ -280,22 +308,27 @@ def backtest(n_stocks: int = 300, workers: int = 8) -> dict[str, Any]:
     except Exception as e:  # noqa: BLE001 基准取不到只是不产出分布，IC 照跑
         logger.warning("基准日K取数失败，本轮不产出超额分布: %s", e)
 
+    # 每只样本归层：分层 IC 要用（设计第七节）。层边界与筛选/候选池共用 `cap_layers`，
+    # 免得「回测说的大盘」与「选股说的大盘」是两个不同的池子。
+    mcaps = universe_store.mcap_of(list(series))
     # 逐只算：每日因子值 + 未来收益（+ 顺带收超额分布，远期收益本就在算，成本≈0）
-    per_day: dict[str, dict[str, list]] = {}   # date -> {factor: [值], "fwd{h}": [收益]}
+    # 分桶累积：三层 + other（30 亿以下或市值取不到，仍计入全池）。全池 IC 由各桶合并而来，
+    # 同一份数据不存两份。layer_large 归 backtest_large() 密采写，这里不写（见 _SCHEMA 注释）。
+    buckets: dict[str, dict[str, dict[str, list]]] = {l: {} for l in cap_layers.LAYERS}
+    buckets["other"] = {}
     ex_pool: dict[int, list[float]] = {h: [] for h in HORIZONS}
     samples = 0
     for code, kl in series.items():
+        bucket = buckets[cap_layers.layer_of(mcaps.get(code)) or "other"]
         closes = [float(k["close"]) for k in kl]
         dates = [str(k["date"])[:10] for k in kl]
         for t in range(WARMUP, len(closes) - max(HORIZONS)):
             if closes[t] <= 0:
                 continue
             f = factors_at(closes[: t + 1])       # 只用 t 及之前 —— 严防未来函数
-            if any(v is None for v in f.values()):
-                continue
-            d = per_day.setdefault(dates[t], {})
-            for k_, v in f.items():
-                d.setdefault(k_, []).append(v)
+            d = bucket.setdefault(dates[t], {})
+            for k_ in FACTORS:                    # 逐列写，取不到写 None 占位（列间同序等长）
+                d.setdefault(k_, []).append(f.get(k_))
             for h in HORIZONS:
                 fwd = (closes[t + h] / closes[t] - 1) * 100
                 d.setdefault(f"fwd{h}", []).append(fwd)
@@ -307,8 +340,17 @@ def backtest(n_stocks: int = 300, workers: int = 8) -> dict[str, Any]:
                     ex_pool[h].append(fwd - (b1 / b0 - 1) * 100)
             samples += 1
 
-    # 每日横截面 IC（纯 helper，backtest_large 同口径复用）
+    # 每日横截面 IC（纯 helper，backtest_large 同口径复用）。全池 = 各桶按层序拼接。
+    per_day: dict[str, dict[str, list]] = {}
+    for l in [*cap_layers.LAYERS, "other"]:
+        for date, cols in buckets[l].items():
+            tgt = per_day.setdefault(date, {})
+            for k_, vs in cols.items():
+                tgt.setdefault(k_, []).extend(vs)
     rows = _daily_ic_rows(per_day)
+    layer_rows = [(d, f, h, f"layer_{l}", ic, n)
+                  for l in ("mid", "small")        # layer_large 由 backtest_large() 写
+                  for (d, f, h, ic, n) in _daily_ic_rows(buckets[l])]
     # 超额分位分布 —— 判罪线的唯一合法来源（见 excess_dist 表注释）
     now_ = datetime.now().isoformat(timespec="seconds")
     dist_rows = []
@@ -321,6 +363,11 @@ def backtest(n_stocks: int = 300, workers: int = 8) -> dict[str, Any]:
         c.executemany("INSERT INTO ic_daily(date,factor,horizon,ic,n) VALUES(?,?,?,?,?) "
                       "ON CONFLICT(date,factor,horizon) DO UPDATE SET ic=excluded.ic, n=excluded.n",
                       rows)
+        if layer_rows:
+            c.executemany(
+                "INSERT INTO ic_cohort(date,factor,horizon,cohort,ic,n) VALUES(?,?,?,?,?,?) "
+                "ON CONFLICT(date,factor,horizon,cohort) DO UPDATE SET ic=excluded.ic, n=excluded.n",
+                layer_rows)
         if dist_rows:
             c.executemany(
                 "INSERT INTO excess_dist(horizon,pct,value,n,updated_at) VALUES(?,?,?,?,?) "
@@ -332,40 +379,35 @@ def backtest(n_stocks: int = 300, workers: int = 8) -> dict[str, Any]:
     if dist_rows:
         logger.info("超额分布：%s", {h: len(p) for h, p in ex_pool.items()})
     purge()
-    logger.info("因子回测完成：%d 只 × %d 日 = %d 样本，%d 条 IC", len(series), len(per_day),
-                samples, len(rows))
+    logger.info("因子回测完成：%d 只（分层 %s）× %d 日 = %d 样本，%d 条 IC（分层 %d 条）",
+                len(series), cap_layers.layer_counts([{"mcap_yi": mcaps.get(c)} for c in series]),
+                len(per_day), samples, len(rows), len(layer_rows))
     return {"ok": True, "stocks": len(series), "days": len(per_day),
-            "samples": samples, "ic_rows": len(rows), "summary": summary()}
+            "samples": samples, "ic_rows": len(rows), "layer_ic_rows": len(layer_rows),
+            "summary": summary()}
 
 
-def backtest_large(n: int = 200, workers: int = 8) -> dict[str, Any]:
-    """大盘 cohort（按流通市值前 `LARGE_COHORT_N`）的逐日 IC → `ic_cohort`（cohort='large'）。
+def backtest_large(n: int = LARGE_COHORT_N, workers: int = 8) -> dict[str, Any]:
+    """大盘层（`cap_layers` 的 ≥500 亿）逐日 IC -> `ic_cohort`（cohort='layer_large'）。
 
-    与 `backtest()` **隔离**：另抽密集样本(~200)、独立一次网络、**不产 excess_dist**
-    （判罪线/冻结分位永远走全池）。IC 走同一个 `_daily_ic_rows` helper → 与全池同口径。
-    per_day 累积段与 `backtest()` 刻意重复（~12 行）：宁可小重复，也不重构 `backtest()`
-    去碰它与 excess_dist 交织的主循环。大盘池仅 ~600 只，密集抽 200 已出稳的横截面 IC。
+    与 `backtest()` **隔离**：另抽密集样本、独立一次网络、**不产 excess_dist**
+    （判罪线/冻结分位永远走全池）。IC 走同一个 `_daily_ic_rows` helper，与全池同口径。
+    `backtest()` 主循环只抽 300 只跨全市场，落在大盘层的 ~40 只横截面偏薄，所以这一层单独密采。
     """
     init()
-    # ⚠️ cohort 必须与 `screening._screen_rows` 的预筛**同口径**：按 **Tencent float_mcap_yi
-    # 降序**取前 N。**不能用 codes_of()[:N]**——codes_of() 是按**股票代码号**排序、非市值
-    # （实测其 top-600 与真·市值 top-600 仅 82/600 重合），用它会得到「小号码股」而非大盘池，
-    # 方向甚至相反（PITFALLS）。故这里自己拉 quote 重排（~1.7s，与 prescreen 同法）。
-    codes_all = universe_store.codes_of()
-    try:
-        q = ds.tencent_quote(codes_all)
-    except Exception as e:  # noqa: BLE001 取行情失败则本轮不产出 cohort（打分回退全池）
-        logger.warning("大盘 cohort 取行情失败: %s", e)
-        return {"ok": False, "msg": "行情失败"}
-    ranked = sorted([c for c in codes_all if c in q],
-                    key=lambda c: (q.get(c, {}) or {}).get("float_mcap_yi", 0) or 0, reverse=True)
-    codes = ranked[:LARGE_COHORT_N]
+    # 层边界与筛选/候选池共用 `cap_layers`（≥500 亿），**不再用「市值前 600」**：那个常数原先
+    # 一身两职（选股预筛 + cohort 边界，设计第二节问题 2），预筛已由分层池取代。
+    # 也**不能用 codes_of()[:N]**：它按股票代码号排序而非市值（实测其 top-600 与真市值 top-600
+    # 只有 82/600 重合），用它会得到「小号码股」而非大盘池，方向甚至相反（PITFALLS #5b）。
+    ranked = universe_store.codes_by_mcap()
+    mcaps = universe_store.mcap_of(ranked)
+    codes = [c for c in ranked if cap_layers.layer_of(mcaps.get(c)) == "large"]
     if len(codes) < 30:
-        return {"ok": False, "msg": f"大盘池不足（{len(codes)}）"}
+        return {"ok": False, "msg": f"大盘层不足（{len(codes)}）"}
     step = max(1, len(codes) // n)
     picks = codes[::step][:n]
-    logger.info("大盘 cohort 回测：抽样 %d 只（市值前 %d 里密采），拉 %d 根日K…",
-                len(picks), LARGE_COHORT_N, KLINE_DAYS)
+    logger.info("大盘层回测：抽样 %d 只（层内 %d 只），拉 %d 根日K…",
+                len(picks), len(codes), KLINE_DAYS)
     with ThreadPoolExecutor(max_workers=workers) as ex:
         series = dict(ex.map(_series_of, picks))
     series = {c: k for c, k in series.items() if len(k) > WARMUP + max(HORIZONS) + 21}
@@ -379,22 +421,21 @@ def backtest_large(n: int = 200, workers: int = 8) -> dict[str, Any]:
             if closes[t] <= 0:
                 continue
             f = factors_at(closes[: t + 1])       # 只用 t 及之前 —— 无未来函数
-            if any(v is None for v in f.values()):
-                continue
             d = per_day.setdefault(dates[t], {})
-            for k_, v in f.items():
-                d.setdefault(k_, []).append(v)
+            for k_ in FACTORS:                    # 取不到写 None 占位，列间同序等长
+                d.setdefault(k_, []).append(f.get(k_))
             for h in HORIZONS:
                 d.setdefault(f"fwd{h}", []).append((closes[t + h] / closes[t] - 1) * 100)
     rows = _daily_ic_rows(per_day)
     with _LOCK, _conn() as c:
         c.executemany(
-            "INSERT INTO ic_cohort(date,factor,horizon,cohort,ic,n) VALUES(?,?,?,'large',?,?) "
+            "INSERT INTO ic_cohort(date,factor,horizon,cohort,ic,n) "
+            "VALUES(?,?,?,'layer_large',?,?) "
             "ON CONFLICT(date,factor,horizon,cohort) DO UPDATE SET ic=excluded.ic, n=excluded.n",
             [(d, f, h, ic, nn) for (d, f, h, ic, nn) in rows])
     purge()
-    logger.info("大盘 cohort 回测完成：%d 只 × %d 日 = %d 条 IC", len(series), len(per_day), len(rows))
-    return {"ok": True, "cohort": "large", "stocks": len(series),
+    logger.info("大盘层回测完成：%d 只 × %d 日 = %d 条 IC", len(series), len(per_day), len(rows))
+    return {"ok": True, "cohort": "layer_large", "stocks": len(series),
             "days": len(per_day), "ic_rows": len(rows)}
 
 
@@ -428,6 +469,52 @@ def summary(days: int = 0) -> list[dict[str, Any]]:
             "win_rate": round(100 * sum(1 for x in ics if x > 0) / n, 1),
             "direction": "正向" if mean > 0 else "反向",
         })
+    return out
+
+
+HOLDOUT_DAYS = 125      # 验收留出窗：最近约半年交易日只看不选（设计第七节第一层）
+
+
+def layer_report(holdout_days: int = HOLDOUT_DAYS) -> list[dict[str, Any]]:
+    """分层 IC 验收：各层（含全池）各因子在训练窗与留出窗上的 IC 均值、t 值、符号是否一致。
+
+    **为什么要有留出窗**：拿同一份数据既挑因子又报 IC，等于自己给自己判卷。这里把最近
+    `holdout_days` 个交易日留出来只看不选：因子集与阈值按训练窗的证据定，留出窗只回答
+    「它现在还算不算数」。
+
+    **它不回写任何参数**：生产打分的方向仍走 `direction()` 的滚动窗口。把方向冻结在 6 个月前的
+    regime 上会让打分与当下市场脱节，这是本项目的取舍，写进了设计文档第八节。本函数只出报告，
+    供 `python3 -c` 或 `/api/factors` 查看，也是设计文档里那组验收数字的来源。
+    """
+    out: list[dict[str, Any]] = []
+    with _conn() as c:
+        cohorts = {"all": "ic_daily"} | {f"layer_{l}": "ic_cohort" for l in cap_layers.LAYERS}
+        for cohort, table in cohorts.items():
+            if table == "ic_daily":
+                rows = c.execute("SELECT date, factor, horizon, ic FROM ic_daily ORDER BY date").fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT date, factor, horizon, ic FROM ic_cohort WHERE cohort=? ORDER BY date",
+                    (cohort,)).fetchall()
+            if not rows:
+                continue
+            dates = sorted({r["date"] for r in rows})
+            cut = dates[-holdout_days] if len(dates) > holdout_days else dates[0]
+            train: dict[tuple[str, int], list[float]] = {}
+            hold: dict[tuple[str, int], list[float]] = {}
+            for r in rows:
+                (hold if r["date"] >= cut else train).setdefault(
+                    (r["factor"], r["horizon"]), []).append(r["ic"])
+            for (f, h), tr in sorted(train.items()):
+                ho = hold.get((f, h), [])
+                m_tr, t_tr = _t_of(tr)
+                m_ho, t_ho = _t_of(ho)
+                out.append({
+                    "cohort": cohort, "factor": f, "horizon": h,
+                    "n_train": len(tr), "ic_train": round(m_tr, 4), "t_train": round(t_tr, 2),
+                    "n_hold": len(ho), "ic_hold": round(m_ho, 4), "t_hold": round(t_ho, 2),
+                    "same_sign": (m_tr * m_ho) > 0 if len(ho) >= 20 else None,
+                })
     return out
 
 
@@ -490,7 +577,8 @@ def direction(factor: str, horizon: int = 10, cohort: str = "all") -> dict[str, 
     """因子当前方向 —— **动态调整的正确形式**。
 
     cohort='all'（默认）读全池 `ic_daily`（5 个用户面 AI + 默认打分依赖，行为不变）；
-    其它 cohort（如 'large'）读 `ic_cohort` —— 打分对象是预筛后的大盘池、方向可与全池相反。
+    其它 cohort（`layer_large` / `layer_mid` / `layer_small`）读 `ic_cohort`：打分对象是分层后的
+    某一层，方向可与「小盘主导的全池」相反（PITFALLS #5b 实测 range_pos 曾大小盘反向）。
 
 
     规则（防抖 + 防噪音）：
@@ -544,7 +632,26 @@ def directions(horizon: int = 10, cohort: str = "all") -> dict[str, dict[str, An
 _NO_DATA_BASES = ("数据不足", "库不可用")
 
 
-def scoring_directions(cohort: str = "large", horizon: int = 10) -> dict[str, dict[str, Any]]:
+def cycle_directions(pairs: list[tuple[str, int]], cohort: str = "layer_large",
+                     ) -> dict[str, dict[str, Any]]:
+    """按 (因子, 地平线) 清单取方向 —— 三周期各有自己的因子与地平线，打分用自己那套。
+
+    `pairs` 来自 `picks_pipeline.CYCLE_FACTORS`。cohort 整层无数据（冷启动、未跑分层回测）时
+    **整体**回退全池，否则整套因子 sign 全是 0、打分退回中性、名单退化成按市值排。
+    cohort 有数据但不显著则尊重 0（数据说这一层中性，不回退）。
+    """
+    try:
+        d = {f: direction(f, h, cohort) for f, h in pairs}
+        if all(v.get("basis") in _NO_DATA_BASES for v in d.values()):
+            d = {f: direction(f, h, "all") for f, h in pairs}
+        return d
+    except sqlite3.Error as e:
+        logger.warning("周期方向读取失败（打分退回中性）: %s", e)
+        return {f: {"factor": f, "sign": 0, "basis": "库不可用", "t": 0.0, "cohort": cohort}
+                for f, _h in pairs}
+
+
+def scoring_directions(cohort: str = "layer_large", horizon: int = 10) -> dict[str, dict[str, Any]]:
     """给「打分/教训门」用的方向：优先 cohort 的方向，**该 cohort 尚无 IC 数据时回退全池**。
 
     区分两种「sign 0」：
@@ -554,9 +661,7 @@ def scoring_directions(cohort: str = "large", horizon: int = 10) -> dict[str, di
     """
     if cohort == "all":
         return directions(horizon, cohort="all")
-    d = directions(horizon, cohort=cohort)
-    has_data = any(v.get("basis") not in _NO_DATA_BASES for v in d.values())
-    return d if has_data else directions(horizon, cohort="all")
+    return cycle_directions([(f, horizon) for f in FACTORS], cohort)
 
 
 def purge(days: int = IC_KEEP_DAYS) -> int:
@@ -685,7 +790,7 @@ def refresh_if_stale(n_stocks: int = 300) -> dict[str, Any]:
     if r.get("ok"):
         log_directions(before)
         try:                                  # 顺带刷新大盘 cohort 方向（打分/教训门用）
-            r["cohort_large"] = backtest_large()
+            r["cohort_layer_large"] = backtest_large()
         except Exception as e:  # noqa: BLE001 大盘 cohort 失败不该拖垮全池刷新（打分回退全池）
             logger.warning("大盘 cohort 回测失败（打分回退全池）: %s", e)
     return r

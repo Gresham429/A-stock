@@ -80,6 +80,111 @@ def test_pa_score_default_dirs_backward_compat():
     assert s is None or 0 <= s <= 100
 
 
+# ── 分层候选池（2026-09-17 重构）：三条分支用假数据实跑 ────────────────────────
+class _FakeEnv:
+    """把 _screen_rows 的外部依赖换成假数据，跑通分支逻辑（不打网络、不碰 db）。"""
+
+    def __init__(self, quotes, smap, layers_of):
+        self.quotes, self.smap, self.layers_of = quotes, smap, layers_of
+        self.saved = {}
+
+    def __enter__(self):
+        import screening
+        self.s = screening
+        patch = {
+            (screening.universe_store, "codes_of"): lambda focus="", **k: (
+                [c for c, (p, s) in self.smap.items() if focus in (p, s)] if focus
+                else list(self.quotes)),
+            (screening.universe_store, "sectors_map"): lambda pool: dict(self.smap),
+            (screening.universe_store, "sector_of"): lambda c: self.smap.get(c, ("一级", "二级")),
+            (screening.universe_store, "taxonomy"): lambda: {"一级": ["二级"]},
+            (screening.ds, "tencent_quote"): lambda codes: {c: self.quotes[c] for c in codes},
+            (screening, "_metrics_of"): lambda codes: {
+                c: {"vol": 30.0 + (int(c[-3:]) % 60), "cum20": 1.0, "range_pos": 50.0,
+                    "net20": None, "net5": None, "series": []} for c in codes},
+            (screening.factor_lab, "scoring_directions"): lambda cohort="layer_large", **k: {
+                "vol": {"sign": 1}, "cum5": {"sign": 0}, "cum20": {"sign": 0},
+                "cum60": {"sign": 0}, "cum120": {"sign": 0}, "range_pos": {"sign": 0}},
+            (screening.factor_lab, "directions"): lambda **k: {
+                "vol": {"sign": 1}, "cum20": {"sign": 0}, "range_pos": {"sign": 0}},
+        }
+        for (obj, name), fn in patch.items():
+            self.saved[(obj, name)] = getattr(obj, name)
+            setattr(obj, name, fn)
+        return self
+
+    def __exit__(self, *a):
+        for (obj, name), fn in self.saved.items():
+            setattr(obj, name, fn)
+        return False
+
+
+def _fake_pool():
+    """三层各 60 只（大盘 vol 高、小盘 vol 低），外加每层一只 20 亿的越界股。"""
+    quotes, smap = {}, {}
+    for i in range(60):
+        for tag, mcap in (("L", 900 - i), ("M", 400 - i), ("S", 90 - i)):
+            c = f"{tag}{i:03d}"
+            quotes[c] = {"name": c, "price": 10.0, "float_mcap_yi": float(mcap),
+                         "lot_cost": 1000.0, "turnover": 1.0, "pe_ttm": 10.0, "pb": 1.0}
+            smap[c] = ("一级", f"二级{tag}{i}")      # 各自不同细分 -> 行业上限不挡名额
+    for tag in ("L", "M", "S"):
+        c = f"{tag}999"
+        quotes[c] = {"name": c, "price": 10.0, "float_mcap_yi": 20.0, "lot_cost": 1000.0,
+                     "turnover": 1.0, "pe_ttm": 10.0, "pb": 1.0}
+        smap[c] = ("一级", "越界层")
+    return quotes, smap
+
+
+def test_screen_rows_layered_quota_per_layer():
+    """全市场分支：三层各 12 个名额，越界（<30 亿）不入选。小盘分数低也照样有 12 个名额。"""
+    quotes, smap = _fake_pool()
+    with _FakeEnv(quotes, smap, None):
+        rows = app._screen_rows(100000.0, "")
+    codes = [r["code"] for r in rows]
+    assert len(codes) == 36, f"三层各 12 只，共 36，得 {len(codes)}"
+    for tag in ("L", "M", "S"):
+        n = sum(1 for c in codes if c.startswith(tag))
+        assert n == 12, f"{tag} 层名额应为 12，得 {n}"
+    assert all("999" not in c for c in codes), "20 亿的股不该进候选（30 亿门槛）"
+    # 行业上限：每层内各自不同细分，不该出现重复细分被挡的情况
+    subs = [r["sub"] for r in rows]
+    assert len(subs) == len(set(subs)), f"细分重复（同二级 >1 只）: {subs}"
+
+
+def test_screen_rows_layered_respects_sub_cap():
+    """行业上限生效：某层 60 只全在同一申万二级时，该层最多进 2 只（其余名额不跨层补）。"""
+    quotes, smap = _fake_pool()
+    for c in list(smap):
+        if c.startswith("S"):
+            smap[c] = ("一级", "同一个细分")
+    with _FakeEnv(quotes, smap, None):
+        rows = app._screen_rows(100000.0, "")
+    small = [r["code"] for r in rows if r["code"].startswith("S")]
+    assert len(small) == 2, f"同一细分上限 2 只，得 {len(small)}"
+    assert sum(1 for r in rows if r["code"].startswith("L")) == 12, "小盘被限不该影响大盘名额"
+
+
+def test_screen_rows_focus_branch_keeps_sector_only():
+    """指定板块分支：只在该板块内取，按分数排序，不强制分层。"""
+    quotes, smap = _fake_pool()
+    with _FakeEnv(quotes, smap, None):
+        rows = app._screen_rows(100000.0, "二级L0")
+    assert [r["code"] for r in rows] == ["L000"], \
+        f"focus 应只返回该细分成分: {[r['code'] for r in rows]}"
+
+
+def test_screen_rows_marginal_capital_falls_back_to_pool():
+    """买不起任何 1 手时退回全池给参考（旧行为保留），且仍受 30 亿门槛约束。"""
+    quotes, smap = _fake_pool()
+    for q in quotes.values():
+        q["lot_cost"] = 999999.0
+    with _FakeEnv(quotes, smap, None):
+        rows = app._screen_rows(100.0, "")
+    assert rows, "买不起时不该返回空（退回全池给参考）"
+    assert all("999" not in r["code"] for r in rows), "退回全池也要守住 30 亿门槛"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

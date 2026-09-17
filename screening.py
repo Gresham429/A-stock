@@ -16,6 +16,7 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+import cap_layers
 import datasources as ds
 import factor_lab
 import universe
@@ -23,8 +24,8 @@ import universe_store
 
 logger = logging.getLogger(__name__)
 
-_SCREEN_CAP_TOTAL = 36  # 喂给 LLM 的候选总量上限（控 token 与时延）
-_PRESCREEN = 600        # 全市场未指定板块时，均衡采样前先按流通市值预筛到这么多只
+_SCREEN_CAP_TOTAL = 36  # 喂给 LLM 的候选总量上限（控 token 与时延）；全市场路径三层各分 12
+_LAYER_DEPTH = 48       # 每层进打分的候选深度（成本界：全市场 3800 只逐只算形态要八分钟）
 VOL_FLOOR = 15.0        # 波动率下限：低于此没有波段空间（用户偏好，非收益预测）
 VOL_CEIL = 130.0        # 波动率上限：高于此风险失控
 
@@ -54,16 +55,17 @@ def _safe_metrics(code: str) -> dict:
 
 
 _KLINE_TTL = 900     # 日K进程内缓存秒数（12 个 agent 候选高度重叠，不缓存要打 240 次请求）
-_kline_cache: dict[str, tuple[float, list]] = {}
+_kline_cache: dict[tuple[str, int], tuple[float, list]] = {}
 
 
 def _safe_kline(code: str, num: int = 70) -> list[dict]:
     """sina_kline 的兜底包装 + 进程内 TTL 缓存（mirror `_safe_metrics`）。
 
-    num=70：MA60 要 60 根，留 10 根余量给停牌/缺口。
+    num=70：MA60 要 60 根，留 10 根余量给停牌/缺口。缓存键带 num：三周期选股要 90 根算长窗口
+    因子，若只按代码缓存，先来的 70 根会把后来的 90 根请求挡成短序列（长窗口因子静默缺样本）。
     全市场池数据质量参差，单只异常不得拖垮整批（PITFALLS#11）。
     """
-    hit = _kline_cache.get(code)
+    hit = _kline_cache.get((code, num))
     if hit and time.time() - hit[0] < _KLINE_TTL:
         return hit[1]
     try:
@@ -71,7 +73,7 @@ def _safe_kline(code: str, num: int = 70) -> list[dict]:
     except Exception as e:  # noqa: BLE001 兜底：宁可该股无K线，不可整批失败
         logger.warning("K线获取失败 %s（该股按无结构处理）: %s", code, e)
         return []
-    _kline_cache[code] = (time.time(), k)
+    _kline_cache[(code, num)] = (time.time(), k)
     return k
 
 
@@ -121,10 +123,13 @@ def _pa_score(m: dict, dirs: dict | None = None) -> float | None:
 
 
 # 因子取值的分位锚点（把原始值映射到 0..1，避免量纲差异主导打分）。
-# 最初是拍的；2026-07-16 用 150 只 × 600 日 = 16,753 个观测事后核对 p5~p95：
-#   vol (16.9, 88.9) / cum20 (-17.3, 27.7) / range_pos (0, 100) —— 与下方取值大致吻合。
-# 若换市场环境或换抽样，应重跑核对（factor_lab.sample_codes + factors_at 逐日算即可）。
-_FACTOR_RANGE = {"vol": (15.0, 110.0), "cum20": (-25.0, 35.0), "range_pos": (0.0, 100.0)}
+# 2026-09-17 重测（`factor_lab.sample_codes(160)` 市值分层抽样 × 600 日 = 86,797 个观测，
+# 脚本 `.claude/docs-tidy/factor_range_check.py`），实测 p2.5 / p97.5：
+#   vol 15.1/105.9 · cum5 −12.6/18.2 · cum20 −23.1/39.0 · cum60 −31.4/79.3 · cum120 −36.0/133.8
+#   观测数：cum60 81,197、cum120 71,650（窗口不足的日子按列缺样本）
+# 锚点取得比实测分位略宽，避免两端饱和后失去区分度。换抽样或换市场环境要重跑核对。
+_FACTOR_RANGE = {"vol": (15.0, 110.0), "cum5": (-15.0, 20.0), "cum20": (-25.0, 40.0),
+                 "cum60": (-35.0, 85.0), "cum120": (-40.0, 140.0), "range_pos": (0.0, 100.0)}
 
 
 def _factor_pct(f: str, v: float) -> float:
@@ -170,25 +175,45 @@ def _balanced_pick(codes: list[str], cap_total: int, cap_per_sub: int,
     return picked
 
 
-def _screen_rows(capital: float, focus: str = "") -> list[dict]:
-    """候选池行情 + 指标（按 focus 取数 + 负担得起优先 + 跨板块均衡采样）。
+def _stride(codes: list[str], n: int) -> list[str]:
+    """按等距抽样取 n 只（不足则全取）。跨层等距，避免只取每层市值头部。"""
+    if len(codes) <= n:
+        return list(codes)
+    step = len(codes) / n
+    return [codes[int(i * step)] for i in range(n)]
 
-    focus 为板块名（一级/细分/概念）时只在该板块内选；为空则全市场。
-    候选池来自 universe_store（全A ~4989 只 eligible），未回填时自动降级手工池。
+
+def _screen_rows(capital: float, focus: str = "") -> list[dict]:
+    """候选池行情 + 指标 + 分数（三层各留名额；指定板块时退化为板块内排序）。
+
+    硬门（先过滤掉不能买或不该买的）：1 手买得起、非 ST/停牌/北交所（`codes_of` 的 eligible
+    已排除后三者）、流通市值 ≥ `cap_layers.SMALL_YI`（30 亿，进出太薄的股不参与）。
+
+    全市场路径（focus 为空）按流通市值分三层，每层等距抽 `_LAYER_DEPTH` 只算形态与分数，
+    再用 `cap_layers.select` 给每层留 12 个名额（同申万二级最多 2 只）。**这一步替代了原先
+    「市值前 600 再板块均衡抽 36」**——那个 600 硬上限把 88% 的市场挡在门外，且分数不决定谁
+    进候选（设计第二节问题 1、2）。等距而不是取头部：只取每层市值头部等于在「大市值内部再排
+    一次」，分层就白做了。
+
+    focus 指定板块时不强制分层（板块内层分布本来就偏，银行全是大盘），按分数取前 36 只；
+    板块成分股超过 `_PA_RANK_MAX` 时退回板块内均衡采样。三条分支互斥，改一带必三条都测。
     """
     codes = universe_store.codes_of(focus)
     quotes = ds.tencent_quote(codes)  # 自动分批：全池 4989 只 ≈1.7s
     if not quotes:
         return []
-    # 先按 1 手成本可负担过滤（资金太小买不起任何 1 手则退回全池给参考）
+    # 硬门一：按 1 手成本可负担过滤（资金太小买不起任何 1 手则退回全池给参考）
     affordable = [c for c in codes if quotes.get(c, {}).get("lot_cost", 9e9) <= capital]
     pool = affordable or codes
+    # 硬门二：流通市值 ≥ 30 亿（`layer_of` 对 30 亿以下返回 None）。板块路径同样适用。
+    mcap_yi = {c: (quotes.get(c) or {}).get("float_mcap_yi") for c in pool}
+    pool = [c for c in pool if cap_layers.layer_of(mcap_yi.get(c))]
+    if not pool:
+        return []
     smap = universe_store.sectors_map(pool)  # 批量查板块，避免逐只 DB 往返
     subs_all = {s for subs in universe_store.taxonomy().values() for s in subs}
-    # 池子够小（关注某板块，主路径）-> 对全部成分股算形态再按分排序，形态真正参与筛选。
-    # 池子过大（全市场）-> 退回流通市值预筛 + 均衡采样：均衡采样按池内顺序取，
-    # 5000 只不预筛会取到各板块代码号最小的股而非龙头，扩池反成选垃圾。
     if focus and len(pool) <= _PA_RANK_MAX:
+        # 池子够小（关注某板块，主路径）-> 对全部成分股算形态再按分排序，形态真正参与筛选。
         metrics = _metrics_of(pool)
         dirs_full = factor_lab.directions()   # focus=某板块：成分股混市值，用全池方向
         scored = [(c, metrics[c], _pa_score(metrics[c], dirs_full)) for c in pool]
@@ -200,18 +225,40 @@ def _screen_rows(capital: float, focus: str = "") -> list[dict]:
         picked = [c for c, _, _ in chosen]
         mmap = {c: m for c, m, _ in chosen}
         score_map = {c: s for c, _, s in chosen}
-    else:
-        if not focus and len(pool) > _PRESCREEN:
-            pool = sorted(pool, key=lambda c: quotes.get(c, {}).get("float_mcap_yi", 0),
-                          reverse=True)[:_PRESCREEN]
-            smap = universe_store.sectors_map(pool)
-        cap_per_sub = 6 if focus and focus in subs_all else 3
+    elif focus:
+        # 大板块（成分股 >200）：分层名额不适用（板块内部层分布偏），退回板块内均衡采样。
+        cap_per_sub = 6 if focus in subs_all else 3
         picked = _balanced_pick(pool, _SCREEN_CAP_TOTAL, cap_per_sub, smap)
         mmap = _metrics_of(picked)
-        # 无 focus = 预筛后的**大盘池** → 用大盘 cohort 方向（range_pos 等在大盘可与全池反向，
-        # 见 PITFALLS#5b）；cohort 无数据自动回退全池。focus 但池>200 = 大板块成分股(混市值) → 全池。
-        dirs = factor_lab.scoring_directions("large") if not focus else factor_lab.directions()
-        score_map = {c: _pa_score(mmap[c], dirs) for c in picked}
+        score_map = {c: _pa_score(mmap[c], factor_lab.directions()) for c in picked}
+    else:
+        # 全市场：分三层、每层等距抽候选、按**该层**的因子方向打分、逐层给名额。
+        by_layer: dict[str, list[str]] = {l: [] for l in cap_layers.LAYERS}
+        for c in sorted(pool, key=lambda x: mcap_yi.get(x) or 0, reverse=True):
+            by_layer[cap_layers.layer_of(mcap_yi.get(c))].append(c)
+        cand = [c for l in cap_layers.LAYERS for c in _stride(by_layer[l], _LAYER_DEPTH)]
+        metrics = _metrics_of(cand)
+        per_layer = max(1, _SCREEN_CAP_TOTAL // len(cap_layers.LAYERS))
+        scored_rows = []
+        for l in cap_layers.LAYERS:
+            dirs = factor_lab.scoring_directions(f"layer_{l}")   # 层可用数据不足时自动回退全池
+            for c in cand:
+                if cap_layers.layer_of(mcap_yi.get(c)) != l:
+                    continue
+                s = _pa_score(metrics[c], dirs)
+                if s is None:
+                    continue
+                primary, sub = smap.get(c) or universe_store.sector_of(c)
+                scored_rows.append({"code": c, "mcap_yi": mcap_yi.get(c), "sub": sub,
+                                    "primary": primary, "score": s})
+        scored_rows.sort(key=lambda r: r["score"], reverse=True)
+        picked = cap_layers.select(scored_rows, per_layer=per_layer)
+        logger.info("全市场分层初筛：池 %d（分层 %s）-> 候选 %d -> 取 %d（每层 %d，层内同二级 ≤%d）",
+                    len(pool), cap_layers.layer_counts(
+                        [{"mcap_yi": v} for v in mcap_yi.values()]),
+                    len(cand), len(picked), per_layer, cap_layers.SUB_CAP)
+        mmap = {c: metrics[c] for c in picked}
+        score_map = {r["code"]: r["score"] for r in scored_rows}
     rows = []
     for c in picked:
         q, m = quotes.get(c, {}), mmap.get(c, _EMPTY_METRICS)

@@ -11,37 +11,102 @@ def ck(cond, msg):
 def bars(n=70, base=10.0):
     return [{"date": f"2026-01-{i+1:02d}", "open": base, "high": base * 1.02, "low": base * 0.98, "close": base + i * 0.01, "volume": 1} for i in range(n)]
 
+ELIG = ["300750", "600000", "000002", "603010", "300001"]
+
 def setup_fakes():
+    """底池/打分的外部依赖全换假数据：快照给流通市值（新浪单位是万元），方向固定为 +1。
+
+    快照里的 float_mcap 决定分层：300750 与 600000 是大盘、000002 是中盘、
+    603010 与 300001 是小盘 —— 三层都有货，才验得出「每层留名额」。
+    """
     pp._snap_cache["ts"] = 0.0
-    pp.review_store.latest = lambda: {"raw_theme": [{"code": "603010", "name": "万盛股份", "pct": 10.0}, {"code": "300001", "name": "特锐德", "pct": 9.9}]}
+    pp.review_store.latest = lambda: {"raw_theme": [{"code": "603010", "name": "万盛股份", "pct": 10.0},
+                                                   {"code": "300001", "name": "特锐德", "pct": 9.9}]}
     pp.ds.sina_all_stocks = lambda: [
-        {"code": "603010", "name": "万盛股份", "price": 12, "turnover": 20, "amount": 5e8, "pe_ttm": 30, "pb": 3},
-        {"code": "600000", "name": "浦发银行", "price": 8, "turnover": 0.5, "amount": 1e8, "pe_ttm": 5, "pb": 0.5},
-        {"code": "000002", "name": "万科A", "price": 7, "turnover": 3, "amount": 3e8, "pe_ttm": 8, "pb": 0.7},
-        {"code": "300750", "name": "宁德时代", "price": 200, "turnover": 6, "amount": 9e8, "pe_ttm": 25, "pb": 4}]
-    pp.universe_store.sector_ranking = lambda date="", kind="", limit=30: [{"sector": "电池", "avg_chg": 3.1, "leader_code": "300750", "leader_name": "宁德时代"}]
-    pp.universe_store.codes_of = lambda focus="", eligible_only=True: ["300750", "603010"] if focus == "电池" else ["603010", "600000", "000002", "300750"]
-    pp.universe_store.sector_of = lambda code: ("电池", "锂电") if code == "300750" else ("化工", "阻燃")
-    pp.screening._metrics_of = lambda codes: {c: {"vol": 30, "cum20": 2, "range_pos": 40, "net20": 1.0 if c == "300750" else -0.5} for c in codes}
-    pp.ds.tencent_quote = lambda codes, workers=8: {c: {"name": "N" + c, "price": 10.0, "pe_ttm": 10, "pb": 1, "turnover": 2, "lot_cost": 1000} for c in codes}
-    pp.ds.financial_summary = lambda code, periods=4: [{"period": "2026-06-30", "revenue_yoy": 12.0, "profit_yoy": 8.0}] if code != "600000" else [{"period": "2026-06-30", "revenue_yoy": -3.0, "profit_yoy": 1.0}]
+        {"code": "300750", "name": "宁德时代", "price": 200, "turnover": 6, "amount": 9e8,
+         "pe_ttm": 25, "pb": 4, "float_mcap": 12000 * 10000},
+        {"code": "600000", "name": "浦发银行", "price": 8, "turnover": 0.5, "amount": 1e8,
+         "pe_ttm": 5, "pb": 0.5, "float_mcap": 3000 * 10000},
+        {"code": "000002", "name": "万科A", "price": 7, "turnover": 3, "amount": 3e8,
+         "pe_ttm": 8, "pb": 0.7, "float_mcap": 700 * 10000},
+        {"code": "603010", "name": "万盛股份", "price": 12, "turnover": 20, "amount": 5e8,
+         "pe_ttm": 30, "pb": 3, "float_mcap": 60 * 10000},
+        {"code": "300001", "name": "特锐德", "price": 20, "turnover": 15, "amount": 4e8,
+         "pe_ttm": 40, "pb": 5, "float_mcap": 45 * 10000}]
+    pp.universe_store.codes_of = lambda focus="", eligible_only=True: (
+        ["300750", "603010"] if focus == "电池" else list(ELIG))
+    pp.universe_store.sectors_map = lambda codes: {c: ("一级", "二级" + c) for c in codes}
+    pp.universe_store.sector_ranking = lambda date="", kind="", limit=30: [
+        {"sector": "电池", "avg_chg": 3.1, "leader_code": "300750", "leader_name": "宁德时代"}]
+    pp.universe_store.sector_of = lambda code: ("化工", "阻燃") if code == "603010" else ("一级", "二级")
+    # 财报面板：除浦发银行外营收都是正增长（本地读，不逐只打网络）
+    pp.fundamentals_store.latest_map = lambda codes=None: {
+        c: {"period": "2026-06-30",
+            "revenue_yoy": -3.0 if c == "600000" else 12.0, "profit_yoy": 8.0}
+        for c in (codes if codes else ELIG)}
+    # 方向固定 +1：打分走真实 factors_at 与真实分位映射，只把方向钉住（不依赖线上 factors.db）
+    pp.factor_lab.cycle_directions = lambda pairs, cohort="layer_large": {
+        f: {"factor": f, "sign": 1, "basis": "test"} for f, _h in pairs}
+    pp.ds.tencent_quote = lambda codes, workers=8: {
+        c: {"name": "N" + c, "price": 10.0, "pe_ttm": 10, "pb": 1, "turnover": 2, "lot_cost": 1000}
+        for c in codes}
     pp.ds.sina_kline = lambda code, num=120, scale=240: bars()
+    pp.screening._kline_cache.clear()
 
-def test_short_pool_prefers_theme_and_turnover():
+def test_short_pool_theme_first_then_layered():
+    """短线：复盘题材股在前，其余名额来自分层因子选股。"""
     setup_fakes()
-    p = pp.short_pool(3)
-    ck(p[0] in ("603010", "300001") and len(p) <= 3, f"题材池优先: {p}")
-    ck("600000" not in p, "换手最低的不进短线池")
+    p = pp.short_pool(30)
+    ck(p[0] == "603010" and p[1] == "300001", f"题材池应排在最前: {p}")
+    ck(set(p) == set(ELIG), f"题材加分层选股应覆盖三层候选: {p}")
 
-def test_mid_pool_uses_sector_leaders_and_flow():
+def test_short_pool_respects_mcap_floor():
+    """30 亿以下不进候选（纪律门，与分数无关）。"""
     setup_fakes()
-    p = pp.mid_pool(3)
-    ck("300750" in p, f"板块龙头在中线池: {p}")
+    snap = pp.ds.sina_all_stocks()
+    snap.append({"code": "000001", "name": "平安银行", "price": 9, "turnover": 1, "amount": 1e8,
+                 "pe_ttm": 6, "pb": 0.6, "float_mcap": 20 * 10000})   # 20 亿：越界
+    pp.ds.sina_all_stocks = lambda: snap
+    p = pp.short_pool(30)
+    ck("000001" not in p, f"20 亿的股不该进候选: {p}")
+
+def test_mid_pool_sector_leader_first():
+    """中线：板块动量前列的龙头排在前面，后面接分层选股。"""
+    setup_fakes()
+    p = pp.mid_pool(30)
+    ck(p[0] == "300750", f"板块龙头应排最前: {p}")
+    ck("000002" in p, f"分层选股应补上中盘名额: {p}")
 
 def test_long_pool_filters_by_valuation_and_growth():
+    """长线筛选层：营收负增长剔除、估值缺失剔除，其余进分层打分。"""
     setup_fakes()
-    p = pp.long_pool(3)
-    ck("600000" not in p and "000002" in p, f"营收负增长被剔除、低估值双正保留: {p}")
+    p = pp.long_pool(30)
+    ck("600000" not in p, f"营收负增长应剔除: {p}")
+    ck("000002" in p and "603010" in p, f"双正且估值有效应保留: {p}")
+
+def test_long_pool_survives_financial_store_failure():
+    """财报面板读不出来时返回空池而不是抛异常（整条长线不拖垮其余周期）。"""
+    setup_fakes()
+    def boom(codes=None):
+        raise RuntimeError("db locked")
+    pp.fundamentals_store.latest_map = boom
+    p = pp.long_pool(30)
+    ck(p == [], f"面板不可用应退化为空池: {p}")
+
+def test_mid_pool_visits_ranked_sectors():
+    """中线取板块动量前 _SECTOR_N 名，每个取龙头加两只成员。"""
+    setup_fakes()
+    seen = {}
+    def ranking(date="", kind="", limit=30):
+        seen["limit"] = limit
+        return [{"sector": f"S{i}", "avg_chg": 1.0, "leader_code": f"L{i:02d}", "leader_name": f"l{i}"}
+                for i in range(1, 11)]
+    pp.universe_store.sector_ranking = ranking
+    pp.universe_store.codes_of = lambda focus="", eligible_only=True: (
+        list(ELIG) if not focus else [f"{focus}-1", f"{focus}-2"])
+    p = pp.mid_pool(30)
+    ck(seen.get("limit") == pp._SECTOR_N, f"应只取前 {pp._SECTOR_N} 个板块: {seen}")
+    ck("L01" in p and "L05" in p and "L06" not in p, f"只遍历前五名板块: {p}")
 
 def test_enrich_rows_and_levels():
     setup_fakes()
@@ -120,6 +185,9 @@ def setup_store():
     ps.DB_PATHS["public"] = os.path.join(tmp, "pub.db"); ps.DB_PATHS["watchlist"] = os.path.join(tmp, "wl.db")
     ps.init("public"); ps.init("watchlist")
     pp.LOCK_DIR = tmp
+    # 前向超额追踪也要落临时库：run_public 会记当日基准与名单，不重定向就会把测试夹具写进仓库 data/
+    pp.picks_track.DB_PATH = os.path.join(tmp, "track.db")
+    pp.picks_track.init()
     pp.news_store.is_trading_day = lambda d=None: True   # 零网络；valid_until 与 due_slot 都走这里
 
 def test_run_public_persists_calls():
@@ -284,9 +352,10 @@ def test_settle_staples_recent_expired():
        f"过期行也要被结果贴回，不能因为 expire() 先跑、current() 只看 open 而漏掉: {rows[0]}")
 
 if __name__ == "__main__":
-    for fn in (test_short_pool_prefers_theme_and_turnover, test_mid_pool_uses_sector_leaders_and_flow,
-               test_long_pool_filters_by_valuation_and_growth, test_enrich_rows_and_levels,
-               test_long_pool_survives_financial_errors, test_mid_pool_visits_all_ranked_sectors,
+    for fn in (test_short_pool_theme_first_then_layered, test_short_pool_respects_mcap_floor,
+               test_mid_pool_sector_leader_first, test_enrich_rows_and_levels,
+               test_long_pool_filters_by_valuation_and_growth,
+               test_long_pool_survives_financial_store_failure, test_mid_pool_visits_ranked_sectors,
                test_enrich_drops_codes_without_quote, test_snapshot_cached,
                test_snapshot_failure_not_cached, test_run_public_persists_calls,
                test_run_watchlist_uses_user_watchlist, test_run_watchlist_lock,

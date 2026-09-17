@@ -56,7 +56,7 @@ migrate 要在第一次登录前跑，否则登录会先建出空库，migrate �
 | `templates/login.html` | 登录页 |
 | `wsgi.py` | gunicorn 入口（不执行 `app.py` 的 `__main__`，不起任何调度线程） |
 | `scheduler.py` | web 外的定时任务进程：公共预热、复盘、三周期选股、每日清理；agent 自动跑默认关 |
-| `screening.py` / `ai_blocks.py` | 从 app.py 抽出的共享辅助（选股初筛 / AI 注入块），agent_loop 直接 import 它们，不 import app |
+| `screening.py` / `ai_blocks.py` | 从 app.py 抽出的共享辅助（选股初筛 / AI 注入块），agent_loop 直接 import 它们，不 import app。`_screen_rows` 全市场路径按市值三层各留 12 个名额（`cap_layers`），有 focus 时不强制分层 |
 
 ### 多用户
 
@@ -75,7 +75,9 @@ migrate 要在第一次登录前跑，否则登录会先建出空库，migrate �
 | `picks_levels.py` | K 线算候选价位（纯函数），模型只能从候选里挑，返回后 `snap` 校验 |
 | `picks_store.py` | 观点账本 `data/picks_public.db`（公共三周期）与 `data/users/<uid>/picks.db`（自选股）；修改链、改口规则强制、到期、结果贴回、两层记忆块 |
 | `llm_picks.py` | 两个提示词（三周期选股 / 自选股买卖点）+ 返回按条校验 |
-| `picks_pipeline.py` | 候选池（短线 = 复盘题材池 + 换手；中线 = 板块龙头 + 资金；长线 = 估值 + 财报）、运行、结算、文件锁、16:00 / 09:05 定时循环 |
+| `picks_pipeline.py` | 三周期候选池 + 运行 + 结算 + 文件锁 + 16:00 / 09:05 定时循环。候选池的分层框架见 `cap_layers.py`，每周期因子清单是 `CYCLE_FACTORS`（短线 cum5/cum20/区间位置，中线 cum20/cum60，长线 cum120/波动率，等权、方向按层取）。周期专属的筛选来源：短线补复盘题材池、中线补板块动量前列的龙头与成员、长线先过估值与财报双正（本地 `fundamentals_store`，不再逐只打网络） |
+| `picks_track.py` | 候选名单前向超额追踪 `data/picks_track.db`：每天记同层候选深度集（基准）与三周期名单，按 5 / 10 / 20 个交易日结算超额（对比同层基准中位数）。设计第七节第二层验收，不带 AI、不做回测假设。`python3 picks_track.py record\|settle\|status` |
+| `cap_layers.py` | 流通市值分层与名额（零依赖纯模块）：大盘 ≥500 亿 / 中盘 100 到 500 亿 / 小盘 30 到 100 亿，30 亿以下不纳入；`layer_of` / `select`（每层名额 + 申万二级上限，层内计数）。`factor_lab`、`screening`、`picks_pipeline` 共用同一套边界 |
 | `picks_routes.py` | `/api/picks/*` Blueprint（public / watchlist / chain / run / run_public / status） |
 
 ### 数据与池子
@@ -83,7 +85,7 @@ migrate 要在第一次登录前跑，否则登录会先建出空库，migrate �
 | 文件 | 职责 |
 |------|------|
 | `datasources.py` | 行情、指标、K 线、财报、新闻、研报、龙虎榜、解禁；`sina_all_stocks`（全 A 名单 + 快照）；`index_quotes`/`market_breadth`（大盘）；`global_markets`（外围数值）；`concept_tags`（东财板块） |
-| `universe_store.py` | 全市场池 `data/universe.db`：全 A 名单 + 板块归属（东财 slist 逐股回填）+ 板块日变化。`codes_of`/`sector_of`/`sectors_map`/`taxonomy`/`snapshot_daily`/`sector_ranking`/`backfill_sector_daily`（逐股日 K 补历史，`_agg_sector_payload` 与 live 共用口径）。名单刷新把本轮没再出现的代码标 `active=0`（退市下线；覆盖率不足九成时跳过，防分页抓取不全误伤半个池子）。另有 `valuation_daily`：交易日收盘后落一份全市场 PE/PB 快照（`valuation_snapshot`，保留 2 年，写入路径自动清理），给长线估值因子攒历史时点数据 |
+| `universe_store.py` | 全市场池 `data/universe.db`：全 A 名单 + 板块归属（东财 slist 逐股回填）+ 板块日变化。`codes_of`/`sector_of`/`sectors_map`/`taxonomy`/`snapshot_daily`/`sector_ranking`/`backfill_sector_daily`（逐股日 K 补历史，`_agg_sector_payload` 与 live 共用口径）。名单刷新把本轮没再出现的代码标 `active=0`（退市下线；覆盖率不足九成时跳过，防分页抓取不全误伤半个池子）。另有 `valuation_daily`：交易日收盘后落一份全市场 PE/PB 快照（`valuation_snapshot`，保留 2 年，写入路径自动清理），给长线估值因子攒历史时点数据。`codes_by_mcap`（全池按市值降序）与 `mcap_of`（代码到流通市值，**统一换算成亿元**，表里存的是新浪的万元）是分层与抽样的唯一入口 |
 | `universe.py` | 「精选龙头」fallback（10 一级 x 48 二级 x 170 只）。`universe_store` 未就绪时兜底 + `is_leader` 标记 |
 | `fundamentals_store.py` | 财务面板 `data/fundamentals.db`：把新浪财报的多期数据落库（`sync` 分批断点续传，`python3 fundamentals_store.py sync\|status`），给中长线攒基本面历史。主键 `(code, period)`，行数受报告期数约束，不需要 purge |
 | `moneyflow_store.py` | 资金流历史 `data/moneyflow.db`：`snapshot` 每交易日用东财 clist 落一份全市场当日主力净流入（约 56 页，持续积累的正路），`sync` 走 push2his 的 120 天历史种子（对突发敏感，低频用）。保留 2 年，写入路径自动清理 |
@@ -115,7 +117,7 @@ migrate 要在第一次登录前跑，否则登录会先建出空库，migrate �
 
 | 文件 | 职责 |
 |------|------|
-| `factor_lab.py` | 因子回测与失效监控（`data/factors.db`）：`backtest`（顺带产出 `excess_dist` 超额分位分布，判罪线唯一来源）+ `rank_of` + `summary`（IC / t 值）+ `direction(cohort=)` 动态定方向 + `ic_cohort` 表 + `backtest_large`（大盘 cohort IC）+ `scoring_directions(cohort)` + `rolling_ic`/`decay_alert`/`flip_rate` + `refresh_if_stale` + `backtest_stops`（止损网格）。注意 `codes_of()` 无 focus 按代码号排序不按市值（PITFALLS #5b） |
+| `factor_lab.py` | 因子回测与失效监控（`data/factors.db`）：`backtest`（顺带产出 `excess_dist` 超额分位分布，判罪线唯一来源；同时写 `layer_mid`/`layer_small` 的分层 IC）+ `rank_of` + `summary`（IC / t 值）+ `direction(cohort=)` 动态定方向 + `cycle_directions(pairs, cohort)`（按周期的因子与地平线取方向）+ `layer_report`（分层训练窗对留出窗，验收用）+ `ic_cohort` 表（层 cohort 与大盘层密采）+ `backtest_large`（大盘层 ≥500 亿密采，写 `layer_large`）+ `scoring_directions(cohort)` + `rolling_ic`/`decay_alert`/`flip_rate` + `refresh_if_stale` + `backtest_stops`（止损网格）。6 个因子全是日K确定性分量（vol/cum5/cum20/cum60/cum120/range_pos），缺失按列屏蔽。注意 `codes_of()` 无 focus 按代码号排序不按市值（PITFALLS #5b） |
 | `agent_store.py` | Agent 持久层（`agents.db`，站长目录）：`agents` / `runs`（原文 90 天、结论 365 天，原文截 20000 字符）/ `lessons`（闭集 10 类：9 类入场属性 + `bad_outcome` 事后结算）/ `pending`（限价挂单）/ `conditions`（止损）/ `claims`（时段原子占位）/ `equity` / `entries`（建仓留痕 + 冻结分位 `x20_pctile`）/ `journal`（情节记忆，append-only） |
 | `agent_loop.py` | 日循环：研判（`_market_block`）、选股、决策（可插拔 single / debate）、风控（确定性硬门）、挂单、复盘（确定性失败检测）。`sweep_orders`/`sweep_conditions`/`current_slot` |
 | `outcome.py` | 结果结算（纯函数）：`forward_returns`（自成交价，按 K 线根数数交易日）+ `bench_returns` + `excess`（扣 beta）。地平线引用 `factor_lab.HORIZONS` 不复制。只算不判罪 |
@@ -137,7 +139,7 @@ migrate 要在第一次登录前跑，否则登录会先建出空库，migrate �
 改判罪/分布跑 `test_excess_dist`；改 `agent_store`/`agent_loop`/`ai_blocks` 的记忆部分跑 `test_agent_memory`
 与 `test_excess_dist`；改板块聚合跑 `test_sector_backfill`；改 `fees`/`portfolio`/`paper_store` 跑同名测试；
 改复盘指标跑 `test_review_metrics`；改 `userctx`/`auth`/`ratelimit`/复盘锁/舰队路由跑同名测试；
-改 picks 五个模块跑 `test_picks_*` 与 `test_llm_picks`；改 `fundamentals_store` 跑 `test_fundamentals_store`；改 `moneyflow_store` 跑 `test_moneyflow_store`。
+改 picks 模块跑 `test_picks_*` 与 `test_llm_picks`；改分层边界或行业上限跑 `test_cap_layers`；改前向超额追踪跑 `test_picks_track`；改 `fundamentals_store` 跑 `test_fundamentals_store`；改 `moneyflow_store` 跑 `test_moneyflow_store`。
 
 ## 复盘模块（`/review`）
 
@@ -210,7 +212,8 @@ migrate 要在第一次登录前跑，否则登录会先建出空库，migrate �
   的门，门槛 250 个交易日；前端取 `/api/config` 的 `picks_horizons` 决定展示哪几列），账本与 AI 照常
   生成、数据不断档，攒够自动上线，见 `plan/2026-09-17-screening-factor-refactor-design.md`。
   公共短线候选池的题材串来自最近一期复盘（review store 的
-  `raw_theme`），复盘没生成时短线池退化为纯换手榜。到点记录落 `data/.picks-last.json`（跨进程、重启不丢），
+  `raw_theme`），复盘没生成时短线池只剩分层因子选股那一段（不再退化成纯换手榜：换手率没有历史分位，
+  已不参与选股）。到点记录落 `data/.picks-last.json`（跨进程、重启不丢），
   避免 scheduler 在 16:00 后重启把当天 full 槽再跑一轮。
 
 服务器现状（部署级事实，改了就改这里）：阿里云 ECS 别名 `aliyun_ecs`，Ubuntu 20.04 共用机（k3s、docker、
@@ -301,8 +304,12 @@ agent 交易与学习闭环的端到端全景见 `plan/2026-07-18-agent-logic-ma
   佣金都是 5 元，保本涨幅约 0.75%，且拆单成倍加佣金。AI 费率块据此警告「一次建仓、别拆」。
   用户画像 = 万 2.5 + 5 元最低；agent 画像维持「免最低」（用户决定，后果见 BACKLOG）。
 - 因子方向（`factor_lab.py`）：`_pa_score` 的打分方向与教训记不记全由 `direction()` 决定：近 60 日
-  `|t|>2` 用近期，否则全样本，都不显著则不参与打分（不猜）。无 focus 的全市场选股用大盘 cohort 方向
-  （`scoring_directions(cohort)`），agent 永远 focus 不受影响。`refresh_if_stale()` 启动时惰性重跑。
+  `|t|>2` 用近期，否则全样本，都不显著则不参与打分（不猜）。方向分池读：cohort 是市值层
+  （`layer_large`/`layer_mid`/`layer_small`，`backtest` 与 `backtest_large` 写进 `ic_cohort`），
+  某层无数据时整体回退全池、有数据但不显著则尊重 0。这个分层不是装饰：2026-09-17 实测波动率因子
+  在大盘层是 +1（高波动跑赢）、在中小盘是 −1，全池一个方向套三层必然在大盘押错。三周期的因子与
+  地平线在 `picks_pipeline.CYCLE_FACTORS`，`.claude/docs-tidy/factor_range_check.py` 复核分位锚点，
+  `layer_report()` 出验收数字（训练窗对留出窗）。`refresh_if_stale()` 启动时惰性重跑。
 - agent 三道门：非交易日，交易时段（`require_open`），时段桶原子占位（`claim_slot`）。时段桶 = 早盘 /
   尾盘，错过不补。
 - 盘中调度器（`app._agent_scheduler`）：守护线程每 5 分钟探一次 `run_all(require_open=True)`，长期挂机
@@ -374,7 +381,7 @@ curl -s -b cj.txt 127.0.0.1:5000/api/picks/public       # 三周期各 5 只
 ## 数据文件（全部 gitignore）
 
 公共 `data/`：`news.db` `universe.db` `factors.db` `templates.db` `auth.db` `usage.db` `review/`
-`picks_public.db` `ai_cache.json` `fundamentals.db` `moneyflow.db` `.em_last_call` `.picks-running-public` `.picks-last.json`。
+`picks_public.db` `picks_track.db` `ai_cache.json` `fundamentals.db` `moneyflow.db` `.em_last_call` `.picks-running-public` `.picks-last.json`。
 个人 `data/users/<uid>/`：`watchlist.json` `portfolio.json` `notes.db` `rules.db` `paper.db` `profiles.db`
 `agents.db` `picks.db` `.init.lock` `.picks-running`。舰队只读站长目录里的 `agents.db` / `paper.db` / `profiles.db`。
 旧布局（根目录 `watchlist.json`、`data/agents.db` 等）由 `deploy/migrate_to_multiuser.py <uid>` 复制进

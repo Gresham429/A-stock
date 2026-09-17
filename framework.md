@@ -53,6 +53,8 @@ flowchart TB
     PPL[picks_pipeline.py 候选池/运行/结算]
     PRT[picks_routes.py /api/picks]
     LLP[llm_picks.py 提示词与校验]
+    CAP[cap_layers.py 市值分层与名额]
+    PTR[picks_track.py 前向超额追踪]
   end
   subgraph DATA["① 数据源与池子"]
     DS[datasources.py 行情/K线/新闻/龙虎榜]
@@ -123,10 +125,10 @@ flowchart TB
 
 ![版面 vs Agent · 共享底座、不同用途](plan/diagrams/serving-vs-agent.svg)
 
-- **同源**：候选池 `_screen_rows`/`_pa_score`（vol·cum20·range_pos）+ 因子库 `factor_lab`（IC/方向/判罪线）+ 记忆教训库 `agent_store`。
+- **同源**：候选池 `_screen_rows`/`_pa_score` 与三周期候选池（都用 `cap_layers` 的分层边界与 `factor_lab` 的因子）+ 因子库 `factor_lab`（IC/分层方向/判罪线）+ 记忆教训库 `agent_store`。
 - **分叉**：1) **决策脑**——版面 `llm.*` 给建议、不下单；agent `deciders` 出可执行意向，经风控后挂单。
   2) **记忆读法**——版面读**全舰队汇总**（house-view/regime-view/全体教训）；agent 读**自己的**（account 隔离）+ 全舰队只读层。
-  3) **选股路径**——agent 永远带 focus（全池方向）；版面无 focus 全市场走大盘 cohort 方向。
+  3) **选股路径**——agent 永远带 focus（全池方向）；版面全市场路径按市值三层各留名额、方向按层取。
   4) **学习闭环**——只有 agent 真交易、真结算、再写回教训；版面是**消费者**、自己不学。
 
 ## 4. 关键设计取向（跨层的约定）

@@ -14,13 +14,16 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+import cap_layers
 import datasources as ds
+import factor_lab
 import fundamentals_store
 import llm_picks
 import moneyflow_store
 import news_store
 import picks_levels
 import picks_store
+import picks_track
 import profile_store
 import screening
 import store
@@ -31,14 +34,30 @@ from review import store as review_store
 logger = logging.getLogger(__name__)
 
 POOL_N = 30
-KLINE_N = 90
-LONG_PREFILTER = 120
+KLINE_N = 260           # 日K根数：长线 cum120 要 121 根，取 260 留余量；enrich 的候选价位同用这一份
+_LAYER_DEPTH = 40       # 每层进打分的候选深度（三层合计 120 只，三周期各拉一次日K）
+_THEME_N = 10           # 短线补的复盘题材股数量
+_SECTOR_N = 5           # 中线补的前列板块数量（每个取龙头加两只成员）
 _SNAP_TTL = 600
 _snap_cache: dict[str, Any] = {"ts": 0.0, "rows": []}
 
+CYCLE_FACTORS: dict[str, tuple[tuple[str, int], ...]] = {
+    # 周期 -> ((因子, 地平线), ...)。因子必须都在 `factor_lab.FACTORS` 里（有 IC 回测），
+    # 否则 `direction()` 恒为 0、白占权重。地平线按该周期持有期取：短线 5 日、中线 10 到 20 日、
+    # 长线 20 日。方向取**该层**的 cohort（`layer_large` 等），整层无数据时回退全池。
+    #
+    # 因子清单按 2026-09-17 的分层方向图定（`python3 -c "import factor_lab"` 可复现，
+    # 结论已写进设计文档第七节）：三层各自的显著因子不同，所以三层各取自己那套。
+    # 短线加 cum20 是因为 cum5 在大盘层（t 0.39）与中盘层（t 1.20）都不显著，
+    # 只留 cum5 会让这两层的分数全体中性、名单退化成层内市值前列；cum20 在 h=5 三层都显著。
+    "short": (("cum5", 5), ("cum20", 5), ("range_pos", 5)),
+    "mid": (("cum20", 10), ("cum60", 20)),
+    "long": (("cum120", 20), ("vol", 20)),
+}
+
 
 def _snapshot() -> list[dict[str, Any]]:
-    """全市场快照，带 TTL 缓存——short_pool/long_pool 各调一次，别各拉一遍全市场。
+    """全市场快照，带 TTL 缓存——三个周期的底池各调一次，别各拉一遍全市场。
 
     只缓存取数成功且非空的结果；失败或空结果直接返回空表、不写缓存，
     好让下一次调用立刻重试，不会把一次瞬时失败锁死成 10 分钟无候选池。
@@ -58,72 +77,207 @@ def _snapshot() -> list[dict[str, Any]]:
     return rows
 
 
-def short_pool(n: int = POOL_N) -> list[str]:
-    """短线：当天复盘的题材/涨停池优先，再补全市场换手率最高的。"""
-    out: list[str] = []
+def _pool_base() -> list[dict[str, Any]]:
+    """三周期共用的底池：eligible（非 ST / 非停牌 / 非北交所）+ 流通市值 ≥30 亿，按市值降序。
+
+    快照本身不区分 ST 与停牌，用 `codes_of()` 的 eligible 名单卡掉（PITFALLS：新浪快照里
+    停牌股价格是 0，只用快照会拿停牌股当候选）。层名由 `cap_layers` 给，与筛选/回测同一套边界。
+    """
+    elig = set(universe_store.codes_of() or [])
+    out: list[dict[str, Any]] = []
+    for s in _snapshot():
+        code = str(s.get("code") or "")
+        if code not in elig or not (s.get("price") or 0) > 0:
+            continue
+        mcap_yi = (s.get("float_mcap") or 0) / 10000.0     # 新浪 nmc 的单位是万元
+        layer = cap_layers.layer_of(mcap_yi)
+        if not layer:
+            continue
+        out.append({"code": code, "name": s.get("name") or code, "mcap_yi": mcap_yi,
+                    "layer": layer, "pe_ttm": s.get("pe_ttm"), "pb": s.get("pb"),
+                    "turnover": s.get("turnover"), "amount": s.get("amount")})
+    out.sort(key=lambda r: r["mcap_yi"], reverse=True)
+    return out
+
+
+def _stride_rows(rows: list[dict[str, Any]], n: int) -> list[dict[str, Any]]:
+    """层内等距抽样。只取每层市值头部等于在「大市值内部再排一次」，分层就白做了。"""
+    if len(rows) <= n:
+        return list(rows)
+    step = len(rows) / n
+    return [rows[int(i * step)] for i in range(n)]
+
+
+def _layered_candidates(base: list[dict[str, Any]], depth: int = _LAYER_DEPTH) -> list[dict[str, Any]]:
+    """每层等距抽 `depth` 只作为候选。`picks_track` 也用它当同层基准的样本。"""
+    out: list[dict[str, Any]] = []
+    for layer in cap_layers.LAYERS:
+        out += _stride_rows([r for r in base if r["layer"] == layer], depth)
+    return out
+
+
+def _closes(code: str) -> list[float]:
+    """日K收盘序列（进程内 TTL 缓存，与 enrich 的候选价位共用一次取数）。"""
+    return [float(b["close"]) for b in screening._safe_kline(code, KLINE_N) if b.get("close")]
+
+
+def _closes_many(codes: list[str], workers: int = 8) -> dict[str, list[float]]:
+    """并发拉一批日K收盘序列。
+
+    必须并发：单只新浪日K 约 1.4 秒，120 只串行要近三分钟，三个周期就是九分钟（实测过）。
+    用 `userctx.ctx_map` 而不是裸 `ex.map`：池线程要能读到当前用户（PITFALLS #19）。
+    """
+    if not codes:
+        return {}
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        return dict(zip(codes, userctx.ctx_map(ex, _closes, codes)))
+
+
+def _score_rows(rows: list[dict[str, Any]], cycle: str) -> list[str]:
+    """就地填 `score`：该周期因子的等权分位，方向取该层的 cohort。
+
+    等权而不是拟合权重：本项目自己的实证与量化文献一致，过度优化的权重样本外常打不过等权。
+    因子取不到值（窗口不足）就不参与这次打分，不算 0 分（缺失与「最差」是两回事）。
+    方向全不可信或全缺值时给中性 50 分，把判断交回给 AI，与 `_pa_score` 同一原则。
+    返回**整层都没有可信因子**的层名，让调用方记一条日志（那种层的名单等于按市值排，
+    要看得见，不能悄悄发生）。
+    """
+    pairs = CYCLE_FACTORS[cycle]
+    series = _closes_many([r["code"] for r in rows])
+    for r in rows:
+        closes = series.get(r["code"]) or []
+        r["factors"] = factor_lab.factors_at(closes) if len(closes) >= 21 else {}
+    neutral: list[str] = []
+    for layer in cap_layers.LAYERS:
+        dirs = factor_lab.cycle_directions(pairs, cohort=f"layer_{layer}")
+        if all(dirs.get(f, {}).get("sign", 0) == 0 for f, _h in pairs):
+            neutral.append(layer)
+        for r in rows:
+            if r["layer"] != layer:
+                continue
+            live = [(f, h) for f, h in pairs
+                    if dirs.get(f, {}).get("sign", 0) != 0 and r["factors"].get(f) is not None]
+            if not live:
+                r["score"] = 50.0
+                continue
+            per = 100.0 / len(live)
+            s = 0.0
+            for f, _h in live:
+                pct = screening._factor_pct(f, r["factors"][f])
+                s += per * (pct if dirs[f]["sign"] > 0 else 1.0 - pct)
+            r["score"] = round(s, 1)
+    return neutral
+
+
+def _layered_select(cycle: str, base: list[dict[str, Any]] | None = None,
+                    depth: int = _LAYER_DEPTH) -> list[str]:
+    """周期选股主干：分层 -> 等距抽候选 -> 周期因子打分 -> 每层名额（同申万二级 ≤2）。
+
+    设计第三到第六节的落地：分数**真的是分数在决定名单**（旧口径下全市场路径的分数不决定谁
+    入选），每层都留名额，行业上限防集中。
+    """
+    base = _pool_base() if base is None else base
+    if not base:
+        return []
+    cand = _layered_candidates(base, depth)
+    neutral = _score_rows(cand, cycle)
+    if neutral:
+        logger.warning("picks %s：%s 三层中的这些层没有可信因子，名单按层内市值序取",
+                       cycle, "/".join(neutral))
+    smap = universe_store.sectors_map([r["code"] for r in cand])
+    for r in cand:
+        r["sub"] = (smap.get(r["code"]) or ("", ""))[1]
+    cand.sort(key=lambda r: r["score"], reverse=True)
+    picked = cap_layers.select(cand, per_layer=cap_layers.PER_LAYER, sub_cap=cap_layers.SUB_CAP)
+    logger.info("picks %s 分层选股：底池 %d（分层 %s）-> 候选 %d -> 取 %d",
+                cycle, len(base), cap_layers.layer_counts(base), len(cand), len(picked))
+    return picked
+
+
+def _theme_codes(n: int = _THEME_N) -> list[str]:
+    """最近一期复盘的题材/涨停池代码。事件驱动、没有历史可回测，只做候选补充、不进打分。"""
     env = review_store.latest() or {}
+    out: list[str] = []
     for r in (env.get("raw_theme") or []):
-        c = str(r.get("code", ""))
-        if c and c not in out:
-            out.append(c)
-        if len(out) >= n:
-            return out[:n]
-    snap = [s for s in _snapshot() if s.get("turnover") and s.get("amount")]
-    snap.sort(key=lambda s: (float(s["turnover"]), float(s["amount"])), reverse=True)
-    for s in snap:
-        c = str(s.get("code", ""))
+        c = str(r.get("code") or "")
         if c and c not in out:
             out.append(c)
         if len(out) >= n:
             break
+    return out
+
+
+def _sector_codes(n_sectors: int = _SECTOR_N) -> list[str]:
+    """板块动量前列的龙头与成员。板块日线有 200 多个交易日历史，但还没进 `factor_lab` 回测，
+    所以只做候选补充；入 lab 见 `plan/BACKLOG.md`。板块数据不可用不该拖垮中线池。"""
+    try:
+        ranking = universe_store.sector_ranking(limit=n_sectors) or []
+    except Exception as e:  # noqa: BLE001
+        logger.warning("picks: 板块动量取数失败: %s", e)
+        return []
+    out: list[str] = []
+    for row in ranking[:n_sectors]:      # 数据层没守 limit 也不越过上限（历史上吃过这个亏）
+        lead = str(row.get("leader_code") or "")
+        if lead and lead not in out:
+            out.append(lead)
+        for c in (universe_store.codes_of(row.get("sector", "")) or [])[:2]:
+            if c not in out:
+                out.append(c)
+    return out
+
+
+def short_pool(n: int = POOL_N) -> list[str]:
+    """短线：复盘题材池（事件驱动）在前，分层因子选股（5 日涨幅、20 日区间位置）在后。
+
+    换手率与成交额相对水平需要历史分位（数据源只给当期），暂不进打分，见设计第五节。
+    """
+    out = _theme_codes()
+    for c in _layered_select("short"):
+        if c not in out:
+            out.append(c)
     return out[:n]
 
 
 def mid_pool(n: int = POOL_N) -> list[str]:
-    """中线：排名前列板块的龙头与成员，按主力 20 日净流入为正筛。"""
-    out: list[str] = []
-    for row in universe_store.sector_ranking(limit=10):
-        lead = str(row.get("leader_code") or "")
-        if lead and lead not in out:
-            out.append(lead)
-        for c in universe_store.codes_of(row.get("sector", ""))[:8]:
-            if c not in out:
-                out.append(c)
-    if not out:
-        return []
-    m = screening._metrics_of(out)
-    good = [c for c in out if (m.get(c) or {}).get("net20") is not None and m[c]["net20"] > 0]
-    rest = [c for c in out if c not in good]
-    return (good + rest)[:n]
+    """中线：板块动量前列的龙头与成员在前，分层因子选股（20 日涨幅、60 日涨幅）在后。
+
+    主力资金 net20 仍是展示列、不做门槛：历史只够 30 天，方向验不了（设计第五节）。
+    """
+    out = _sector_codes()
+    for c in _layered_select("mid"):
+        if c not in out:
+            out.append(c)
+    return out[:n]
 
 
-def _fin_ok(code: str) -> bool:
-    """营收、利润同比是否双正；单只财报失败按不合格处理，不拖垮整批并发取数。"""
+def _long_base() -> list[dict[str, Any]]:
+    """长线的筛选层：估值有效（PE、PB 同为正）且营收、利润同比双正。
+
+    财报走本地 `fundamentals_store`（覆盖率 99%，一次读全表），不逐只打网络：原先对 120 只
+    串行取财报要几十秒。面板里没有的代码按「无数据即不合格」处理（与逐只取数失败同口径）。
+    「估值低」这一步没有做硬门：估值只有当期快照、没有历史分位，横截面切一刀就是拍的阈值
+    （PITFALLS #1）。PE / PB 作为列喂给 AI，等 `valuation_daily` 攒够 250 个交易日再改历史分位门。
+    """
+    base = _pool_base()
     try:
-        fin = ds.financial_summary(code) or []
-    except Exception as e:  # noqa: BLE001 单只财报失败按不合格处理，不影响其余并发请求
-        logger.warning("picks: %s 财报失败: %s", code, e)
-        return False
-    if not fin:
-        return False
-    f0 = fin[0]
-    return (f0.get("revenue_yoy") or 0) > 0 and (f0.get("profit_yoy") or 0) > 0
+        fin = fundamentals_store.latest_map([r["code"] for r in base])
+    except Exception as e:  # noqa: BLE001 面板读不出来就退化为空池，不拖垮其余周期的选股
+        logger.warning("picks: 财报面板读取失败，长线本轮无候选: %s", e)
+        return []
+    out: list[dict[str, Any]] = []
+    for r in base:
+        f = fin.get(r["code"]) or {}
+        if (r.get("pe_ttm") or 0) <= 0 or (r.get("pb") or 0) <= 0:
+            continue
+        if (f.get("revenue_yoy") or 0) > 0 and (f.get("profit_yoy") or 0) > 0:
+            out.append(r)
+    logger.info("picks long 筛选：底池 %d -> 估值有效且财报双正 %d", len(base), len(out))
+    return out
 
 
 def long_pool(n: int = POOL_N) -> list[str]:
-    """长线：估值分位低（PE、PB 在快照里排前 LONG_PREFILTER）且营收、利润同比双正。
-
-    财报逐只请求是网络调用，串行 120 次太慢，用小并发池并行取。
-    """
-    snap = [s for s in _snapshot() if s.get("pe_ttm") and s["pe_ttm"] > 0 and s.get("pb") and s["pb"] > 0]
-    snap.sort(key=lambda s: (float(s["pe_ttm"]) * float(s["pb"])))
-    cands = snap[:LONG_PREFILTER]
-    if not cands:
-        return []
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        pairs = list(ex.map(lambda s: (s["code"], _fin_ok(s["code"])), cands))
-    out = [str(code) for code, ok in pairs if ok]
-    return out[:n]
+    """长线：先过估值与财报筛选（这层没有历史，只做筛选），再按长期动量与波动率分层选股。"""
+    return _layered_select("long", base=_long_base())[:n]
 
 
 def enrich(codes: list[str], short: bool = False) -> tuple[list[dict[str, Any]], dict[str, dict]]:
@@ -158,7 +312,8 @@ def enrich(codes: list[str], short: bool = False) -> tuple[list[dict[str, Any]],
                      "vol": m.get("vol"), "cum20": m.get("cum20"), "range_pos": m.get("range_pos"),
                      "net20": m.get("net20"), "turnover": q.get("turnover"), "lot_cost": q.get("lot_cost")})
         try:
-            levels[c] = picks_levels.candidate_levels(ds.sina_kline(c, KLINE_N), short=short)
+            # 候选价位与因子打分共用同一份日K（`_safe_kline` 进程内缓存），不重复打网络
+            levels[c] = picks_levels.candidate_levels(screening._safe_kline(c, KLINE_N), short=short)
         except Exception as e:  # noqa: BLE001 单只 K 线失败不拖垮整批
             logger.warning("picks: %s K线失败: %s", c, e)
             levels[c] = {"price": q.get("price"), "atr_pct": None, "levels": []}
@@ -267,6 +422,7 @@ def run_public(market_ctx: dict[str, Any] | None = None,
     try:
         total = 0
         errors: list[str] = []
+        pools: dict[str, list[str]] = {}
         try:
             settle("public", today)
         except Exception as e:  # noqa: BLE001 结算失败不影响选股
@@ -275,6 +431,7 @@ def run_public(market_ctx: dict[str, Any] | None = None,
         for h in horizons:
             try:
                 pool = {"short": short_pool, "mid": mid_pool, "long": long_pool}[h]()
+                pools[h] = pool
                 rows, levels = enrich(pool, short=(h == "short"))
                 memory = {r["code"]: picks_store.memory_block("public", r["code"], (levels.get(r["code"]) or {}).get("price"), today) for r in rows}
                 calls = llm_picks.horizon_picks(h, rows, levels, memory, market_ctx, capital)
@@ -284,6 +441,12 @@ def run_public(market_ctx: dict[str, Any] | None = None,
             except Exception as e:  # noqa: BLE001 单周期失败不拖累其余周期，已落库的行保留
                 logger.exception("picks: 周期 %s 失败", h)
                 errors.append(f"{h}: {e}")
+        # 第二层验收（设计第七节）：记当日基准与名单、结算到期行。失败不影响选股结果。
+        try:
+            picks_track.record(pools, today)
+            picks_track.settle(today)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("picks: 前向超额追踪失败（不影响选股）: %s", e)
         return {"run_id": run_id, "calls": total, "horizons": list(horizons), "error": "; ".join(errors) or None}
     finally:
         release_lock("public")

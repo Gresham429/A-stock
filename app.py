@@ -35,6 +35,7 @@ import agent_store
 import ai_cache
 import config
 import datasources as ds
+import cap_layers
 import factor_lab
 import fees
 import fundamentals_store
@@ -65,7 +66,7 @@ import picks_routes  # 选股与观点账本 Blueprint
 from screening import (  # noqa: E402,F401
     _safe_metrics, _safe_kline, _pa_score, _factor_pct, _balanced_pick,
     _screen_rows, _metrics_of, _FACTOR_RANGE, _EMPTY_METRICS,
-    _SCREEN_CAP_TOTAL, _PRESCREEN, VOL_FLOOR, VOL_CEIL, _PA_RANK_MAX,
+    _SCREEN_CAP_TOTAL, _LAYER_DEPTH, VOL_FLOOR, VOL_CEIL, _PA_RANK_MAX,
 )
 # AI 提示词注入块（2026-07-16 抽出 ai_blocks.py）。同样显式带回，路由调用点不改。
 from ai_blocks import (  # noqa: E402,F401
@@ -1210,6 +1211,10 @@ def api_factors():
     stale, lag = factor_lab.is_stale()
     return jsonify({"summary": factor_lab.summary(),
                     "directions": factor_lab.directions(),
+                    # 分层方向与分层验收（设计第七节第一层）：打分按层取方向，留出窗只看不选。
+                    "layer_directions": {f"layer_{l}": factor_lab.directions(cohort=f"layer_{l}")
+                                         for l in cap_layers.LAYERS},
+                    "layer_report": factor_lab.layer_report(),
                     "alerts": factor_lab.decay_alert(),
                     "history": factor_lab.direction_history(limit=20),
                     "flip_rate": factor_lab.flip_rate(),

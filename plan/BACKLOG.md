@@ -17,8 +17,6 @@
 
 ## 二、可直接做的收尾（修法明确，时间自定）
 
-- `ratelimit.allow_llm` 与 `record_ai_call` 非原子：并发下日预算可超出，上限是同时在飞的调用数
-  （2 worker x 8 线程不超过 15 次）。严格版把读和加放进同一事务，record 时返回是否超限。
 - 登录失败按 ip 键锁定：NAT 共享出口时朋友连错 5 次会把同 IP 的站长也锁 5 分钟（设计取舍，
   README-deploy 已写明）。
 - 大文件：`app.py`、`agent_loop.py`、`datasources.py`、`static/app.js` 超过 400 行目标
@@ -50,6 +48,8 @@
 - `llm.py` 的 `daily_recommendation` 与 `market_screen` 提示词里硬编码「本金约 1 万、偏好科技股」的画像
   文字（llm.py 约 296/510 行），与注入的 `_tier_block` 动态档位块可能互相矛盾。删掉硬编码或改成从画像
   取值会改变这两类 AI 输出，改前需用户认可。
+- 条件单补判被撮合拒绝时（典型是跌停封板卖不出）现在记 `cancelled`，止损保护就此消失；另一种语义是
+  放回 `live`、次日继续尝试。属交易语义选择，不是 bug，改前需用户定。
 
 ## 四、卡在外部条件
 

@@ -124,6 +124,8 @@ echo "=== systemd 服务 ==="
 for s in astock-web astock-scheduler; do
   printf '%-20s %s\\n' "$s" "$(systemctl is-active $s 2>/dev/null || echo 未安装)"
 done
+printf '%-20s %s\\n' "astock-news.timer" "$(systemctl is-active astock-news.timer 2>/dev/null || echo 未安装)"
+systemctl list-timers astock-news.timer --no-pager 2>/dev/null | head -2
 echo
 echo "=== 本机 5000 端口 ==="
 curl -fsS -m 5 http://127.0.0.1:5000/healthz 2>&1 | head -2 || echo "不通"

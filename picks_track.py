@@ -17,6 +17,7 @@ import logging
 import os
 import sqlite3
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date as date_cls
 from datetime import datetime, timedelta
 from typing import Any
@@ -66,10 +67,24 @@ def _ensure() -> None:
     init()
 
 
-def _close_of(code: str) -> float | None:
-    """当日收盘（盘中即最新价）。取不到返回 None，该只不进追踪。"""
-    bars = screening._safe_kline(code, 260)
-    for b in reversed(bars):
+def _bars_many(codes: list[str], workers: int = 8) -> dict[str, list[dict]]:
+    """并发拉一批日K（进程内 TTL 缓存与选股共用同一份）。
+
+    必须并发：单只新浪日K 约 1.4 秒，基准 120 只加名单串行要三分钟（三周期选股实测过同一坑）。
+    用 `userctx.ctx_map` 而不是裸 `ex.map`：池线程要能读到当前用户（PITFALLS #19）。
+    """
+    import picks_pipeline as pp      # 函数内 import：picks_pipeline 模块级 import 本模块，避循环
+
+    if not codes:
+        return {}
+    uniq = list(dict.fromkeys(codes))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        return dict(zip(uniq, userctx.ctx_map(ex, lambda c: screening._safe_kline(c, pp.KLINE_N), uniq)))
+
+
+def _last_close(bars: list[dict]) -> float | None:
+    """序列里最后一根的有效收盘（盘中即最新价）。取不到返回 None，该只不进追踪。"""
+    for b in reversed(bars or []):
         try:
             v = float(b.get("close") or 0)
         except (TypeError, ValueError):
@@ -98,15 +113,17 @@ def record(selected: dict[str, list[str]] | None = None, today: str = "") -> dic
     base = pp._pool_base()
     bench_rows = pp._layered_candidates(base) if base else []
     layer_of = {r["code"]: r["layer"] for r in base}
+    want = [r["code"] for r in bench_rows] + [c for codes in (selected or {}).values() for c in codes]
+    bars = _bars_many(want)
     now = datetime.now().isoformat(timespec="seconds")
     rows: list[tuple] = []
     for r in bench_rows:
-        close = _close_of(r["code"])
+        close = _last_close(bars.get(r["code"]) or [])
         if close:
             rows.append((day, BENCH_CYCLE, r["code"], r["layer"], 0, close, now))
     for cycle, codes in (selected or {}).items():
         for code in codes:
-            close = _close_of(code)
+            close = _last_close(bars.get(code) or [])
             if close:
                 rows.append((day, cycle, code, layer_of.get(code, ""), 1, close, now))
     if not rows:
@@ -155,9 +172,10 @@ def settle(today: str = "", cycle: str = "") -> dict[str, Any]:
     by_code: dict[str, list[dict]] = {}
     for r in todo:
         by_code.setdefault(r["code"], []).append(r)
+    series = _bars_many(list(by_code))
     filled: dict[tuple[str, str], dict[str, float]] = {}
     for code, items in by_code.items():
-        bars = screening._safe_kline(code, 260)
+        bars = series.get(code) or []
         dates = [str(b.get("date"))[:10] for b in bars]
         closes = [float(b.get("close") or 0) for b in bars]
         for it in items:

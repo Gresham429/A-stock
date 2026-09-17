@@ -43,6 +43,8 @@ printf '%s\n' \
 | `astock_deploy` | 写 | 服务器上跑 `deploy.sh`。幂等 |
 | `astock_adduser` | 写 | 建账号；密码写到你本机 `~/astock-credentials/<uid>.txt`（以 0600 创建，不经过默认 umask），**不返回到对话里**，发给对方后删掉该文件。服务器侧建号失败则不落文件、原样返回输出 |
 
+注：工具名与描述以 `astock_deploy_server.py` 的 `TOOLS` 为准，本表是摘要；`astock_check` 只查 `astock-web`、`astock-scheduler` 两个服务，服务器还有 `astock-news.service` + `astock-news.timer` 不在体检范围。
+
 ## 安全边界（这是重点）
 
 整个项目的起点是你担心安全，那这个 server 本身就不能是「给 Claude 一个

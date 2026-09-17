@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   L2 新闻库定时抓取（macOS launchd，内置到 Mac）。
-  仓库在外置盘 /Volumes/Elements 上 → 每次触发先判断盘/脚本在不在：
+  仓库在外置盘上 → 每次触发先判断盘/脚本在不在：
     在 → cd 进仓库跑 fetch_news.py；不在 → exit 0 静默跳过（不报错、不抓）。
+  本文件是模板：复制到 ~/Library/LaunchAgents/ 之前，先把下面的
+    <仓库路径> 换成你本机仓库的绝对路径，<你的用户名> 换成你的 macOS 用户名。
   触发时机（每次都会先做盘存在性检测）：
     · RunAtLoad   : 登录/加载时跑一次（开机后自动更新）
     · StartOnMount: 任何卷挂载时跑一次（插上外置盘即开始抓）
@@ -20,7 +22,7 @@
   <array>
     <string>/bin/bash</string>
     <string>-c</string>
-    <string>REPO=/Volumes/Elements/workspace/A-stock; [ -f "$REPO/fetch_news.py" ] &amp;&amp; cd "$REPO" &amp;&amp; /usr/bin/python3 fetch_news.py; exit 0</string>
+    <string>REPO=&lt;仓库路径&gt;; [ -f "$REPO/fetch_news.py" ] &amp;&amp; cd "$REPO" &amp;&amp; /usr/bin/python3 fetch_news.py; exit 0</string>
   </array>
 
   <key>RunAtLoad</key>
@@ -37,8 +39,8 @@
   </array>
 
   <key>StandardOutPath</key>
-  <string>/Users/gresham/Library/Logs/astock-news.log</string>
+  <string>/Users/&lt;你的用户名&gt;/Library/Logs/astock-news.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/gresham/Library/Logs/astock-news.log</string>
+  <string>/Users/&lt;你的用户名&gt;/Library/Logs/astock-news.log</string>
 </dict>
 </plist>

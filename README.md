@@ -159,10 +159,10 @@ python3 app.py
 
 **安装（一次性）**：
 ```bash
-# 1) 若路径与默认不同，先改 launchd/com.astock.news.plist 里的：
-#    - 仓库路径 REPO（plist 里的默认值是示例安装路径，改成你自己的安装路径）
-#    - python 路径（默认 /usr/bin/python3；用 which python3 确认）
-#    - 日志路径（默认 ~/Library/Logs/astock-news.log）
+# 1) 复制前先改 launchd/com.astock.news.plist 里的两个占位符：
+#    - <仓库路径>：你本机仓库的绝对路径（示例值不能直接用）
+#    - <你的用户名>：macOS 用户名（日志写 ~/Library/Logs/astock-news.log）
+#    另确认 python 路径（默认 /usr/bin/python3；用 which python3 确认）
 cp launchd/com.astock.news.plist ~/Library/LaunchAgents/   # 别加 sudo！否则 plist 归 root，重启后 launchd 可能拒载
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.astock.news.plist
 ```

@@ -1,0 +1,110 @@
+/* 主题与移动端适配（选股看板 / 复盘台 / 登录页共用一份）。
+ *
+ * 现在分两层：
+ *   1) 配色 token 定义在各页自己的 <style> 里（深色是底），本文件用
+ *      `html[data-theme="light"]` 覆盖成浅色。默认浅色，由 theme.js 在最前面写好
+ *      `data-theme`，不会先闪一下深色。除了 token，还有几处**硬编码的深色底**
+ *      （选中态与 AI 卡的金色渐变、弹层遮罩、骨架线）得单独翻过来，否则浅色下
+ *      会留下几块黑斑。
+ *   2) 手机上的适配：表格改成横向滚动而不是挤压/裁切，输入框字号 16px
+ *      （iOS 上小于 16px 聚焦会自动放大整页），抽屉铺满宽度，工具条换行。
+ * 项目约定：前端不引外部依赖、不加载 Google Fonts、图表纯内联 SVG。
+ */
+
+html{-webkit-text-size-adjust:100%}
+
+/* ── 浅色 ───────────────────────────────────────────────────────────── */
+html[data-theme="light"]{
+  --bg:#f4f6f8; --bg2:#ffffff; --panel:#ffffff; --panel2:#f8fafc;
+  --line:#e4e8ec; --line2:#cfd6dd;
+  --txt:#1d2430; --muted:#5a6675; --dim:#8b95a3;
+  --up:#d92b3f; --down:#0e9c6a; --flat:#78828f;
+  --gold:#a97310; --gold-dim:#d8b45f; --hot:#d92b3f; --cold:#0e9c6a;
+}
+html[data-theme="light"] body{
+  background:
+    radial-gradient(1200px 600px at 78% -8%, rgba(169,115,16,.07), transparent 60%),
+    radial-gradient(900px 500px at 0% 100%, rgba(14,156,106,.06), transparent 55%),
+    var(--bg);
+}
+/* 选中态与 AI 卡的金色渐变：深色下是「深棕底 + 金边」，浅色下换成淡金底 */
+html[data-theme="light"] .navswitch a.on,
+html[data-theme="light"] .btn.ai,
+html[data-theme="light"] .badge.ai{
+  background:linear-gradient(135deg,#fdf3dd,#f6e7c4);
+}
+html[data-theme="light"] .recPanel,
+html[data-theme="light"] .bigcard.ai{
+  background:linear-gradient(180deg,#fffaf0,var(--bg2));
+}
+html[data-theme="light"] .modalcard,
+html[data-theme="light"] .drawer,
+html[data-theme="light"] .tablecard,
+html[data-theme="light"] .bigcard,
+html[data-theme="light"] .mcard,
+html[data-theme="light"] .phasebar{
+  background:linear-gradient(180deg,var(--panel),var(--bg2));
+}
+html[data-theme="light"] .tablecard,
+html[data-theme="light"] .bigcard,
+html[data-theme="light"] .phasebar,
+html[data-theme="light"] .mcard{ box-shadow:0 12px 28px -26px rgba(15,23,42,.45) }
+html[data-theme="light"] .drawer{ box-shadow:-32px 0 64px -34px rgba(15,23,42,.4) }
+html[data-theme="light"] .scrim{ background:rgba(15,23,42,.28) }
+html[data-theme="light"] .modal{ background:rgba(15,23,42,.32) }
+/* 背景网格：深色下用浅线画在深底上，浅色下要更淡，否则像格子纸 */
+html[data-theme="light"] body::before{ opacity:.6; }
+
+/* 登录页的输入框是硬编码的深色底（.card 只在登录页用），浅色下要翻过来；
+   输入框文字色也一并给上，否则继承深色 token 会看不清 */
+html[data-theme="light"] .card input{ background:#fff; color:var(--txt) }
+/* 报错条用的是深色底上的浅红字，白底上要换成更深的红，不然看不清 */
+html[data-theme="light"] .err,
+html[data-theme="light"] .rf-bad{ color:#a3162a }
+/* 悬停提示气泡也是硬编码深色底 */
+html[data-theme="light"] #tip{
+  background:#fff; border-color:var(--line2); color:var(--txt);
+  box-shadow:0 10px 30px -14px rgba(15,23,42,.4);
+}
+
+/* 主题按钮：自带样式，登录页没有 .btn 也能长得一样；标签写「切到哪一边」 */
+.themebtn{
+  min-width:52px; cursor:pointer; font-family:var(--sans); font-size:12.5px;
+  background:var(--panel); border:1px solid var(--line2); color:var(--muted);
+  border-radius:8px; padding:9px 13px;
+}
+.themebtn:hover{ border-color:var(--gold-dim); color:var(--txt) }
+
+/* ── 手机（≤760px）──────────────────────────────────────────────────── */
+@media (max-width:760px){
+  .wrap{ padding:14px 12px 40px }
+  header{ flex-wrap:wrap; gap:10px; align-items:flex-start }
+  header .tools{ flex-wrap:wrap; gap:6px; width:100% }
+  header .brand{ width:100% }
+  .navswitch{ width:100%; justify-content:space-between }
+  .navswitch a{ flex:1; text-align:center }
+  /* 点得着的按钮：手机上手点最小 36px 高 */
+  .btn,.mini,.addbox button{ min-height:36px }
+  .chip{ font-size:11.5px }
+  /* 输入框字号必须 ≥16px：iOS Safari 在更小的字号上聚焦会把整页放大 */
+  input,select,textarea{ font-size:16px !important }
+  /* 输入框占满剩余宽度，按钮不许被挤成两行（第一版把「＋加入」压成了「＋加 / 入」） */
+  .addbox{ width:100% }
+  .addbox input{ width:auto; flex:1 1 auto; min-width:0 }
+  .addbox button{ flex:0 0 auto; white-space:nowrap }
+  /* 宽表格改成横向滚动，而不是把列挤成竖排或直接裁掉（原先 .tablecard 是 overflow:hidden） */
+  .tablecard,.picksWl,.lotwrap,.chartwrap,.wavewrap{ overflow-x:auto; -webkit-overflow-scrolling:touch }
+  table{ display:block; width:100%; max-width:100%; overflow-x:auto; white-space:nowrap }
+  th,td{ white-space:nowrap }
+  /* 抽屉与弹层铺满，底部留出安全区（刘海屏横条不挡内容） */
+  .drawer{ width:100vw; border-left:0 }
+  .dbody{ padding:16px 14px calc(36px + env(safe-area-inset-bottom)) }
+  .modal{ padding:12px }
+  .modalcard{ padding:18px 15px; border-radius:12px }
+  /* 栅格一律单列 */
+  .picksCols,.alertGrid,.mgrid,.sec-split,.ai-slot{ grid-template-columns:1fr }
+  .ai-slot{ min-width:0 }
+  .phase-steps{ flex-wrap:wrap }
+  h1{ font-size:19px }
+  .t{ font-size:15px }
+}

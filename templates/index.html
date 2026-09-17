@@ -3,6 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f4f6f8">
+<script>/* 主题要在样式生效前定好，否则会先闪一下深色 */
+try{document.documentElement.setAttribute("data-theme",localStorage.getItem("astock-theme")||"light")}catch(e){document.documentElement.setAttribute("data-theme","light")}</script>
+
 <title>观察台 · A-SHARE WATCHDESK</title>
 <style>
   :root{
@@ -435,6 +439,9 @@
   .stance-buy{color:var(--up,#e33)} .stance-sell{color:var(--down,#3a3)} .stance-watch,.stance-avoid{opacity:.8}
   @media (max-width:900px){.picksCols{grid-template-columns:1fr}}
 </style>
+<link rel="stylesheet" href="/static/theme.css">
+<script src="/static/theme.js" defer></script>
+
 </head>
 <body>
 <div class="wrap">
@@ -462,6 +469,7 @@
       </div>
       <button class="btn on" id="autobtn" onclick="toggleAuto()">自动刷新 开·30s</button>
       <button class="btn" onclick="load();loadPortfolio()">↻ 刷新</button>
+      <button class="btn themebtn" id="themeBtn" type="button">深色</button>
     </div>
   </header>
 

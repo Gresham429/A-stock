@@ -3,6 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f4f6f8">
+<script>/* 主题要在样式生效前定好，否则会先闪一下深色 */
+try{document.documentElement.setAttribute("data-theme",localStorage.getItem("astock-theme")||"light")}catch(e){document.documentElement.setAttribute("data-theme","light")}</script>
+
 <title>登录 · A-SHARE WATCHDESK</title>
 <style>
   /* 配色沿用 index.html 的 token，登录页和看板是同一套视觉 */
@@ -47,9 +51,14 @@
   .foot{margin-top:22px;padding-top:16px;border-top:1px solid var(--line);
     font-size:11px;color:var(--dim);line-height:1.7}
 </style>
+<link rel="stylesheet" href="/static/theme.css">
+<script src="/static/theme.js" defer></script>
+
 </head>
 <body>
   <div class="card">
+    <button class="btn themebtn" id="themeBtn" type="button"
+            style="position:absolute;top:14px;right:14px">深色</button>
     <div class="brand"><span class="dot"></span>观察台</div>
     <div class="sub">A-Share Watchdesk</div>
 

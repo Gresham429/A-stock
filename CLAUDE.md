@@ -54,6 +54,7 @@ migrate 要在第一次登录前跑，否则登录会先建出空库，migrate �
 |------|------|
 | `app.py` | Flask 路由与应用内调度（本地 `python3 app.py` 时起盘中调度器、复盘调度、公共池预热） |
 | `templates/index.html` + `static/app.js` | 选股看板，路由 `/` |
+| `static/theme.css` + `static/theme.js` | 三个页面共用的浅色主题与移动端适配（默认浅色，右上角可切深色）；项目约定见「约定」节 |
 | `templates/review.html` + `static/review.js` + `review/` | 复盘模块，路由 `/review` |
 | `templates/login.html` | 登录页 |
 | `wsgi.py` | gunicorn 入口（不执行 `app.py` 的 `__main__`，不起任何调度线程） |
@@ -306,6 +307,15 @@ nginx、java 同机），站长账号 `<站长账号>`。systemd 单元 `astock-
 数据的代码路径进 `userctx.as_fleet()`；跨进程要共享的状态落文件锁（fcntl 排他锁或 O_EXCL 存在性锁），
 不放进程内字典。新增 store 先决定归个人库还是公共库。
 
+主题与移动端（2026-09-17 子项目 D）：**默认浅色**，`static/theme.css` + `static/theme.js` 三个页面共用
+（选股看板 / 复盘台 / 登录页）。配色 token 仍定义在各页自己的 `<style>` 里（深色是底），
+`html[data-theme="light"]` 覆盖成浅色；`data-theme` 由 `<head>` 里一行内联脚本在样式生效前写好，
+不会闪一下深色，切换记在 localStorage。**加新样式时别硬编码颜色**：变量换不掉硬编码值，
+浅色下会留下黑斑（首版就漏了登录页输入框、悬停气泡、报错条三处，靠截图才发现）。
+手机上（≤760px）表格改横向滚动而不是挤压裁切、输入框字号 16px（iOS 聚焦不放大）、
+抽屉铺满、工具条换行、栅格单列。改了样式要**真的渲染出来看**：本地复制一份带 data/ 的副本、
+把 `app.run` 的端口改成 5001 起起来，用 Playwright（本机已装）按 390×844 与 1440×900 各截一张。
+
 项目文档、代码注释、commit message 不出现装饰符号（用户 2026-08-25 规则）：不用箭头、对勾、感叹号
 类 emoji，用文字。存量文档已在 2026-09-17 清完，之后新写的内容照此。运行时输出字符串按同一口径。
 
@@ -364,7 +374,7 @@ agent 交易与学习闭环的端到端全景见 `plan/2026-07-18-agent-logic-ma
 ```bash
 python3 tools/status.py                  # 跑全部离线测试并打印路由数、大文件、plan 状态
 python3 -c "import ast,glob; [ast.parse(open(f).read()) for f in glob.glob('*.py')+glob.glob('review/*.py')+glob.glob('tests/*.py')+glob.glob('deploy/*.py')+glob.glob('tools/*.py')]"
-node --check static/app.js && node --check static/review.js
+node --check static/app.js && node --check static/review.js && node --check static/theme.js
 perl -e 'alarm 90; exec @ARGV' -- env NO_PROXY='*' python3 -c "import app, wsgi, scheduler"   # 零网络
 
 # 改决策提示词或数据面后，必须实跑一个 debate 档（single 跑通不等于 debate 跑通，辩论是 token 预算最短板）：

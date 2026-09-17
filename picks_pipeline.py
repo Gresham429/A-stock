@@ -15,7 +15,9 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 import datasources as ds
+import fundamentals_store
 import llm_picks
+import moneyflow_store
 import news_store
 import picks_levels
 import picks_store
@@ -313,6 +315,34 @@ def run_watchlist(market_ctx: dict[str, Any] | None = None, capital: float | Non
         return {"run_id": run_id, "calls": 0, "error": str(e)}
     finally:
         release_lock("watchlist", lock_path)
+
+
+HORIZON_GATE_DAYS = 250   # 中长线上线所需的历史交易日数（约一年）
+
+
+def visible_horizons() -> list[str]:
+    """面板上允许展示的周期（用户 2026-09-17：中长线在攒够历史前先 mask，够了自动上线）。
+
+    短线一直在线。中线要资金流历史（它的规则核心是 20 日净流入，原先只有 30 天、验不了），
+    长线要估值快照加财务面板覆盖率。判据全是「数据攒了多少」而不是日期，所以到点了自动出现。
+    注意：这只是**展示**门，账本照常记录各周期，数据不会因为不展示而断档。
+    """
+    out = ["short"]
+    try:
+        if moneyflow_store.days() >= HORIZON_GATE_DAYS:
+            out.append("mid")
+    except Exception as e:  # noqa: BLE001 数据不可用时按未就绪处理
+        logger.debug("资金流历史读取失败: %s", e)
+    try:
+        val_days = universe_store.valuation_days()
+        fin = fundamentals_store.status()
+        pool = max(1, len(universe_store.codes_of() or []))
+        cover = (fin.get("codes") or 0) / pool
+        if val_days >= HORIZON_GATE_DAYS and cover >= 0.8:
+            out.append("long")
+    except Exception as e:  # noqa: BLE001
+        logger.debug("长线就绪判定失败: %s", e)
+    return out
 
 
 def due_slot(now: dt.datetime, last: dict[str, str]) -> str:

@@ -39,6 +39,7 @@ import factor_lab
 import fees
 import fundamentals_store
 import llm
+import moneyflow_store
 import news_store
 import notes_store
 import paper_store
@@ -57,6 +58,7 @@ import websearch
 import auth        # 登录闸门：默认全关，白名单极短
 import ratelimit   # 按人限流 + AI 日预算：保护 DeepSeek 余额
 import userctx     # 当前用户上下文 + 个人数据目录解析
+import picks_pipeline
 import picks_routes  # 选股与观点账本 Blueprint
 # 选股与形态初筛（2026-07-16 抽出 screening.py）。显式带回名字，路由调用点不用改；
 # `app._pa_score` / `app._FACTOR_RANGE` 等仍可达（测试与 agent 依赖）。
@@ -279,7 +281,10 @@ def api_config():
                     "model": config.DEEPSEEK_MODEL if config.llm_enabled() else None,
                     "news_augment": True,
                     "web_search": config.bocha_enabled(),
-                    "taxonomy": universe_store.taxonomy()})
+                    "taxonomy": universe_store.taxonomy(),
+                    # 中长线在攒够历史前先 mask（用户 2026-09-17），前端按这个列表决定展示哪几列。
+                    # 判据在 picks_pipeline.visible_horizons，数据攒够自动上线，不用改前端。
+                    "picks_horizons": picks_pipeline.visible_horizons()})
 
 
 @app.route("/api/websearch/status")
@@ -1500,6 +1505,8 @@ def _universe_boot() -> None:
         userctx.Thread(target=_valuation_snapshot_loop, daemon=True).start()
         # 财务面板循环：每周把全市场财报刷一遍（落 fundamentals.db），同样是为了攒基本面历史。
         userctx.Thread(target=_fundamentals_sync_loop, daemon=True).start()
+        # 资金流快照循环：交易日收盘后落一份全市场当日主力净流入（clist 约 56 页），也是攒历史。
+        userctx.Thread(target=_moneyflow_snapshot_loop, daemon=True).start()
         # 这里不起 agent 调度器（上面的 _agent_tick / _agent_scheduler）。原因：gunicorn
         # 起多个 worker 时，每个 worker 都会各起一份调度器，同一个 agent 会被并发决策、
         # 重复下单、重复写教训——正确性问题不是性能问题，所以必须单实例。scheduler.py
@@ -1547,6 +1554,26 @@ def _fundamentals_sync_loop(interval_sec: int = 6 * 3600) -> None:
                 fundamentals_store.sync()
         except Exception as e:  # noqa: BLE001 同步失败不影响其它功能，下个心跳再试
             logger.warning("财务面板同步心跳异常（下次继续）: %s", e)
+        time.sleep(interval_sec)
+
+
+def _moneyflow_snapshot_loop(interval_sec: int = 1800) -> None:
+    """交易日收盘后落一次全市场主力净流入快照（clist 分页，约一分钟）。守护线程，幂等。
+
+    与估值快照同一个时刻门（`universe_store.VALUATION_AT`）。它和 `moneyflow_store.sync`
+    不是一回事：sync 是低频的历史种子（东财 daykline，端点对突发敏感），这里每天几十次请求，
+    是持续积累的正路。
+    """
+    while True:
+        try:
+            now = datetime.now(ZoneInfo("Asia/Shanghai"))
+            d = now.strftime("%Y-%m-%d")
+            if (news_store.is_trading_day(now.date())
+                    and (now.hour, now.minute) >= universe_store.VALUATION_AT
+                    and not moneyflow_store.has(d)):
+                moneyflow_store.snapshot(d)
+        except Exception as e:  # noqa: BLE001 快照失败不影响其它功能，下个心跳再试
+            logger.warning("资金流快照心跳异常（下次继续）: %s", e)
         time.sleep(interval_sec)
 
 

@@ -43,6 +43,7 @@ let recSeq=0, detailSeq=0, mktSeq=0, secSeq=0, agSeq=0;
 let SEC_KIND='sw1';
 let SEC_DAYS=60, SEC_CUR='';   // 板块走势窗口(交易日；9999=全部) / 当前查看的板块(用于切窗口重取)
 let TAXO=null;   // 板块两级分类（/api/config 下发）
+let PICKS_HZ=['short','mid','long'];   // 面板允许展示的周期（/api/config 下发；中长线攒够历史才上线）
 let WAVE=null, WAVE_PERIOD='day', WAVE_CTX=null, KL_CTX=null, waveTimer=null;   // 行情多周期数据 / 当前周期 / 折线hover几何 / 蜡烛hover几何 / 分时自动刷新定时器
 let FOLIO_ADV={};   // 持仓「何时卖」建议缓存 code->{html}|{loading:true}，跨自动刷新保留
 let NEWS_FILTER={sector:'',kind:'',code:''}, lastNewsRefresh=0;   // 新闻筛选 / 看盘惰性刷新节流
@@ -583,6 +584,7 @@ async function loadConfig(){
     const j=await (await fetch('/api/config')).json();
     LLM=j.llm_enabled; MODEL=j.model||''; WEB=j.web_search;
     TAXO=j.taxonomy||null; populateFocus();
+    if(Array.isArray(j.picks_horizons)&&j.picks_horizons.length) PICKS_HZ=j.picks_horizons;
     document.querySelectorAll('.ai-only').forEach(el=>el.style.display=LLM?'':'none');
     const chip=document.getElementById('aichip');
     chip.textContent=LLM?`🤖 ${MODEL} · 📰新闻${WEB?' · 🌐联网':''}`:'🤖 未配置';
@@ -1566,11 +1568,13 @@ async function loadPicks(){
     const [pub, wl] = await Promise.all([fetch('/api/picks/public').then(r=>r.json()), fetch('/api/picks/watchlist').then(r=>r.json())]);
     if(gen!==picksSeq) return;
     document.getElementById('picksGen').textContent = pub.generated_at ? `生成于 ${pub.generated_at}` : '尚未生成';
-    document.getElementById('picksCols').innerHTML = ['short','mid','long'].map(h=>{
+    document.getElementById('picksCols').innerHTML = PICKS_HZ.map(h=>{
       const rows = (pub.calls||[]).filter(r=>r.horizon===h);
       return `<div class="picksCol"><h4>${esc(HZ_CN[h])}</h4>${rows.length ? rows.map(pickCard).join('') : '<div class="tag">暂无</div>'}</div>`;
-    }).join('');
-    document.getElementById('picksWlRows').innerHTML = (wl.calls||[]).map(r=>`<tr onclick="showChain('${esc(r.code)}','watchlist')">
+    }).join('') + (PICKS_HZ.length<3
+      ? `<div class="picksCol" style="opacity:.65"><h4>中线 / 长线</h4><div class="tag">正在攒历史数据（估值快照、财务面板、资金流），攒够一年的样本后自动上线。当前只展示短线。</div></div>`
+      : '');
+    document.getElementById('picksWlRows').innerHTML = (wl.calls||[]).filter(r=>PICKS_HZ.includes(r.horizon)).map(r=>`<tr onclick="showChain('${esc(r.code)}','watchlist')">
       <td>${esc(r.name)}<br><span class="tag">${esc(r.code)}</span></td><td>${esc(HZ_CN[r.horizon]||r.horizon)}</td>
       <td class="stance-${esc(r.stance)}">${esc(STANCE_CN[r.stance]||'')}</td><td>${esc(fmtRange(r.entry_lo,r.entry_hi))}</td><td>${esc(fmtRange(r.exit_lo,r.exit_hi))}</td>
       <td>${esc(r.stop??'-')}</td><td>${esc(r.valid_until||'-')}</td><td>${esc(DEC_CN[r.decision]||'')}${TRG_CN[r.trigger]?'（'+esc(TRG_CN[r.trigger])+'）':''}</td><td>${esc(fmtOutcome(r))}</td></tr>`).join('')

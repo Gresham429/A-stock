@@ -34,6 +34,7 @@
 | [2026-07-13-all-sector-screening-and-market-overview](2026-07-13-all-sector-screening-and-market-overview.md) | 两级选股 + 大盘研判条的最初设计；候选池部分已被全市场池取代 |
 | [2026-07-18-prescreen-coverage-analysis](2026-07-18-prescreen-coverage-analysis.md) | 分析记录：mcap 预筛的覆盖偏差，以及 cohort-aware 方向落地后的对比结果 |
 | [2026-09-16-picks-ledger-design](2026-09-16-picks-ledger-design.md) | 三周期选股 + 自选股买卖点 + 观点账本（改口只在触发事件时、两层记忆块） |
+| [2026-09-17-screening-factor-refactor-design](2026-09-17-screening-factor-refactor-design.md) | 选股与因子重构：三周期各一套、候选池按市值分三层、两层验收、中长线攒够数据后自动上线 |
 
 ### AI 知识、缓存与溯源
 

@@ -181,9 +181,28 @@ def test_load_all_watchlists_union():
     ck(userctx.get_uid() == "", "结束应无用户")
 
 
+def test_agent_watch_waits_for_fleet_owner():
+    """全新安装「先起 app、后 adduser」也要能在站长出现后补启盘中调度器。
+
+    修前 app.__main__ 只在启动瞬间判一次 `fleet_uid()`：为空就只打一行 warning，
+    盘中调度器永远不启动，要重启 app 才恢复（那段时间 agent 静默不跑）。
+    """
+    calls: list = []
+    seq = ["", "", "owner"]
+    orig_fleet, orig_sched = web.userctx.fleet_uid, web._agent_scheduler
+    try:
+        web.userctx.fleet_uid = lambda: seq.pop(0) if seq else "owner"
+        web._agent_scheduler = lambda: calls.append(web.userctx.get_uid())
+        web._agent_watch(poll_sec=0, max_polls=5)
+    finally:
+        web.userctx.fleet_uid = orig_fleet
+        web._agent_scheduler = orig_sched
+    ck(calls == ["owner"], f"应在站长出现后、于站长上下文里启动调度器: {calls}")
+
+
 if __name__ == "__main__":
     for fn in (test_setup_users, test_views_read_fleet_db, test_views_empty_when_no_fleet,
                test_agents_routes_permissions, test_run_all_pool_carries_fleet_uid,
-               test_load_all_watchlists_union):
+               test_load_all_watchlists_union, test_agent_watch_waits_for_fleet_owner):
         fn()   # 有顺序依赖（先建用户），不按字母序
     print(f"OK — test_fleet_routes 全过（{_n} 断言）")

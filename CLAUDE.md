@@ -186,8 +186,8 @@ migrate 要在第一次登录前跑，否则登录会先建出空库，migrate �
   O_EXCL 存在性锁（超 30 分钟视为陈旧可覆盖；复盘拿不到锁拒绝生成，选股拿不到锁放行）；
   选股到点记录 `data/.picks-last.json`（原子写）记「当天这个槽跑过了吗」。进程内字典（`_review_job`、
   `_user_inited`、ratelimit 的分钟窗与最小间隔）每个 worker 一份，只做「本进程视角」。
-- 本地开发：`python3 app.py` 在站长上下文起盘中调度器（启动瞬间能解析到站长才起，全新安装先起 app 再
-  adduser 需要重启才恢复），不要同时再跑 `scheduler.py`。
+- 本地开发：`python3 app.py` 在站长上下文起盘中调度器；启动瞬间解析不到站长时由 `_agent_watch`
+  每 60 秒等一次，建号后自动补启（不必重启）。不要同时再跑 `scheduler.py`。
   `ASTOCK_ENV=production` 时 `app.py` 拒绝直接启动。
 - 对 conda 硬偏好的例外：服务器 systemd 单元用 `/opt/astock/.venv`（Miniconda 建的 3.10 环境放在这个
   路径；无人值守的 nologin 账号下比 conda activate 少坑）；本地仍 conda。用户可否决。

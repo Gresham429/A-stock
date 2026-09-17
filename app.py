@@ -1454,6 +1454,24 @@ def _agent_scheduler() -> None:
             logger.warning("agent 调度心跳异常（下次继续）：%s", e)
 
 
+def _agent_watch(poll_sec: int = 60, max_polls: int = 24 * 60) -> None:
+    """等舰队站长解析出来再起盘中调度器（全新安装：先起 app、后 adduser 时用）。
+
+    启动瞬间 `fleet_uid()` 为空不能一走了之：`userctx.fleet_uid()` 每 60 秒惰性重查一次
+    最早管理员，这里跟着等，否则盘中调度器要等下次重启才恢复，那段时间 agent 静默不跑。
+    站长出现后本线程就变成调度器线程（`_agent_scheduler` 是死循环）。
+    """
+    for _ in range(max_polls):
+        if userctx.fleet_uid():
+            logger.info("舰队站长已就绪，启动 agent 盘中调度器")
+            with userctx.as_fleet():
+                _agent_scheduler()
+            return
+        time.sleep(poll_sec)
+    logger.warning("等待 %d 秒仍未见舰队站长，agent 盘中调度器不自动启动",
+                   max_polls * poll_sec)
+
+
 def _universe_boot() -> None:
     """启动时后台预热：名单刷新 + 板块回填续跑 + 当日统计。不阻塞启动。"""
     try:
@@ -1562,8 +1580,11 @@ if __name__ == "__main__":
         with userctx.as_fleet():
             userctx.Thread(target=_agent_scheduler, daemon=True).start()
     else:
-        logger.warning("尚未设置舰队站长，agent 不会自动跑。先建管理员："
+        logger.warning("尚未设置舰队站长，agent 暂不自动跑。先建管理员："
                        "python3 astockctl.py adduser <你> --admin，或设 ASTOCK_FLEET_OWNER")
+        # 建号后 resolver 最多 60 秒解析出站长：起个监督线程等着补启调度器，
+        # 否则全新安装（先起 app、后 adduser）要重启一次才会自动跑。
+        userctx.Thread(target=_agent_watch, daemon=True).start()
     logger.warning("开发模式：仅监听 127.0.0.1，公共定时任务（复盘/回填）已在本进程内跑；"
                    "服务器上请另跑 scheduler.py")
     logger.info("A股观察台启动 -> http://127.0.0.1:5000")

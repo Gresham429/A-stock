@@ -31,9 +31,6 @@
   `notes_store` / `astockctl` / `scheduler`。
 - 运行时输出里还有装饰符号（`tests/test_review_metrics.py` 的通过提示、前端芯片文案）；文档已清完，
   代码按同一口径改时顺手处理。
-- 本地 `python3 app.py` 的盘中 agent 调度器只在启动瞬间能解析到站长时启动（app.py `__main__`），全新安装
-  「先起 app、再 adduser」会没有盘中调度器，重启才恢复。修法：站长 resolver 解出后补启，或启动后按
-  60 秒节奏重试到有站长为止。
 - `universe_store.refresh_roster` 只增不改：退市股票残留全 A 名单与池子。修法：按新浪 `hs_a` 名单对本地
   名单做下线标记/清理（因子回测的历史样本不受影响，只影响实时名单）。
 

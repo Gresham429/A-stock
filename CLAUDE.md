@@ -179,8 +179,9 @@ migrate 要在第一次登录前跑，否则登录会先建出空库，migrate �
   + tailscale serve 终止 TLS。跨进程状态只靠文件锁：东财节流
   `data/.em_last_call` 与用户首次建库 `data/users/<uid>/.init.lock` 用 fcntl 排他锁（不可用时回退进程内行为）；
   复盘 `data/review/.running-<date>` 与选股 `data/.picks-running-public`、`data/users/<uid>/.picks-running` 用
-  O_EXCL 存在性锁（超 30 分钟视为陈旧可覆盖；复盘拿不到锁拒绝生成，选股拿不到锁放行）。进程内字典（`_review_job`、`_user_inited`、
-  ratelimit 的分钟窗与最小间隔、picks 的 `_last`）每个 worker 一份，只做「本进程视角」。
+  O_EXCL 存在性锁（超 30 分钟视为陈旧可覆盖；复盘拿不到锁拒绝生成，选股拿不到锁放行）；
+  选股到点记录 `data/.picks-last.json`（原子写）记「当天这个槽跑过了吗」。进程内字典（`_review_job`、
+  `_user_inited`、ratelimit 的分钟窗与最小间隔）每个 worker 一份，只做「本进程视角」。
 - 本地开发：`python3 app.py` 在站长上下文起盘中调度器（启动瞬间能解析到站长才起，全新安装先起 app 再
   adduser 需要重启才恢复），不要同时再跑 `scheduler.py`。
   `ASTOCK_ENV=production` 时 `app.py` 拒绝直接启动。
@@ -193,7 +194,8 @@ migrate 要在第一次登录前跑，否则登录会先建出空库，migrate �
   本人），09:05 只让公共池跑短线；自选股不分早晚，两个时刻都是同一份覆盖全部周期的完整提示词。手动
   `/api/picks/run` 走 ai 门、计入个人日额度；`/api/picks/run_public` 管理员可点、记 `fleet`。改口规则在
   `picks_store._enforce` 里强制，不留后门。公共短线候选池的题材串来自最近一期复盘（review store 的
-  `raw_theme`），复盘没生成时短线池退化为纯换手榜。
+  `raw_theme`），复盘没生成时短线池退化为纯换手榜。到点记录落 `data/.picks-last.json`（跨进程、重启不丢），
+  避免 scheduler 在 16:00 后重启把当天 full 槽再跑一轮。
 
 服务器现状（部署级事实，改了就改这里）：阿里云 ECS 别名 `aliyun_ecs`，Ubuntu 20.04 共用机（k3s、docker、
 nginx、java 同机），站长账号 `<站长账号>`。systemd 单元 `astock-web`、`astock-scheduler`、`astock-news.timer`
@@ -355,7 +357,7 @@ curl -s -b cj.txt 127.0.0.1:5000/api/picks/public       # 三周期各 5 只
 ## 数据文件（全部 gitignore）
 
 公共 `data/`：`news.db` `universe.db` `factors.db` `templates.db` `auth.db` `usage.db` `review/`
-`picks_public.db` `ai_cache.json` `.em_last_call` `.picks-running-public`。
+`picks_public.db` `ai_cache.json` `.em_last_call` `.picks-running-public` `.picks-last.json`。
 个人 `data/users/<uid>/`：`watchlist.json` `portfolio.json` `notes.db` `rules.db` `paper.db` `profiles.db`
 `agents.db` `picks.db` `.init.lock` `.picks-running`。舰队只读站长目录里的 `agents.db` / `paper.db` / `profiles.db`。
 旧布局（根目录 `watchlist.json`、`data/agents.db` 等）由 `deploy/migrate_to_multiuser.py <uid>` 复制进

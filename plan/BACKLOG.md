@@ -24,8 +24,6 @@
 - `run_all` 里某 agent 撞预算后其余 agent 仍逐个尝试（有界空转）。用共享 Event 让后续直接 skipped。
 - 登录失败按 ip 键锁定：NAT 共享出口时朋友连错 5 次会把同 IP 的站长也锁 5 分钟（设计取舍，
   README-deploy 已写明）。
-- `picks_pipeline` 的到点记录 `_last` 只在进程内存：`scheduler.py` 在 16:00 后重启会把当天 full 槽当成
-  没跑过再触发一轮。修法：落 `data/.picks-last.json`。
 - `deploy/mcp` 的 `astock_check` 只查 web 与 scheduler 两个单元，没覆盖 `astock-news.timer`。
 - 大文件：`app.py`、`agent_loop.py`、`datasources.py`、`static/app.js` 超过 400 行目标
   （行数见 `python3 tools/status.py`）。可先把 `datasources` 的 `_em_*` 五个函数挪 `em_throttle.py`，

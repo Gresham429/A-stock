@@ -207,7 +207,30 @@ def test_loop_isolates_user_failure():
     slot = pp.tick(lambda: ["a", "b"], None)
     ck(slot == "full", f"到点应跑 full: {slot}")
     ck(done == ["b"], f"a 失败不拖累 b，b 应正常跑到: {done}")
-    ck(pp._last["full"] == pp._today(), "桶一旦开始就标记今天已处理（按上海时区，不用进程本地时区）")
+    ck(pp._load_last().get("full") == pp._today(),
+       "桶一旦开始就标记今天已处理（落盘，按上海时区，不用进程本地时区）")
+
+def test_slot_record_survives_restart():
+    """到点记录必须落盘：scheduler 在 16:00 后重启不能把当天 full 槽再跑一轮。
+
+    修前 `_last` 是进程内字典，而 `deploy/push.sh` 每次更新都会重启 scheduler：
+    只要重启发生在 16:00 之后，当天就会再跑一轮全量（公共 3 次 DeepSeek，
+    加每个账号一次自选股），观点账本也被二次改写。
+    """
+    import importlib
+    importlib.reload(pp)     # 前面的用例把 due_slot 换成了 lambda，先取回真函数
+    setup_store()
+    pp._save_last({"full": "2026-09-16"})
+    restarted = pp._load_last()      # 新进程只能看到文件
+    ck(restarted == {"full": "2026-09-16"}, f"记录应能读回: {restarted}")
+    ck(pp.due_slot(dt.datetime(2026, 9, 16, 16, 5), restarted) == "",
+       "重启后不该把已跑过的 full 槽当成没跑过")
+    pp._save_last({"morning": "2026-09-16"})
+    ck(pp.due_slot(dt.datetime(2026, 9, 16, 16, 5), pp._load_last()) == "full",
+       "早盘跑过不挡当天 16:00 的全量")
+    with open(pp._last_path(), "w", encoding="utf-8") as fh:
+        fh.write("{不是 json")
+    ck(pp._load_last() == {}, "损坏的记录按未跑过处理，不能抛异常")
 
 def test_tick_survives_public_failure():
     setup_store()
@@ -269,7 +292,8 @@ if __name__ == "__main__":
                test_run_watchlist_uses_user_watchlist, test_run_watchlist_lock,
                test_run_public_llm_failure_keeps_ledger,
                test_lock_and_due, test_run_public_isolates_horizon_failure,
-               test_loop_isolates_user_failure, test_tick_survives_public_failure,
+               test_loop_isolates_user_failure, test_slot_record_survives_restart,
+               test_tick_survives_public_failure,
                test_tick_market_ctx_under_fleet, test_settle_staples_recent_expired):
         fn()
     print(f"OK — test_picks_pipeline 全过（{N[0]} 断言）")

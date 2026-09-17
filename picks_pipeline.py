@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
 import os
 import time
@@ -166,7 +167,6 @@ LOCK_DIR = userctx.DATA_DIR
 LOCK_STALE_SEC = 1800
 FULL_AT = (16, 0)
 MORNING_AT = (9, 5)
-_last: dict[str, str] = {}
 
 
 def _today() -> str:
@@ -328,21 +328,62 @@ def due_slot(now: dt.datetime, last: dict[str, str]) -> str:
     return ""
 
 
+def _last_path() -> str:
+    return os.path.join(LOCK_DIR, ".picks-last.json")
+
+
+def _load_last() -> dict[str, str]:
+    """读「当天这个槽跑过了吗」的跨进程记录，形如 {"full": "2026-09-17"}。
+
+    放文件而不是进程内字典：`deploy/push.sh`、手动重启、崩溃重拉都会重启 scheduler，
+    16:00 之后重启会把当天 full 槽当成没跑过，再跑一轮公共三周期（3 次 DeepSeek）
+    加每个账号一次自选股。文件缺失或损坏时当作没有记录（跑，与旧行为一致），
+    只记日志，不因为读不到状态就跳过当天的活。
+    """
+    try:
+        with open(_last_path(), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        logger.warning("picks: 到点记录读取失败，按未跑过处理: %s", e)
+        return {}
+    if not isinstance(data, dict):
+        logger.warning("picks: 到点记录格式不对，按未跑过处理")
+        return {}
+    return {str(k): str(v) for k, v in data.items()}
+
+
+def _save_last(last: dict[str, str]) -> None:
+    """原子写（同目录临时文件加 os.replace），避免别的进程读到写了一半的 JSON。"""
+    tmp = f"{_last_path()}.tmp.{os.getpid()}"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(last, fh, ensure_ascii=False)
+        os.replace(tmp, _last_path())
+    except OSError as e:
+        logger.warning("picks: 到点记录写入失败（重启后可能重跑一轮）: %s", e)
+
+
 def tick(uids_fn: Callable[[], list[str]],
         market_ctx_fn: Callable[[], dict[str, Any] | None] | None = None) -> str:
     """单次到点判定与执行，供 `loop_forever` 每 60 秒调用一次；返回实际跑的 slot（或 ""）。
 
-    到点即把 `_last[slot]` 标记为今天已处理——仓库「错过不补」的约定，桶一旦开始就
-    算数，不因为账号内部失败而当天重跑。公共三周期失败也不能让整个 tick 提前退出：
+    到点即把该槽记进 `data/.picks-last.json`（跨进程，重启不丢）——仓库「错过不补」的
+    约定，桶一旦开始就算数，不因为账号内部失败而当天重跑。公共三周期失败也不能让整个
+    tick 提前退出：
     `run_public` 包一层 try/except，失败只记日志，随后仍照跑每个账号的自选股。
     随后每个账号的自选股运行各自 try/except：一个账号出错（无论是 `run_watchlist`
     本身还是它调用的取数）只记日志、跳到下一个账号，不拖累其余账号那一桶。
     """
     now = dt.datetime.now(ZoneInfo("Asia/Shanghai"))
-    slot = due_slot(now, _last)
+    last = _load_last()
+    slot = due_slot(now, last)
     if not slot:
         return ""
-    _last[slot] = _today()
+    # 先落盘再跑：桶一旦开始就算数，跑挂了也不当天重来（错过不补）
+    last[slot] = _today()
+    _save_last(last)
     mctx = None
     if market_ctx_fn:
         try:

@@ -921,7 +921,10 @@ def run_day(agent_id: int, focus: str = "", dry_run: bool = False,
         agent_store.log_run(agent_id, today, _ph("决策"), f"失败: {e}", ok=False)
         if claimed:   # 跑失败则释放占位，下次开 app 可重试
             agent_store.release_slot(agent_id, today, slot)
-        return {"ok": False, "msg": f"决策失败: {e}", "slot": slot}
+        # 预算类失败是「整批都会失败」：标出来让 run_all 短路其余 agent，
+        # 不然它们还要各取一遍行情、算结构，到决策那一步才被同一道门拒。
+        budget = isinstance(e, llm.LLMError) and getattr(e, "kind", "") == "budget"
+        return {"ok": False, "budget": budget, "msg": f"决策失败: {e}", "slot": slot}
     agent_store.log_run(agent_id, today, _ph("决策"),
                         f"{ag.get('decider')} → {len(intents)} 条意向", detail=raw,
                         ms=int((time.time() - t0) * 1000))
@@ -1027,13 +1030,28 @@ def run_all(dry_run: bool = False, blocks: str = "", force: bool = False,
                      "swept": len(fired)}]
         logger.info("当前时段桶：%s", slot)
 
+    # 预算撞墙是整批性的：一个 agent 撞到上限，后面的 agent 不必再各跑一遍数据面
+    # （不花钱，但白打一遍新浪/腾讯、刷一屏日志）。共享事件由第一个撞墙的 agent 置位。
+    budget_out = threading.Event()
+
     def one(ag: dict[str, Any]) -> dict[str, Any]:
+        if budget_out.is_set():
+            return {"ok": True, "agent": ag["name"], "skipped": "AI 预算已用完，本轮跳过"}
         try:
-            return run_day(ag["id"], dry_run=dry_run, blocks=blocks, force=force,
-                           slot=slot or "手动")
+            r = run_day(ag["id"], dry_run=dry_run, blocks=blocks, force=force,
+                        slot=slot or "手动")
         except Exception as e:  # noqa: BLE001 单个 agent 崩了不该拖垮整批
+            if isinstance(e, llm.LLMError) and getattr(e, "kind", "") == "budget":
+                budget_out.set()
+                logger.warning("agent %s 撞 AI 预算上限，本轮其余 agent 直接跳过：%s",
+                               ag["name"], e)
+                return {"ok": False, "budget": True, "agent": ag["name"], "msg": str(e)}
             logger.exception("agent %s 日循环失败", ag["name"])
             return {"ok": False, "agent": ag["name"], "msg": str(e)}
+        if r.get("budget"):
+            budget_out.set()
+            logger.warning("agent %s 撞 AI 预算上限，本轮其余 agent 直接跳过", ag["name"])
+        return r
 
     from concurrent.futures import ThreadPoolExecutor
     t0 = time.time()

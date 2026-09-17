@@ -175,7 +175,8 @@ migrate 要在第一次登录前跑，否则登录会先建出空库，migrate �
   `picks_routes` 的 run_public、ai_blocks 的 `_lesson_block`/`_stock_house_view`/`_regime_view`。站长 =
   `ASTOCK_FLEET_OWNER`，否则最早创建的管理员（停用不换人；建号后最多 60 秒生效）。
 - 计费点在真实 LLM 调用：`llm._chat` 发请求前 `ratelimit.allow_llm(uid)`（门故障也拒绝），成功后
-  `record_ai_call`；缓存命中、失败、超时不计。舰队调用记 `fleet`、无用户记 `system`，都只受全站预算
+  `record_ai_call`；缓存命中、失败、超时不计。预算类拒绝抛 `llm.LLMError(kind="budget")`，
+  `run_all` 收到后短路本轮其余 agent（不白跑数据面）。舰队调用记 `fleet`、无用户记 `system`，都只受全站预算
   `ASTOCK_AI_GLOBAL_DAY`（默认 150，要把舰队一天 40 多次算进去）；个人预算 `ASTOCK_AI_PER_USER_DAY`
   默认 40。`before_request` 的 `check()` 对 ai 路径只做门（频率、6 秒最小间隔、预算是否已满）。新增会调
   LLM 的路由不需要登记，计费自动生效。ai_cache 键带 uid（`macro`/`profile` 两类公开资料例外）。

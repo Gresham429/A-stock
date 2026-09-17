@@ -139,6 +139,37 @@ def test_fill_price_is_limit_not_optimistic():
         "买单成交价未锁定在 limit_price")
 
 
+def test_run_all_stops_after_budget_exhausted():
+    """撞预算后其余 agent 直接跳过，不再逐个白跑一遍数据面。
+
+    修前 `run_day` 把预算错误吞成「决策失败: ...」，`run_all` 无从分辨，20 个 agent 会各取
+    一遍行情、算一遍结构，到决策那一步才被同一道门拒（不花钱，但白打数据源、刷一屏日志）。
+    现在 `run_day` 返回 budget 标记，`run_all` 用共享事件短路后续 agent。
+    """
+    agent_store.DB_PATH = os.path.join(tempfile.mkdtemp(), "agents.db")
+    agent_store.init()
+    ids = [agent_store.create_agent(f"b{i}", account_id=-900 - i, profile_id=-1) for i in range(3)]
+    ran = []
+    orig = (agent_loop.run_day, agent_loop.current_slot, agent_loop._market_open,
+            agent_loop.news_store.is_trading_day)
+    try:
+        agent_loop.news_store.is_trading_day = lambda d=None: True
+        agent_loop._market_open = lambda: True
+        agent_loop.current_slot = lambda: "早盘"
+
+        def fake_run_day(aid, **kw):
+            ran.append(aid)
+            return {"ok": False, "budget": True, "msg": "决策失败: 已用完", "slot": "早盘"}
+
+        agent_loop.run_day = fake_run_day
+        out = agent_loop.run_all(workers=1, force=True)
+    finally:
+        (agent_loop.run_day, agent_loop.current_slot, agent_loop._market_open,
+         agent_loop.news_store.is_trading_day) = orig
+    assert ran == [ids[0]], f"只该跑第一个 agent: {ran}"
+    assert len(out) == 3 and all(o.get("skipped") for o in out[1:]), f"其余应标 skipped: {out}"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

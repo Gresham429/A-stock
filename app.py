@@ -1494,6 +1494,9 @@ def _universe_boot() -> None:
         r = factor_lab.refresh_if_stale()
         if r.get("skipped"):
             logger.info("因子 IC: %s", r["skipped"])
+        # 估值快照循环：交易日收盘后落一份全市场 PE/PB 历史，幂等。它自己的异常在循环内兜住，
+        # 不影响这里的预热。历史只能从今天开始攒，攒够才谈得上验证长线估值规则（BACKLOG 子项目 E）。
+        userctx.Thread(target=_valuation_snapshot_loop, daemon=True).start()
         # 这里不起 agent 调度器（上面的 _agent_tick / _agent_scheduler）。原因：gunicorn
         # 起多个 worker 时，每个 worker 都会各起一份调度器，同一个 agent 会被并发决策、
         # 重复下单、重复写教训——正确性问题不是性能问题，所以必须单实例。scheduler.py
@@ -1501,6 +1504,25 @@ def _universe_boot() -> None:
         # 站长上下文里单独起它（开着 app 就每桶自动跑）；服务器上只由站长手动触发。
     except (OSError, ValueError, sqlite3.Error) as e:
         logger.warning("全市场池预热失败（不影响其余功能）: %s", e)
+
+
+def _valuation_snapshot_loop(interval_sec: int = 1800) -> None:
+    """交易日收盘后落一次全市场 PE/PB 快照（幂等，当天落过就跳过）。守护线程，绝不退出。
+
+    为什么单独一条循环：它是按日一次的公共数据，与选股、复盘、舰队都无关，独立心跳最省心，
+    也不受那些模块的开关影响。服务器上 `scheduler.py` 复用 `_universe_boot`，故同样会起它。
+    """
+    while True:
+        try:
+            now = datetime.now(ZoneInfo("Asia/Shanghai"))
+            d = now.strftime("%Y-%m-%d")
+            if (news_store.is_trading_day(now.date())
+                    and (now.hour, now.minute) >= universe_store.VALUATION_AT
+                    and not universe_store.valuation_has(d)):
+                universe_store.valuation_snapshot(d)
+        except Exception as e:  # noqa: BLE001 快照失败不影响其它功能，下个心跳再试
+            logger.warning("估值快照心跳异常（下次继续）: %s", e)
+        time.sleep(interval_sec)
 
 
 # ── 复盘自动化：应用内每日调度（本地部署零配置——开着 app 即自动出复盘，无需 cron/launchd）──

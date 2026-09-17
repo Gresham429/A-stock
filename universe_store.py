@@ -47,6 +47,8 @@ _SUB_SCAN = 4          # 细分只在前 N 个标签里找（再往后是概念/
 _HEARTBEAT_STALE = 120  # 回填心跳超过该秒数视为进程已死、锁可抢占
 SECTOR_KEEP_DAYS = 365  # 板块日统计滚动保留天数（977 板块 ≈ 24 万行/年 ≈ 82MB，不清则无限涨）
 ROSTER_COVER_MIN = 0.9  # 名单刷新覆盖率低于该比例视为抓取不全，不做退市下线（防误伤半个池子）
+VALUATION_KEEP_DAYS = 730  # 估值快照保留 2 年（约 5000 只 × 250 交易日 ≈ 125 万行/年）
+VALUATION_AT = (15, 5)     # 交易日收盘后落快照的时刻（上海时区）
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS stocks(
@@ -83,6 +85,14 @@ CREATE TABLE IF NOT EXISTS sector_daily(
   PRIMARY KEY (date, sector)
 );
 CREATE INDEX IF NOT EXISTS idx_sd_date ON sector_daily(date);
+-- 全市场 PE/PB 日快照：行情接口只给「此刻」的估值，不落盘就永远没有历史时点数据，
+-- 长线「低估值是否跑赢」这类规则只能靠拍（见 BACKLOG 子项目 E）。保留 2 年。
+CREATE TABLE IF NOT EXISTS valuation_daily(
+  date TEXT NOT NULL, code TEXT NOT NULL,
+  pe_ttm REAL, pb REAL, price REAL, float_mcap REAL,
+  PRIMARY KEY (date, code)
+);
+CREATE INDEX IF NOT EXISTS idx_val_code ON valuation_daily(code, date);
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
 """
 
@@ -413,6 +423,11 @@ def status() -> dict[str, Any]:
             at = c.execute("SELECT v FROM meta WHERE k='roster_at'").fetchone()
             days = c.execute("SELECT COUNT(DISTINCT date) n FROM sector_daily").fetchone()["n"]
             sd_rows = c.execute("SELECT COUNT(*) n FROM sector_daily").fetchone()["n"]
+            try:   # 老库可能还没有 valuation_daily（迁移在 init() 里），缺表按 0 处理
+                v = c.execute("SELECT COUNT(*) rows, COUNT(DISTINCT date) days, MAX(date) latest "
+                              "FROM valuation_daily").fetchone()
+            except sqlite3.Error:
+                v = None
     except sqlite3.Error as e:
         logger.warning("status 查询失败: %s", e)
         return {"ready": False}
@@ -429,6 +444,10 @@ def status() -> dict[str, Any]:
             "sectors_pending": (g["elig"] or 0) - (g["tagged"] or 0),
             "sector_count": sectors or 0, "sector_daily_days": days or 0,
             "sector_daily_rows": sd_rows or 0, "keep_days": SECTOR_KEEP_DAYS,
+            "valuation_rows": (v["rows"] if v else 0) or 0,
+            "valuation_days": (v["days"] if v else 0) or 0,
+            "valuation_at": (v["latest"] if v else "") or "",
+            "valuation_keep_days": VALUATION_KEEP_DAYS,
             "db_mb": db_mb, "roster_at": at["v"] if at else ""}
 
 
@@ -584,6 +603,76 @@ def backfill_sector_daily(days: int = 95, workers: int = 10) -> dict[str, Any]:
         return {"ok": True, "fetched": len(codes), "days": len(per_day), "rows": total_rows}
     finally:
         _sd_backfill_lock.release()
+
+
+def valuation_snapshot(date: str = "") -> int:
+    """把当日全市场 PE/PB 落一份快照。返回写入只数；快照为空则跳过，不写脏数据。
+
+    为什么单独存这份：行情接口给的估值只有「此刻」。不落盘就永远没有历史时点数据，
+    长线的估值规则（现在按 PE 乘 PB 取前 120）无法回测，而它正是把整池选成银行股的原因。
+    从今天起每天一份，两年后才谈得上验证（见 BACKLOG 子项目 E）。
+    """
+    d = date or date_cls.today().isoformat()
+    rows = ds.sina_all_stocks()
+    if not rows:
+        logger.warning("估值快照跳过：全市场快照为空")
+        return 0
+    payload = []
+    for r in rows:
+        code = str(r.get("code") or "")
+        price = float(r.get("price") or 0)
+        if len(code) != 6 or price <= 0:      # 停牌/退市残留没有估值意义
+            continue
+        pe = float(r.get("pe_ttm") or 0)
+        pb = float(r.get("pb") or 0)
+        payload.append((d, code, pe or None, pb or None, price,
+                        float(r.get("float_mcap") or 0) or None))
+    if not payload:
+        return 0
+    with _LOCK, _conn() as c:
+        c.executemany(
+            "INSERT INTO valuation_daily(date,code,pe_ttm,pb,price,float_mcap) "
+            "VALUES(?,?,?,?,?,?) ON CONFLICT(date,code) DO UPDATE SET "
+            "pe_ttm=excluded.pe_ttm, pb=excluded.pb, price=excluded.price, "
+            "float_mcap=excluded.float_mcap", payload)
+    removed = purge_valuation()
+    logger.info("估值快照 %s：%d 只（清理过期 %d 行）", d, len(payload), removed)
+    return len(payload)
+
+
+def purge_valuation(days: int = VALUATION_KEEP_DAYS) -> int:
+    """删除超出保留窗口的估值快照（默认 2 年）。写入路径自动调用（按日累积的表一律配清理）。"""
+    cutoff = (date_cls.today() - timedelta(days=days)).isoformat()
+    with _LOCK, _conn() as c:
+        before = c.total_changes
+        c.execute("DELETE FROM valuation_daily WHERE date < ?", (cutoff,))
+        return c.total_changes - before
+
+
+def valuation_history(code: str, days: int = 0) -> list[dict[str, Any]]:
+    """单只股票的估值序列（按日期升序）。days>0 时只取最近这么多自然日。"""
+    sql = "SELECT date,pe_ttm,pb,price FROM valuation_daily WHERE code=?"
+    args: list[Any] = [code]
+    if days > 0:
+        args.append((date_cls.today() - timedelta(days=days)).isoformat())
+        sql += " AND date>=?"
+    sql += " ORDER BY date"
+    with _conn() as c:
+        return [dict(r) for r in c.execute(sql, args)]
+
+
+def valuation_days() -> int:
+    """已积累的估值快照天数（看它攒了多久）。"""
+    with _conn() as c:
+        row = c.execute("SELECT COUNT(DISTINCT date) n FROM valuation_daily").fetchone()
+    return (row["n"] if row else 0) or 0
+
+
+def valuation_has(date: str) -> bool:
+    """某天是否已经落过快照（供每日心跳幂等判断）。"""
+    with _conn() as c:
+        return c.execute("SELECT 1 FROM valuation_daily WHERE date=? LIMIT 1",
+                         (date,)).fetchone() is not None
 
 
 def purge(days: int = SECTOR_KEEP_DAYS) -> int:

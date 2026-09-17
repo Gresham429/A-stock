@@ -150,6 +150,40 @@ def test_refresh_roster_reactivates_returning_code():
     assert st["inactive"] == 0 and st["active"] == 10, st
 
 
+def test_valuation_snapshot_idempotent_and_purged():
+    """估值快照：停牌股跳过、同日幂等、历史可查、超窗口自动清理、空快照不写脏数据。"""
+    us.DB_PATH = os.path.join(tempfile.mkdtemp(), "universe.db")
+    us.init()
+    us.ds.sina_all_stocks = lambda: [
+        {"code": "600519", "name": "贵州茅台", "price": 1300.0, "float_mcap": 1.6e8,
+         "pe_ttm": 22.5, "pb": 8.1},
+        {"code": "000001", "name": "平安银行", "price": 11.0, "float_mcap": 2.1e7,
+         "pe_ttm": 5.0, "pb": 0.6},
+        {"code": "600001", "name": "停牌股", "price": 0.0, "float_mcap": 3e7,
+         "pe_ttm": 4.9, "pb": 0.5},
+    ]
+    assert us.valuation_snapshot("2026-09-16") == 2, "停牌（无价）股应跳过"
+    assert us.valuation_snapshot("2026-09-16") == 2, "同日重跑应幂等，不产生重复行"
+    with us._conn() as c:
+        n = c.execute("SELECT COUNT(*) n FROM valuation_daily WHERE date=?",
+                      ("2026-09-16",)).fetchone()["n"]
+    assert n == 2, f"同一天只应有两行: {n}"
+    hist = us.valuation_history("600519")
+    assert len(hist) == 1 and abs(hist[0]["pe_ttm"] - 22.5) < 1e-6, hist
+    assert us.valuation_has("2026-09-16") is True
+    assert us.valuation_has("2026-09-15") is False
+    assert us.valuation_days() == 1
+    # 过期清理：直接插一条三年前的（走 snapshot 会被写入时的 purge 立刻清掉）
+    with us._conn() as c:
+        c.execute("INSERT INTO valuation_daily(date,code,pe_ttm,pb,price,float_mcap) "
+                  "VALUES('2023-01-03','600519',20,7,1200,1.5e8)")
+    assert us.valuation_days() == 2
+    assert us.purge_valuation(days=730) == 1, "三年前那一行应被清掉"
+    assert us.valuation_days() == 1, "窗口内的数据必须保留"
+    us.ds.sina_all_stocks = lambda: []
+    assert us.valuation_snapshot("2026-09-17") == 0, "空快照不写脏数据"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

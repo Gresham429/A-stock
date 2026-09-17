@@ -83,7 +83,7 @@ migrate 要在第一次登录前跑，否则登录会先建出空库，migrate �
 | 文件 | 职责 |
 |------|------|
 | `datasources.py` | 行情、指标、K 线、财报、新闻、研报、龙虎榜、解禁；`sina_all_stocks`（全 A 名单 + 快照）；`index_quotes`/`market_breadth`（大盘）；`global_markets`（外围数值）；`concept_tags`（东财板块） |
-| `universe_store.py` | 全市场池 `data/universe.db`：全 A 名单 + 板块归属（东财 slist 逐股回填）+ 板块日变化。`codes_of`/`sector_of`/`sectors_map`/`taxonomy`/`snapshot_daily`/`sector_ranking`/`backfill_sector_daily`（逐股日 K 补历史，`_agg_sector_payload` 与 live 共用口径）。名单刷新把本轮没再出现的代码标 `active=0`（退市下线；覆盖率不足九成时跳过，防分页抓取不全误伤半个池子） |
+| `universe_store.py` | 全市场池 `data/universe.db`：全 A 名单 + 板块归属（东财 slist 逐股回填）+ 板块日变化。`codes_of`/`sector_of`/`sectors_map`/`taxonomy`/`snapshot_daily`/`sector_ranking`/`backfill_sector_daily`（逐股日 K 补历史，`_agg_sector_payload` 与 live 共用口径）。名单刷新把本轮没再出现的代码标 `active=0`（退市下线；覆盖率不足九成时跳过，防分页抓取不全误伤半个池子）。另有 `valuation_daily`：交易日收盘后落一份全市场 PE/PB 快照（`valuation_snapshot`，保留 2 年，写入路径自动清理），给长线估值因子攒历史时点数据 |
 | `universe.py` | 「精选龙头」fallback（10 一级 x 48 二级 x 170 只）。`universe_store` 未就绪时兜底 + `is_leader` 标记 |
 | `news_store.py` | L2 新闻库（滚动 1 年）+ `is_trading_day`（动态节假日） |
 | `notes_store.py` | L5 私域笔记（永久） |

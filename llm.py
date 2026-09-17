@@ -47,9 +47,9 @@ def _check_budget() -> None:
         ok, why = ratelimit.allow_llm(_current_uid())
     except Exception as e:  # noqa: BLE001 门故障按拒绝处理
         logger.error("LLM 预算门不可用，本次 AI 调用拒绝: %s", e)
-        raise LLMError(f"预算门不可用，本次 AI 调用拒绝: {e}") from e
+        raise LLMError(f"预算门不可用，本次 AI 调用拒绝: {e}", kind="budget") from e
     if not ok:
-        raise LLMError(why)
+        raise LLMError(why, kind="budget")
 
 
 def _record_usage(usage: dict, model: str) -> None:
@@ -82,7 +82,15 @@ _DISCLAIMER = (
 
 
 class LLMError(RuntimeError):
-    """DeepSeek 调用失败。"""
+    """DeepSeek 调用失败。kind 区分「今天再试也没用」的预算类与可重试的其它错误。
+
+    kind="budget"：预算门拒绝（当日额度用完或门故障）。调用方据此决定不要重试。
+    kind="api"：网络、HTTP、空正文、未配 key 等，可能是瞬时的。
+    """
+
+    def __init__(self, message: str, kind: str = "api"):
+        super().__init__(message)
+        self.kind = kind
 
 
 def _system_prompt() -> tuple[str, int]:

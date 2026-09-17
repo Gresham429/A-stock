@@ -155,6 +155,10 @@ migrate 要在第一次登录前跑，否则登录会先建出空库，migrate �
   幂等靠 `_review_sched_state.last_auto`）+ 首启 `_review_boot`（history 不足 5 天则后台回填）。服务器上这两个
   线程跑在 `scheduler.py` 里。生成前先拿 `data/review/.running-<date>` 文件锁，`/api/review/status` 能看到
   别的进程在跑（`running_elsewhere`）。
+- AI 整块降级不落占位：分析师全失败且裁判与文稿都没产出时，`ai` 记 None、envelope 打
+  `ai_degraded` / `ai_error` / `ai_error_kind`，硬指标照常落盘（不伪装成一份完整复盘）。错误类型来自
+  `llm.LLMError.kind`：`budget` 表示当天额度用完、重试无意义；其它类型由调度在 20 分钟后自动重试一次
+  （`pipeline.AI_RETRY_AFTER_MIN`）。未配置 key 时直接跳过 AI，不算降级。
 
 ## 多用户与部署
 

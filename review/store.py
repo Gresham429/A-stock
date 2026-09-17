@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REVIEW_DIR = os.path.join(_ROOT, "data", "review")
+# 注意：下面两个路径在 import 时绑定。测试要改 REVIEW_DIR 做隔离时，必须一起改这两个，
+# 否则 hist_upsert / latest 会写进真实 data/review（跨设备时还会 os.replace 失败）。
 _LATEST = os.path.join(REVIEW_DIR, "latest.json")
 HISTORY_FILE = os.path.join(REVIEW_DIR, "history.json")  # 每日情绪快照序列（供 cycle_position）
 KEEP_DAYS = 365

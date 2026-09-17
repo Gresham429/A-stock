@@ -19,8 +19,6 @@
 
 - `ratelimit.allow_llm` 与 `record_ai_call` 非原子：并发下日预算可超出，上限是同时在飞的调用数
   （2 worker x 8 线程不超过 15 次）。严格版把读和加放进同一事务，record 时返回是否超限。
-- 复盘流水线中途被预算门拒绝时，带「已达上限」文案的 stub 会落盘为 done，当天不再自动重跑
-  （`force=1` 可重跑）。修法：预算类 LLMError 不落盘。
 - `run_all` 里某 agent 撞预算后其余 agent 仍逐个尝试（有界空转）。用共享 Event 让后续直接 skipped。
 - 登录失败按 ip 键锁定：NAT 共享出口时朋友连错 5 次会把同 IP 的站长也锁 5 分钟（设计取舍，
   README-deploy 已写明）。

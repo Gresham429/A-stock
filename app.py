@@ -202,6 +202,10 @@ def _run_review_bg(date: str | None, force: bool) -> None:
             _review_job["error"] = None
         else:
             _review_job["error"] = r.get("error")
+            # AI 整块降级且错误可重试（网络类，不是预算类）时清掉当天的自动标记，
+            # 让 600 秒后的调度心跳再试一次；pipeline 里有 20 分钟的最小重试间隔。
+            if r.get("degraded") and r.get("error_kind") != "budget":
+                _review_sched_state["last_auto"] = ""
     except Exception as e:  # noqa: BLE001 后台任务异常绝不能拖垮进程
         logger.exception("复盘后台任务失败")
         _review_job["error"] = str(e)

@@ -154,13 +154,18 @@ def run_analysts(metrics: dict, counts: dict, date: str,
         prompt = (f"{_BOUNDARY}\n\n你是短线复盘的『{title}』分析师，只从『{title}』角度、"
                   f"据以下数据客观研判（≤220 字，有观点有依据，点明对明日情绪的含义），"
                   f"不荐个股、不给买卖点：\n\n{data}")
+        failed = False
+        err_kind = ""
         try:
             rep = llm._chat([{"role": "user", "content": prompt}], json_mode=False,
                             temperature=0.15, max_tokens=2500, model=_FLASH).strip()
         except llm.LLMError as e:
             logger.warning("分析师 %s 失败，降级 stub: %s", key, e)
-            rep = f"[⚠️ {title}分析失败：{e}]"
-        out.append({"key": key, "title": title, "report": rep})
+            rep = f"[{title}分析失败：{e}]"
+            failed = True                      # 让上游能分辨「整块降级」与「只是某个角色缺席」
+            err_kind = getattr(e, "kind", "api")
+        out.append({"key": key, "title": title, "report": rep,
+                    "failed": failed, "error_kind": err_kind})
     return out
 
 

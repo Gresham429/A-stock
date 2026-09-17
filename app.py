@@ -194,6 +194,8 @@ def review() -> str:
 
 # ── 复盘自动化模块 API（/review 页面数据 + 手动重跑）──────────────────
 _review_job = {"running": False, "error": None, "finished_at": None, "date": None}
+# 自选股个股档案是单独一次 AI 调用（比复盘本体快），单飞状态与复盘本体分开记
+_review_stocks_job: dict = {"running": False, "error": None, "finished_at": None}
 _review_lock = threading.Lock()
 
 
@@ -252,6 +254,8 @@ def api_review_status():
     running_elsewhere=True 表示别的进程正在生成；此时 running 也置 True，前端照常轮询到它结束。
     """
     st = dict(_review_job)
+    with _review_lock:
+        st["stocks"] = {k: v for k, v in _review_stocks_job.items() if k != "result"}
     st["running_elsewhere"] = False
     if not st["running"]:
         for d in _review_lock_dates(st.get("date")):
@@ -276,6 +280,50 @@ def api_review_run():
                          args=(body.get("date"), bool(body.get("force"))),
                          daemon=True).start()
     return jsonify({"status": "started"})
+
+
+@app.route("/api/review/stocks")
+def api_review_stocks():
+    """个股线索：公开块随复盘 envelope 一起返回，个人块按人读自己的缓存。
+
+    个人块（自选股那一层）绝不进公开复盘——多用户下的硬约束：公开数据与个人数据不混一个文件。
+    """
+    date = request.args.get("date")
+    env = review_svc.store.load(date) if date else review_svc.latest_review()
+    return jsonify({"public": (env or {}).get("stocks"),
+                    "mine": review_svc.stocks.load_user(),
+                    "target_date": (env or {}).get("target_date"),
+                    "llm_enabled": config.llm_enabled()})
+
+
+@app.route("/api/review/stocks/run", methods=["POST"])
+def api_review_stocks_run():
+    """生成「我的自选股」个股档案（后台线程，单飞）。公开块由复盘本身顺带生成。"""
+    body = request.get_json(silent=True) or {}
+    with _review_lock:
+        if _review_stocks_job["running"]:
+            return jsonify({"status": "running"})
+        codes = [str(c) for c in (store.load_watchlist() or []) if c]
+        if not codes:
+            return jsonify({"status": "error", "error": "自选股为空，先在页面上加自选股"})
+        _review_stocks_job.update(running=True, error=None)
+        userctx.Thread(target=_run_review_stocks_bg,
+                       args=(codes, bool(body.get("force"))), daemon=True).start()
+    return jsonify({"status": "started", "count": len(codes)})
+
+
+def _run_review_stocks_bg(codes: list[str], force: bool) -> None:
+    try:
+        env = review_svc.latest_review() or {}
+        block = review_svc.stocks.build_watchlist(
+            codes, env.get("target_date") or "", force=force)
+        with _review_lock:
+            _review_stocks_job.update(running=False, result=block, error=None,
+                                      finished_at=_now())
+    except Exception as e:  # noqa: BLE001 后台线程出错要落进状态，前端才看得见
+        logger.exception("自选股个股档案失败")
+        with _review_lock:
+            _review_stocks_job.update(running=False, error=str(e), finished_at=_now())
 
 
 @app.route("/api/config")
@@ -1623,6 +1671,37 @@ def _review_scheduler() -> None:
         time.sleep(600)
 
 
+def _review_stocks_scheduler() -> None:
+    """复盘跑完后，给每个有自选股的账号生成一份个股档案（当天一次）。
+
+    为什么单独一个循环而不是塞进 _run_review_bg：复盘本体可能在另一个进程里跑完
+    （scheduler 与 web 各一份状态），事后补跑要能跨进程看见「今天该生成的东西生成了没」。
+    判据落在个人档案文件的 `date` 上——文件在就说明当天跑过，重启也不会重来。
+    """
+    while True:
+        try:
+            env = review_svc.latest_review() or {}
+            target = env.get("target_date") or ""
+            if target:
+                today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+                for uid in auth.list_uids():
+                    try:
+                        with userctx.as_user(uid):
+                            if (review_svc.stocks.load_user() or {}).get("date") == today:
+                                continue
+                            codes = [str(c) for c in (store.load_watchlist() or []) if c]
+                            if not codes:
+                                continue
+                            block = review_svc.stocks.build_watchlist(codes, target)
+                            logger.info("个股档案[%s]：自选股 %d 只，出档 %d 条",
+                                        uid, len(codes), len(block.get("items") or []))
+                    except Exception as e:  # noqa: BLE001 一个账号出错不拖累其余
+                        logger.warning("个股档案[%s] 失败：%s", uid, e)
+        except Exception as e:  # noqa: BLE001 调度循环绝不能因单次异常停摆
+            logger.warning("个股档案调度心跳异常（下次继续）：%s", e)
+        time.sleep(600)
+
+
 def _review_boot() -> None:
     """复盘启动预热：情绪周期历史为空则后台回填近 3 个月 + 启动每日调度器。不阻塞启动。"""
     try:
@@ -1633,6 +1712,7 @@ def _review_boot() -> None:
     except Exception as e:  # noqa: BLE001 回填失败不影响其余功能
         logger.warning("情绪周期回填失败（不影响其余）：%s", e)
     userctx.Thread(target=_review_scheduler, daemon=True).start()
+    userctx.Thread(target=_review_stocks_scheduler, daemon=True).start()
 
 
 if __name__ == "__main__":

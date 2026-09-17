@@ -34,8 +34,89 @@
     renderMetrics(m);
     renderAI(focus);
     renderAnalysts(ai.analysts);
+    renderStocks(env.stocks);
     renderArticle(ai.article);
+    loadWatchStocks();
   }
+
+  // ── 个股线索（子项目 A）──
+  // 卡片列的是「今天为什么被看到 + 基本面/财务/舆情/驱动/风险/盯什么」。
+  // 刻意不显示任何价位：买卖点归三周期选股与自选股买卖点，两处口径混在一起会互相打架。
+  function stockCard(it, idx) {
+    const rows = [
+      ["基本面", it.fundamentals], ["财务", it.financials], ["舆情", it.news],
+      ["驱动", it.driver], ["风险", it.risk], ["盯什么", it.watch],
+    ].filter(([, v]) => v);
+    const fin = (it.fin_period ? ` ${it.fin_period} 营收 ${pctStr(it.revenue_yoy)} 利润 ${pctStr(it.profit_yoy)}` : "");
+    return `<div class="mcard">
+      <div class="mc-head"><b>${idx + 1}. ${esc(it.name)}</b>
+        <span class="tag2">${esc(it.code)}</span>
+        <span style="color:${colorOf(it.pct)}">${pctStr(it.pct)}</span>
+        <span class="small muted">${esc(it.sector || "")}${it.turnover != null ? " · 换手 " + it.turnover + "%" : ""}</span>
+      </div>
+      <div class="mc-desc">${esc(it.tagline || "")}</div>
+      <div class="small muted">入选：${esc(it.reason || "")}${it.pe_ttm ? " · PE " + it.pe_ttm : ""}${it.pb ? " · PB " + it.pb : ""}${esc(fin)}</div>
+      ${rows.map(([k, v]) => `<div class="mc-desc"><b>${k}</b>：${esc(v)}</div>`).join("")}
+    </div>`;
+  }
+
+  function renderStocks(block) {
+    const el = $("stockGrid");
+    const items = (block && block.items) || [];
+    if (!items.length) {
+      el.innerHTML = `<div class="mcard"><div class="mc-desc">${esc((block && block.note) || "这一场没有个股线索（随复盘一起生成）")}</div></div>`;
+    } else {
+      el.innerHTML = items.map(stockCard).join("");
+    }
+    $("stockNote").textContent = block
+      ? `挑出 ${block.picked != null ? block.picked : items.length} 只，出档 ${items.length} 条`
+      : "随复盘一起生成";
+  }
+
+  async function loadWatchStocks() {
+    let j = null;
+    try { j = await (await fetch("/api/review/stocks")).json(); } catch (e) { return; }
+    renderWatchStocks(j && j.mine);
+  }
+
+  function renderWatchStocks(block) {
+    const el = $("watchStockGrid");
+    const items = (block && block.items) || [];
+    if (!items.length) {
+      el.innerHTML = `<div class="mcard"><div class="mc-desc">${esc((block && block.note) || "还没有生成")}</div></div>`;
+    } else {
+      el.innerHTML = items.map(stockCard).join("");
+    }
+    if (block && block.generated_at) {
+      $("watchStockNote").textContent = `生成于 ${block.generated_at}（${block.date}）`;
+    }
+  }
+
+  async function runWatchStocks() {
+    const btn = $("watchStockBtn");
+    btn.disabled = true;
+    $("watchStockNote").textContent = "生成中（一次 AI 调用，约 20 到 60 秒）…";
+    try {
+      const j = await (await fetch("/api/review/stocks/run", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ force: true }),
+      })).json();
+      if (j.status === "error") { $("watchStockNote").textContent = j.error || "生成失败"; return; }
+      for (let i = 0; i < 40; i++) {
+        await new Promise((r) => setTimeout(r, 3000));
+        const s = await (await fetch("/api/review/status")).json();
+        if (s.stocks && !s.stocks.running) {
+          if (s.stocks.error) { $("watchStockNote").textContent = "失败：" + s.stocks.error; }
+          await loadWatchStocks();
+          break;
+        }
+      }
+    } finally {
+      btn.disabled = false;
+    }
+  }
+  const wsBtn = $("watchStockBtn");
+  if (wsBtn) wsBtn.addEventListener("click", runWatchStocks);
 
   function renderAnalysts(analysts) {
     const el = $("analystRow");

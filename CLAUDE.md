@@ -21,7 +21,8 @@ A 股看板，Flask 后端代理各数据源，前端零构建（HTML + CSS + �
 （多周期行情图、分时与 K 线蜡烛、可选 MA5/10/20/60/120/240）、顶部大盘研判条、全市场两级选股、
 持仓盈亏、DeepSeek 推荐与建议（结果落盘缓存带时间戳）、近 1 年新闻与政策库、私域笔记、交易规则库
 （价格行为体系 + A 股制度特性，可增删改、注入 AI）、投资画像与本金分级玩法、公司叙事、AI 溯源与依据
-校验、全球宏观到板块指向、模拟盘、每日复盘（`/review`）、三周期选股与自选股买卖点（观点账本）、
+校验、全球宏观到板块指向、模拟盘、每日复盘（`/review`，板块层面 + 往下走一层的个股线索）、
+三周期选股与自选股买卖点（观点账本）、
 到点提醒（价格摸到买点/卖点/止损就推手机，一个账号可配多台，点位默认取 AI 分析、可自己改）、
 20 个模拟盘 agent 组成的舰队（已暂停，代码保留作 backup）。
 
@@ -131,7 +132,8 @@ migrate 要在第一次登录前跑，否则登录会先建出空库，migrate �
 ### 复盘模块 `review/`
 
 `fetch`（打板四池、题材串、龙虎榜、板块资金流；东财 push2ex 与同花顺，纯 urllib、内置节流）、
-`metrics`（8 类情绪硬指标，纯函数）、`store`（落盘 `data/review/<date>.json`、`history.json`）、
+`metrics`（8 类情绪硬指标，纯函数）、`stocks`（个股线索：挑股 / 补数据 / 一次调用出档案）、
+`store`（落盘 `data/review/<date>.json`、`history.json`）、
 `llm_review`（5 角色分析师 fan-out，v4-flash；裁判与文稿，v4-pro）、`pipeline`、`run_daily`（批处理入口）、
 `backfill`（同花顺涨停池回填情绪周期）。
 
@@ -143,7 +145,7 @@ migrate 要在第一次登录前跑，否则登录会先建出空库，migrate �
 `test_factor_cohort`；改 `structure`/决策提示词跑 `test_structure`；改 `outcome`/地平线跑 `test_outcome`；
 改判罪/分布跑 `test_excess_dist`；改 `agent_store`/`agent_loop`/`ai_blocks` 的记忆部分跑 `test_agent_memory`
 与 `test_excess_dist`；改板块聚合跑 `test_sector_backfill`；改 `fees`/`portfolio`/`paper_store` 跑同名测试；
-改复盘指标跑 `test_review_metrics`；改 `userctx`/`auth`/`ratelimit`/复盘锁/舰队路由跑同名测试；
+改复盘指标跑 `test_review_metrics`；改个股线索跑 `test_review_stocks`；改 `userctx`/`auth`/`ratelimit`/复盘锁/舰队路由跑同名测试；
 改 picks 模块跑 `test_picks_*` 与 `test_llm_picks`；改分层边界或行业上限跑 `test_cap_layers`；改提醒的触发算术/文本解析/发送载荷跑 `test_alerts` 与 `test_alerts_routes`；改前向超额追踪跑 `test_picks_track`；改 `fundamentals_store` 跑 `test_fundamentals_store`；改 `moneyflow_store` 跑 `test_moneyflow_store`。
 
 ## 复盘模块（`/review`）
@@ -159,7 +161,15 @@ migrate 要在第一次登录前跑，否则登录会先建出空库，migrate �
 - 情绪周期单用同花顺深史（东财打板池只有约 15 个交易日深度），2 因子 = 涨停家数 + 最高连板
   （`high_days_value>>16` 取连板）；炸板率因同花顺无端点不入周期，仍单列在硬指标卡走东财近 15 日。
   回填只补既成事实，无未来函数。`python -m review.backfill 3` 回填近 3 个月。
-- 边界：只到板块层面，不荐个股、不给买卖点（个股归子项目 A 与 B）。不引 akshare。
+- 个股线索（子项目 A，2026-09-17）：从板块资金流前 3 个板块的成员、连板梯队前 3、龙虎榜净买前 2
+  挑出当日的标的（默认 8 只，去重、带理由标签、不打分），每只补行情/估值、财务（本地面板）、
+  舆情（本地新闻库）、资金（新浪）、板块归属、龙虎榜命中，再**一次** v4-flash 调用出档案
+  （tagline / 基本面 / 财务 / 舆情 / 驱动 / 风险 / 盯什么）。**输出按白名单重建，价位类字段一律丢弃**
+  （买卖点归子项目 B）。公开块进 envelope 的 `stocks`；自选股那一层按人隔离，落
+  `data/users/<uid>/review_stocks.json`，公开复盘里不出现任何人的自选股。设计见
+  `plan/2026-09-17-review-stocks-design.md`。
+- 边界：板块层面不荐个股、不给买卖点；个股线索只做客观档案（不给价位、不给仓位），
+  买卖点归三周期选股与自选股买卖点。不引 akshare。
 - 调度：本地 `python3 app.py` 时 `app._review_scheduler`（交易日 `REVIEW_AUTO_TIME` 默认 18:30 到点跑一次，
   幂等靠 `_review_sched_state.last_auto`）+ 首启 `_review_boot`（history 不足 5 天则后台回填）。服务器上这两个
   线程跑在 `scheduler.py` 里。生成前先拿 `data/review/.running-<date>` 文件锁，`/api/review/status` 能看到
@@ -370,7 +380,8 @@ curl -s -b cj.txt 127.0.0.1:5000/api/universe/status    # 池子：总数 / elig
 curl -s -b cj.txt "127.0.0.1:5000/api/sectors?kind=sw1&limit=5"
 curl -s -b cj.txt 127.0.0.1:5000/api/factors            # 因子 IC / 方向 / 翻转 / 新鲜度
 curl -s -b cj.txt 127.0.0.1:5000/api/agents             # 站长舰队 + 教训汇总（未设站长 503）
-curl -s -b cj.txt 127.0.0.1:5000/api/review/status      # running / running_elsewhere
+curl -s -b cj.txt 127.0.0.1:5000/api/review/status      # running / running_elsewhere / stocks
+curl -s -b cj.txt 127.0.0.1:5000/api/review/stocks      # 个股线索：公开块 + 我的自选股块
 curl -s -b cj.txt 127.0.0.1:5000/api/picks/public       # 三周期各 5 只
 # AI 类接口 30 到 90 秒，加 --max-time 200；有代理加 --noproxy '*'
 # 服务器三进程冒烟在隔离副本里做：gunicorn -c deploy/gunicorn.conf.py -b 127.0.0.1:5002 wsgi:application 加 python3 scheduler.py
@@ -404,7 +415,7 @@ curl -s -b cj.txt 127.0.0.1:5000/api/picks/public       # 三周期各 5 只
 公共 `data/`：`news.db` `universe.db` `factors.db` `templates.db` `auth.db` `usage.db` `review/`
 `picks_public.db` `picks_track.db` `ai_cache.json` `fundamentals.db` `moneyflow.db` `.em_last_call` `.picks-running-public` `.picks-last.json`。
 个人 `data/users/<uid>/`：`watchlist.json` `portfolio.json` `notes.db` `rules.db` `paper.db` `profiles.db`
-`agents.db` `picks.db` `alerts.db` `.init.lock` `.picks-running`。舰队只读站长目录里的 `agents.db` / `paper.db` / `profiles.db`。
+`agents.db` `picks.db` `alerts.db` `review_stocks.json` `.init.lock` `.picks-running`。舰队只读站长目录里的 `agents.db` / `paper.db` / `profiles.db`。
 旧布局（根目录 `watchlist.json`、`data/agents.db` 等）由 `deploy/migrate_to_multiuser.py <uid>` 复制进
 站长目录，原文件不删。
 

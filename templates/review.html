@@ -172,6 +172,22 @@
     <div class="mcard"><div class="mc-desc">情绪面 / 资金面 / 题材热点 / 龙虎榜游资 / 龙头梯队 —— 各读一面，裁判收敛（生成后展示）。</div></div>
   </div>
 
+  <!-- 个股线索（子项目 A）：往下走一层 -->
+  <div class="sectitle">个股线索 <span class="tag2 blue">往下走一层</span></div>
+  <div class="mgrid" id="stockGrid">
+    <div class="mcard"><div class="mc-desc">从板块资金流、连板梯队、龙虎榜挑出的当日标的，各附基本面 / 财务 / 舆情 / 驱动 / 风险。<b>不给买卖点</b>（价位归三周期选股与自选股买卖点）。</div></div>
+  </div>
+  <div class="cardfoot"><span class="small muted" id="stockNote">随复盘一起生成</span></div>
+
+  <div class="sectitle">我的自选股 <span class="tag2 grn">个人</span></div>
+  <div class="mgrid" id="watchStockGrid">
+    <div class="mcard"><div class="mc-desc">自选股走同一套字段（基本面 / 财务 / 舆情 / 驱动 / 风险），只存在你自己的账号下，不会出现在公共复盘里。</div></div>
+  </div>
+  <div class="cardfoot">
+    <span class="small muted" id="watchStockNote">点右侧按钮按今天的数据生成（一次 AI 调用）</span>
+    <button class="btn" id="watchStockBtn">生成自选股档案</button>
+  </div>
+
   <!-- 复盘文稿 -->
   <div class="sectitle">复盘文稿 <span class="tag2 grn">可发布</span></div>
   <div class="bigcard">

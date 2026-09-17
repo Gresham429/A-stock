@@ -18,11 +18,11 @@ from typing import Optional
 
 import config
 
-from . import fetch, llm_review, metrics, store
+from . import fetch, llm_review, metrics, stocks, store
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2   # 2：envelope 增加 stocks（个股线索，子项目 A）
 LOCK_STALE_SEC = 30 * 60   # 锁超过 30 分钟视为陈旧（进程崩溃未清理），可覆盖
 AI_RETRY_AFTER_MIN = 20    # AI 整块降级（可重试类）后，至少隔这么久才自动重试
 
@@ -195,11 +195,12 @@ def _run_locked(target: str, date: Optional[str], with_ai: bool) -> dict:
     ai_degraded = False
     ai_error = ""
     ai_error_kind = ""
+    # 板块资金流是实时快照（无历史）——仅在跑最新场次(date=None)时取，避免历史重跑取到实时值。
+    # 个股线索与分析师的『资金面』共用它，所以在这里取一次。
+    sector = fetch.sector_flow("concept", 15) if (with_ai and date is None) else None
     if with_ai:
         leaders = [{"name": s["name"], "boards": s["limit_days"]}
                    for s in sorted(zt, key=lambda x: x["limit_days"], reverse=True)[:8]]
-        # 板块资金流是实时快照（无历史）——仅在跑最新场次(date=None)时用，避免历史重跑取到实时值
-        sector = fetch.sector_flow("concept", 15) if date is None else None
         analysts = llm_review.run_analysts(m, counts, target, lhb=lhb,
                                            leaders=leaders, sector_flow=sector)
         focus = llm_review.judge(m, counts, target, analyst_reports=analysts)
@@ -214,6 +215,16 @@ def _run_locked(target: str, date: Optional[str], with_ai: bool) -> dict:
             ai_error_kind = failed[0].get("error_kind") if failed else "api"
             ai_error = failed[0].get("report") if failed else "AI 未生成（分析师未运行）"
 
+    # ── 个股线索（子项目 A）：从板块资金流与涨幅榜往下走一层 ──
+    # 与复盘本体解耦：这一步失败/降级不影响硬指标与 AI 研判的落盘，反之亦然。
+    stocks_block = None
+    if date is None:
+        try:
+            stocks_block = stocks.build_public(target, zt, lhb, sector)
+        except Exception as e:  # noqa: BLE001 个股块绝不能拖垮复盘本体
+            logger.warning("个股线索生成失败（不影响复盘本体）: %s", e)
+            stocks_block = {"items": [], "degraded": True, "note": f"生成失败: {e}"}
+
     envelope = {
         "schema_version": SCHEMA_VERSION,
         "target_date": target,
@@ -224,6 +235,7 @@ def _run_locked(target: str, date: Optional[str], with_ai: bool) -> dict:
         "metrics": m,
         "raw_theme": theme,      # 供次日题材延续率
         "ai": ai,
+        "stocks": stocks_block,      # 全市场个股线索（不含任何人的自选股）
         "ai_degraded": ai_degraded,
         "ai_error": ai_error,
         "ai_error_kind": ai_error_kind,

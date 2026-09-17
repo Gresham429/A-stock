@@ -4,6 +4,7 @@
 
 # ── 本地工具 / 编辑器配置 ──
 .claude/
+.dsh-project-memory/
 .vscode/
 .idea/
 *.code-workspace

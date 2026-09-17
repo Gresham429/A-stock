@@ -114,7 +114,7 @@ migrate 要在第一次登录前跑，否则登录会先建出空库，migrate �
 | 文件 | 职责 |
 |------|------|
 | `factor_lab.py` | 因子回测与失效监控（`data/factors.db`）：`backtest`（顺带产出 `excess_dist` 超额分位分布，判罪线唯一来源）+ `rank_of` + `summary`（IC / t 值）+ `direction(cohort=)` 动态定方向 + `ic_cohort` 表 + `backtest_large`（大盘 cohort IC）+ `scoring_directions(cohort)` + `rolling_ic`/`decay_alert`/`flip_rate` + `refresh_if_stale` + `backtest_stops`（止损网格）。注意 `codes_of()` 无 focus 按代码号排序不按市值（PITFALLS #5b） |
-| `agent_store.py` | Agent 持久层（`agents.db`，站长目录）：`agents` / `runs`（原文 90 天、结论 365 天）/ `lessons`（闭集 9 类）/ `pending`（限价挂单）/ `conditions`（止损）/ `claims`（时段原子占位）/ `equity` / `entries`（建仓留痕 + 冻结分位 `x20_pctile`）/ `journal`（情节记忆，append-only） |
+| `agent_store.py` | Agent 持久层（`agents.db`，站长目录）：`agents` / `runs`（原文 90 天、结论 365 天，原文截 20000 字符）/ `lessons`（闭集 10 类：9 类入场属性 + `bad_outcome` 事后结算）/ `pending`（限价挂单）/ `conditions`（止损）/ `claims`（时段原子占位）/ `equity` / `entries`（建仓留痕 + 冻结分位 `x20_pctile`）/ `journal`（情节记忆，append-only） |
 | `agent_loop.py` | 日循环：研判（`_market_block`）、选股、决策（可插拔 single / debate）、风控（确定性硬门）、挂单、复盘（确定性失败检测）。`sweep_orders`/`sweep_conditions`/`current_slot` |
 | `outcome.py` | 结果结算（纯函数）：`forward_returns`（自成交价，按 K 线根数数交易日）+ `bench_returns` + `excess`（扣 beta）。地平线引用 `factor_lab.HORIZONS` 不复制。只算不判罪 |
 | `structure.py` | K 线结构摘要（纯函数零网络）：`digest()` 出 MA5/20/60 + 近 20 日高低 + 最近 3 根 OHLC；`fmt_stock`/`fmt_market` 成行喂 AI。只给原料不下判断 |
@@ -176,11 +176,13 @@ migrate 要在第一次登录前跑，否则登录会先建出空库，migrate �
   默认 40。`before_request` 的 `check()` 对 ai 路径只做门（频率、6 秒最小间隔、预算是否已满）。新增会调
   LLM 的路由不需要登记，计费自动生效。ai_cache 键带 uid（`macro`/`profile` 两类公开资料例外）。
 - 三进程拓扑：gunicorn（gthread，2 worker x 8 线程，只绑 127.0.0.1:5000，`max_requests=0`）+ `scheduler.py`
-  + tailscale serve 终止 TLS。跨进程状态只靠文件：复盘 `data/review/.running-<date>`、东财节流
-  `data/.em_last_call`、用户首次建库 `data/users/<uid>/.init.lock`、选股 `data/.picks-running-public` 与
-  `data/users/<uid>/.picks-running`（都是 fcntl 排他锁）。进程内字典（`_review_job`、`_user_inited`、
+  + tailscale serve 终止 TLS。跨进程状态只靠文件锁：东财节流
+  `data/.em_last_call` 与用户首次建库 `data/users/<uid>/.init.lock` 用 fcntl 排他锁（不可用时回退进程内行为）；
+  复盘 `data/review/.running-<date>` 与选股 `data/.picks-running-public`、`data/users/<uid>/.picks-running` 用
+  O_EXCL 存在性锁（超 30 分钟视为陈旧可覆盖；复盘拿不到锁拒绝生成，选股拿不到锁放行）。进程内字典（`_review_job`、`_user_inited`、
   ratelimit 的分钟窗与最小间隔、picks 的 `_last`）每个 worker 一份，只做「本进程视角」。
-- 本地开发：`python3 app.py` 在站长上下文起盘中调度器，不要同时再跑 `scheduler.py`。
+- 本地开发：`python3 app.py` 在站长上下文起盘中调度器（启动瞬间能解析到站长才起，全新安装先起 app 再
+  adduser 需要重启才恢复），不要同时再跑 `scheduler.py`。
   `ASTOCK_ENV=production` 时 `app.py` 拒绝直接启动。
 - 对 conda 硬偏好的例外：服务器 systemd 单元用 `/opt/astock/.venv`（Miniconda 建的 3.10 环境放在这个
   路径；无人值守的 nologin 账号下比 conda activate 少坑）；本地仍 conda。用户可否决。
@@ -190,7 +192,8 @@ migrate 要在第一次登录前跑，否则登录会先建出空库，migrate �
 - 三周期选股运行时：交易日 16:00 全量（公共三周期在 `as_fleet()` 下跑、记 `fleet`；各账号自选股各跑一次记
   本人），09:05 只让公共池跑短线；自选股不分早晚，两个时刻都是同一份覆盖全部周期的完整提示词。手动
   `/api/picks/run` 走 ai 门、计入个人日额度；`/api/picks/run_public` 管理员可点、记 `fleet`。改口规则在
-  `picks_store._enforce` 里强制，不留后门。
+  `picks_store._enforce` 里强制，不留后门。公共短线候选池的题材串来自最近一期复盘（review store 的
+  `raw_theme`），复盘没生成时短线池退化为纯换手榜。
 
 服务器现状（部署级事实，改了就改这里）：阿里云 ECS 别名 `aliyun_ecs`，Ubuntu 20.04 共用机（k3s、docker、
 nginx、java 同机），站长账号 `<站长账号>`。systemd 单元 `astock-web`、`astock-scheduler`、`astock-news.timer`
@@ -255,8 +258,8 @@ nginx、java 同机），站长账号 `<站长账号>`。systemd 单元 `astock-
 10 年会涨到 820MB）。
 
 多用户下的三条硬约束：新起线程或线程池用 `userctx.Thread`/`spawn`/`ctx_map`，不用原生的；碰 agent
-数据的代码路径进 `userctx.as_fleet()`；跨进程要共享的状态落文件加 fcntl 锁，不放进程内字典。
-新增 store 先决定归个人库还是公共库。
+数据的代码路径进 `userctx.as_fleet()`；跨进程要共享的状态落文件锁（fcntl 排他锁或 O_EXCL 存在性锁），
+不放进程内字典。新增 store 先决定归个人库还是公共库。
 
 项目文档、代码注释、commit message 不出现装饰符号（用户 2026-08-25 规则）：不用箭头、对勾、感叹号
 类 emoji，用文字。存量文档已在 2026-09-17 清完，之后新写的内容照此。运行时输出字符串按同一口径。

@@ -27,7 +27,8 @@
 
 ### 0a. 判「失败」必须看结果，且地平线要够长 —— 5 日判罪 **33.1% 判反**
 
-教训库 9 类里**只有 `below_breakeven` 一类真的看了结果**。
+教训库当时 9 类里**只有 `below_breakeven` 一类真的看了结果**
+（当时 9 类，现 10 类，`bad_outcome` 是 0a-2 判罪线落地后的第 10 类）。
 `chase_high` 的文案写着「>85 视为追高，**此后回落**」，但 `detect_failures` 在成交的
 **同一个循环**里就记（传 `settled["filled"]`）——那时「此后」还没发生，
 **全仓 grep 过：`add_lesson` 当时只有 2 个调用点，无任何事后结算**。
@@ -66,15 +67,9 @@
 
 ### 0a-2. 「超额 < 0 = 失败」是错的 —— **中位数本来就是负的**
 
-修 #0a 时差点用上这条看着最自然的判罪线。实测 161,994 个建仓点的超额分布：
-
-| 分位 | 5日 | 10日 | 20日 |
-|---|---|---|---|
-| p10 | -6.03 | -8.56 | **-12.06** |
-| **p50** | **-0.35** | **-0.54** | **-0.90**（中位数为负） |
-| p90 | 6.93 | 10.10 | 14.86 |
-
-个股相对上证的超额中位数**天然为负**（指数市值加权，个股中位数跑输）。
+修 #0a 时差点用上这条看着最自然的判罪线。实测 161,994 个建仓点的超额分位分布：
+p50(20 日) 是 **-0.90**，即个股相对上证的超额中位数**天然为负**（指数市值加权，个股中位数
+跑输），完整分位表见 `plan/2026-07-16-outcome-driven-lessons-design.md`。
 故 `超额<0` 会把 **53% 的建仓点判成失败**，**AI 学到「你几乎总是失败」**。
 
 **判罪线只能从分布读**（`factor_lab.excess_dist` + `rank_of`），
@@ -112,7 +107,7 @@
 
 **结论：能验的参数必须验**（`factor_lab` 那套方法论可复用）；验不了的要**明确标注为纪律参数**（只需用户认可，不假装有数据支持）。
 
-**阈值验证现状**：`CHASE_HIGH_POS=85` 已用 `factor_lab` 验过方向成立（range_pos IC t=-4.9，显著负）；
+**阈值验证现状**：`CHASE_HIGH_POS=85` 方向已验（2026-07-18 用 `factor_lab` 验过，近 60 日 range_pos IC t=-4.9，显著负）；
 止损已回测（见上表，对应 `STOP_LOSS_PCT=-10`）；`STALE_DAYS=20`、`LOSS_CUT_PCT=-12` 定为纪律参数，不需验证；
 `_PRESCREEN=600` 的覆盖偏差已做分析（见 `plan/2026-07-18-prescreen-coverage-analysis.md`），是否改 `_PRESCREEN`
 本身仍待用户签字。
@@ -173,6 +168,26 @@ _pa_score 按 vol 正向 IC 选出高波动股 -> AI 听话买入
 - **连带**：`factor_lab.sample_codes` 注释称「已按流通市值降序」分层抽样，实为**按代码号**分层——
   全池 IC/`excess_dist` 的样本是代码分层、非市值分层（仍横跨全市场、大体可用，但不是宣称的市值分层）。**未修**（动它要碰判罪线/冻结分位，敏感）；记此以待。
 
+### 19. 线程池不带 contextvars：原生 ThreadPoolExecutor 里「当前用户」是空的
+
+`contextvars` 只随 `copy_context()` 传播，`threading.Thread` 与 `ThreadPoolExecutor.map` 都不会
+自动复制。2026-09-11 的补丁把 app.py 的 `threading.Thread` 换成了 `userctx.Thread`，但没碰
+`agent_loop.run_all` 和 debate 决策里的两个池子，结果打补丁后每个 agent 在 `agent_store.get_agent`
+处抛「当前上下文没有用户」，舰队一次都没真跑过。三个 reader 独立复现。
+规矩：后台线程用 `userctx.Thread` / `spawn` / `submit`，线程池用 `userctx.ctx_map`（逐任务
+`copy_context`，一个 Context 不能被两个线程同时进入）。新加线程的地方先问一句：里面碰个人库吗。
+
+### 22. 进程内状态在 gunicorn 多 worker 下每份各算各的
+
+`_review_job`（复盘运行状态）、`_user_inited`（用户库是否建过表）、ratelimit 的分钟窗与最小间隔、
+picks 的 `_last` 都是模块级字典或变量。两 worker + scheduler 三个进程互不可见：复盘可双跑、
+同一用户可能被两个 worker 同时灌两遍 84 条规则种子。跨进程要共享的状态一律落文件锁，分两种机制：
+**fcntl 排他锁**（`data/.em_last_call` 东财节流、`data/users/<uid>/.init.lock` 用户首次建库，
+fcntl 不可用时各自回退进程内行为）与 **O_EXCL 存在性锁**（复盘 `data/review/.running-<date>`、
+选股 `data/.picks-running-public` 与 `data/users/<uid>/.picks-running`；超 30 分钟视为陈旧可覆盖，
+复盘拿不到锁拒绝生成、选股拿不到锁放行）。进程内字典只当「本进程视角」用，
+接口上要能合并文件状态（`/api/review/status` 的 `running_elsewhere`）。
+
 ---
 
 ## 二、会让你白干的
@@ -197,6 +212,22 @@ _pa_score 按 vol 正向 IC 选出高波动股 -> AI 听话买入
 
 `blocks` 曾由 `_agent_boot` 算**一次**传给所有 agent，而 `_tier_block()` 读的是 **active 画像 + 用户真实持仓**，导致**50 万的中型 agent 拿到用户 7000 块的微型档玩法**，多档位实验完全失效。
 **已修**：`app._agent_blocks(ag, cash, total, n_pos)`——**档位跟这个账户的钱走**，**费率跟券商走**。
+
+### 20. 预算不能在门之前预扣
+
+补丁版 scheduler 每 5 分钟心跳在 `run_all` 之前按 agent 数 `consume(n=20)`，不看交易日、时段、
+`claim_slot`。20 个 agent 下 10 分钟耗尽个人 40 次、35 分钟耗尽全站 150 次，之后所有人 429，
+而扣掉的额度对应零次真实 LLM 调用。根因是计费单位选错了：按「HTTP 请求」或「计划要跑的次数」
+计费，与真实花费没有对应关系。
+现在计费点在 `llm._chat`：发请求前 `allow_llm` 做门，成功后 `record_ai_call` 计一次；缓存命中、
+失败、超时都不计；GET 路由、调度器、舰队全部覆盖。HTTP 层的 `check()` 只做门不计数。
+
+### 21. 「只对写方法计费」会漏掉 GET 路由里的 LLM 调用
+
+`GET /api/market/overview?refresh=1` 调 v4-pro 6000 tokens 且能绕过 5 分钟缓存，补丁版限流对
+GET 一律不计、也不做最小间隔，任何登录用户循环 GET 就能烧光余额。计费挪到调用点后自动覆盖；
+门这一侧给 `bucket_of` 加了 refresh 参数让它也过最小间隔。新加会调 LLM 的路由不用登记，但
+要问一句：它是 GET 吗，需不需要过门。
 
 ---
 
@@ -259,15 +290,23 @@ _pa_score 按 vol 正向 IC 选出高波动股 -> AI 听话买入
 吞成 `""`：裁判只听一边仍会产出**看着合理**的结论，而没人发现多头没上场——token 耗尽
 被伪装成市场判断，且**在跌势里系统性偏空**（多头恰是逆境下最易耗尽的）。属本文件第一类坑。
 
+### 24. 站长/单例身份不能只在进程启动时解析一次
+
+补丁版 `auth.init()` 在 import 时把最早管理员写进模块变量，之后不再刷新。按部署文档顺序
+「先起服务、再 adduser」，两个 worker 和 scheduler 都停在站长为空，`/api/agents` 全部 503
+直到人工重启。现在 `userctx.fleet_uid()` 在为空时每 60 秒惰性回调 auth 注册的 resolver。
+任何「启动时读一次、之后当常量用」的身份或配置，都要问：它在进程生命周期里会不会变、
+变了谁来通知。
+
 ---
 
 ## 四、环境与数据源
 
 ### 14. 东财按端点封 IP
 
-`clist`（批量出数）**间歇性、按 IP 封锁**——带/不带代理、走/不走 `em_get()` 都可能遇到
-`RemoteDisconnected`，但不是对所有 IP 恒定封死：2026-08 复盘模块 `review.fetch.sector_flow`
-就走 `push2 clist`，带退避重试，实测「时开时封」。
+`clist`（批量出数）**间歇封锁、按 IP**——带/不带代理、走/不走 `em_get()` 都可能遇到
+`RemoteDisconnected`，但不是对所有 IP 恒定封死：住宅 IP 时开时封，服务器 IP 全通（2026-08
+复盘模块 `review.fetch.sector_flow` 就走 `push2 clist`，带退避重试）。
 `slist`（逐股）放行 0.2s，仍是板块归属回填的稳妥选择，故板块归属继续逐股回填 ~100min；
 批量 `clist` 换 IP/环境后要重新探测才能用，不要假定它在新环境里也通。
 
@@ -314,53 +353,9 @@ _pa_score 按 vol 正向 IC 选出高波动股 -> AI 听话买入
 - **按日累积的表一律要有 `purge()`**：`sector_daily` 曾无清理，导致 977 板块 × 245 日 = **24 万行/年 ≈ 82MB**，10 年 820MB。SQLite `DELETE` 不回收文件空间（页复用），稳态≈1年峰值。
 - **`risk_pref` 曾是死字段**：存了、API 能改、前端能选，但 `llm.py` **0 处**引用，导致用户选「稳健/激进」AI 完全看不到。已译成具体行为指令注入（`profile_store.RISK_GUIDE`）。
 
-## 五、多用户与多进程
-
-### 19. 线程池不带 contextvars：原生 ThreadPoolExecutor 里「当前用户」是空的
-
-`contextvars` 只随 `copy_context()` 传播，`threading.Thread` 与 `ThreadPoolExecutor.map` 都不会
-自动复制。2026-09-11 的补丁把 app.py 的 `threading.Thread` 换成了 `userctx.Thread`，但没碰
-`agent_loop.run_all` 和 debate 决策里的两个池子，结果打补丁后每个 agent 在 `agent_store.get_agent`
-处抛「当前上下文没有用户」，舰队一次都没真跑过。三个 reader 独立复现。
-规矩：后台线程用 `userctx.Thread` / `spawn` / `submit`，线程池用 `userctx.ctx_map`（逐任务
-`copy_context`，一个 Context 不能被两个线程同时进入）。新加线程的地方先问一句：里面碰个人库吗。
-
-### 20. 预算不能在门之前预扣
-
-补丁版 scheduler 每 5 分钟心跳在 `run_all` 之前按 agent 数 `consume(n=20)`，不看交易日、时段、
-`claim_slot`。20 个 agent 下 10 分钟耗尽个人 40 次、35 分钟耗尽全站 150 次，之后所有人 429，
-而扣掉的额度对应零次真实 LLM 调用。根因是计费单位选错了：按「HTTP 请求」或「计划要跑的次数」
-计费，与真实花费没有对应关系。
-现在计费点在 `llm._chat`：发请求前 `allow_llm` 做门，成功后 `record_ai_call` 计一次；缓存命中、
-失败、超时都不计；GET 路由、调度器、舰队全部覆盖。HTTP 层的 `check()` 只做门不计数。
-
-### 21. 「只对写方法计费」会漏掉 GET 路由里的 LLM 调用
-
-`GET /api/market/overview?refresh=1` 调 v4-pro 6000 tokens 且能绕过 5 分钟缓存，补丁版限流对
-GET 一律不计、也不做最小间隔，任何登录用户循环 GET 就能烧光余额。计费挪到调用点后自动覆盖；
-门这一侧给 `bucket_of` 加了 refresh 参数让它也过最小间隔。新加会调 LLM 的路由不用登记，但
-要问一句：它是 GET 吗，需不需要过门。
-
-### 22. 进程内状态在 gunicorn 多 worker 下每份各算各的
-
-`_review_job`（复盘运行状态）、`_user_inited`（用户库是否建过表）、ratelimit 的分钟窗与最小间隔、
-`datasources._em_last_call`（东财节流时间戳）都是模块级字典或变量。两 worker + scheduler 三个进程
-互不可见：复盘可双跑、同一用户可能被两个 worker 同时灌两遍 84 条规则种子、东财请求率翻三倍。
-跨进程要共享的状态一律落文件加 `fcntl.flock`：`data/review/.running-<date>`、
-`data/users/<uid>/.init.lock`、`data/.em_last_call`。进程内字典只当「本进程视角」用，
-接口上要能合并文件状态（`/api/review/status` 的 `running_elsewhere`）。
-
 ### 23. 提交前的两条 grep 拦不住 IP 和登录名
 
 铁律原来只查 `.env` 未跟踪和 `sk-` 前缀。2026-09-11 的 deploy 文档含真实公网 IP、服务器登录名、
 本机绝对路径，两条 grep 全部通过。仓库是公开 MIT 仓库，IP 加登录名等于 SSH 爆破的完整目标。
 铁律已加第三条（对暂存区新增行 grep IPv4 字面量与 `/Volumes/` `/Users/`），测试里的 IP 用
 `203.0.113.x` 文档保留段。凡是从别的工具或别的机器带进来的文件，入库前先跑这三条。
-
-### 24. 站长/单例身份不能只在进程启动时解析一次
-
-补丁版 `auth.init()` 在 import 时把最早管理员写进模块变量，之后不再刷新。按部署文档顺序
-「先起服务、再 adduser」，两个 worker 和 scheduler 都停在站长为空，`/api/agents` 全部 503
-直到人工重启。现在 `userctx.fleet_uid()` 在为空时每 60 秒惰性回调 auth 注册的 resolver。
-任何「启动时读一次、之后当常量用」的身份或配置，都要问：它在进程生命周期里会不会变、
-变了谁来通知。

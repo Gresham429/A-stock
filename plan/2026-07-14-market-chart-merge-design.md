@@ -1,12 +1,14 @@
 # 设计：波动 + K线 合并为「行情」图（多周期蜡烛 + 分时自动刷新）
 
-> 日期：2026-07-14 ｜ 状态：待用户 review ｜ 类型：功能改动（前端为主 + 后端 1 处透传 + 1 个轻量新端点）
+状态：已实现（2026-07-14）
+
+> 日期：2026-07-14 ｜ 类型：功能改动（前端为主 + 后端 1 处透传 + 1 个轻量新端点）
 
 ## 背景 / 问题
 
 深挖抽屉现在有两个独立标签：
 - **「波动」**（`pane_wave`）：多周期折线（当日/5日/30日/60日/90天/近1年），只画收盘价连线。
-- **「K线/箱形」**（`pane_kl`）：完整蜡烛图（红涨绿跌 + MA5/MA20 + 成交量）+ 箱形图，但**固定看最近 60 天**、单独走 `/api/kline`。
+- **「K线/箱形」**（`pane_kl`）：完整蜡烛图（红涨绿跌 + 均线 + 成交量）+ 箱形图，但**固定看最近 60 天**、单独走 `/api/kline`。
 
 两个已知问题：
 1. **60日 与 90天 几乎一样**（`static/app.js:281-283`）：60日=最近 60 个**交易日**（`slice(-60)`），90天=最近 90 个**自然日**（`date>=today-90`≈62 个交易日）。单位混用导致两档装的是几乎同一批 K 线。
@@ -16,8 +18,8 @@
 
 把两个标签**合并成一个「行情」标签**，做成交易软件式的多周期行情图：
 - 周期：`分时 · 5日 · 近1月 · 近3月 · 近半年 · 近1年`。
-- 分时 / 5日 → 折线+面积（复用现有 `waveChart`，保留十字准星 hover）。
-- 近1月 / 近3月 / 近半年 / 近1年 → **蜡烛图 + MA5(橙)/MA20(蓝) + 成交量柱**（复用 `candlestick`），下方保留箱形图 + 统计行。
+- 分时 / 5日画折线+面积（复用现有 `waveChart`，保留十字准星 hover）。
+- 近1月 / 近3月 / 近半年 / 近1年用**蜡烛图 + 可选均线（MA5/10/20/60/120/240）+ 成交量柱**（复用 `candlestick`），下方保留箱形图 + 统计行。
 - 修掉 60/90 重叠：四个日K档**统一按自然日窗口**。
 - 蜡烛图**新增鼠标悬停**：显示当日 开/高/低/收 + 涨跌%。
 - **分时自动刷新**：抽屉开着 + 当前是分时 + 处于北京时间交易时段时，每 30s 自动重拉分时并重渲染。
@@ -42,21 +44,21 @@
 | `6m`   | 近半年 | 蜡烛 | `WAVE.daily` | `date >= today-180` ≈122 根 |
 | `1y`   | 近1年  | 蜡烛 | `WAVE.daily` | `date >= today-365` ≈244 根 |
 
-- 四个日K档**全部按自然日窗口过滤**，不再用 `slice(-N)` 交易日根数 → 各档 K 线数明显不同，60/90 重叠消失。
+- 四个日K档**全部按自然日窗口过滤**，不再用 `slice(-N)` 交易日根数，于是各档 K 线数明显不同，60/90 重叠消失。
 - `WAVE_PERIODS` 常量与默认 `WAVE_PERIOD='day'` 相应更新。
 
-### ② 均线全序列预计算——避免窗口内 MA 缺头
+### ② 均线全序列预计算（MA5/10/20/60/120/240）——避免窗口内 MA 缺头
 
-- 在**完整 `WAVE.daily` 序列**上算好每根的 MA5 / MA20，挂到 bar 上（`{...bar, ma5, ma20}`），**再按周期窗口截取**。
-- 这样看「近1月」时 MA20 也是完整的（否则窗口前 19 根没有 MA20）。
-- `candlestick()` 改为**读取 bar 上预计算的 ma5/ma20**，不再自己按窗口内 index 算。
+- 在**完整 `WAVE.daily` 序列**上算好每根的各周期均线（MA5/10/20/60/120/240），挂到 bar 上，**再按周期窗口截取**。
+- 这样看「近1月」时 MA20 这类长周期均线也是完整的（否则窗口前若干根没有值）。
+- `candlestick()` 改为**读取 bar 上预计算的均线**，不再自己按窗口内 index 算。
 
 ### ③ 渲染分派——`renderWavePeriod()`
 
 ```
 series = waveSeries(WAVE_PERIOD)
 if series.kind === 'intra':   body = waveChart(series)            // 折线+面积，带十字准星
-else (kind === 'daily'):      body = candlestick(bars)            // 蜡烛+MA5/MA20+量+hover
+else (kind === 'daily'):      body = candlestick(bars)            // 蜡烛+均线+量+hover
                               + boxplot(bars.map(close))          // 箱形图保留在下方
                               + waveStats(...)                    // 振幅/年化波动 统计行
 ```
@@ -79,8 +81,8 @@ GET /api/minute/<code>  ->  {"intraday": ds.tencent_minute(code), "prev_close": 
 - `openDetail()`：进入时（在 `++detailSeq` 之后）`clearInterval(waveTimer)`，然后启动 `waveTimer=setInterval(tickMinute, 30000)`。
 - `closeDrawer()`：`clearInterval(waveTimer); waveTimer=null;`
 - `tickMinute()` 逻辑：
-  1. 若 `WAVE_PERIOD!=='day'` 或抽屉未打开 → return（不刷）。
-  2. 若非北京时间交易时段 → return（见下）。
+  1. 若 `WAVE_PERIOD!=='day'` 或抽屉未打开，return（不刷）。
+  2. 若非北京时间交易时段，return（见下）。
   3. `const gen=detailSeq;` fetch `/api/minute/<当前code>`；回来后 `if(gen!==detailSeq) return;`（**请求令牌**，防切股票错位，遵守项目「异步渲染必须带请求令牌」约定）。
   4. 更新 `WAVE.intraday` / `WAVE.prev_close`，若当前仍是 `day` 则 `renderWavePeriod()`。
 - **北京时间交易时段判定** `_cnTradingNow()`：用 `Intl.DateTimeFormat('en-US',{timeZone:'Asia/Shanghai',...})` 取北京时/分/星期，判周一~周五 且 时间落在 `09:25–11:35` 或 `12:55–15:05`。
@@ -99,24 +101,24 @@ GET /api/minute/<code>  ->  {"intraday": ds.tencent_minute(code), "prev_close": 
 |------|------|
 | `app.py` | `/api/wave` 的 daily 从 `{date,close}` 改为 `{date,open,high,low,close,volume}`（`sina_kline(260)` 本就返回这些，只是被丢了）；新增 `GET /api/minute/<code>`。 |
 | `static/app.js` | `WAVE_PERIODS` 周期表；`waveSeries()` 周期窗口 + 返回 OHLC bar；MA 全序列预计算；`renderWavePeriod()` 折线/蜡烛分派 + 箱形；`candlestick()` 读预计算 MA + 加 hover；新增 `waveTimer`/`tickMinute`/`_cnTradingNow`；`openDetail`/`closeDrawer` 起停定时器 + 删 `/api/kline` 请求；删 `renderKline` 包装。 |
-| `templates/index.html` | 合并标签（删 kl tab 与 pane_kl，wave→行情）。 |
+| `templates/index.html` | 合并标签（删 kl tab 与 pane_kl，wave 改名为行情）。 |
 
 零新依赖，纯内联 SVG，遵守看板约定（红涨绿跌 / 无外部资源 / 异步带请求令牌）。
 
 ## 测试计划
 
 - 语法：`python3 -c "import ast; ast.parse(open('app.py').read())"`；`node --check static/app.js`。
-- 起服务（先释放 5000：关 AirPlay Receiver）→ 开任一自选股深挖 →「行情」标签：
+- 起服务（先释放 5000：关 AirPlay Receiver），开任一自选股深挖，「行情」标签：
   1. 切 6 个周期，确认 **近1月/近3月/近半年/近1年 蜡烛根数各不同**（≈20/62/122/244）；
-  2. MA5/MA20 在近1月也**画满**、成交量红绿正确；
+  2. 各周期均线在近1月也**画满**、成交量红绿正确；
   3. 蜡烛 hover 出 **OHLC + 涨跌%**；
   4. 分时/5日 仍是折线 + 十字准星；箱形图在蜡烛下方；
   5. 交易时段观察分时「刷新于」时间每 30s 跳动、曲线延长；非交易时段不刷、标注快照。
-- `curl --noproxy '*' localhost:5000/api/wave/<code>`：daily 含 OHLC；`/api/minute/<code>`：返回 intraday + prev_close。
+- `curl --noproxy '*' 127.0.0.1:5000/api/wave/<code>`：daily 含 OHLC；`/api/minute/<code>`：返回 intraday + prev_close。
 
 ## 风险 / 边界
 
-- **非交易时段/新股**分时可能为空 → 已有空态提示，保留。
-- **窗口内 K 线过少**（新股「近1年」也许只有几十根）→ 蜡烛照画，MA 缺头正常跳过。
+- **非交易时段/新股**分时可能为空，已有空态提示，保留。
+- **窗口内 K 线过少**（新股「近1年」也许只有几十根），蜡烛照画，均线缺头正常跳过。
 - **自动刷新时区**：靠 `Asia/Shanghai` 显式判定，跨时区机器也正确；节假日漏判无害（数据静态）。
 - **请求令牌**：`tickMinute` 必须校验 `detailSeq`，否则快速切股票时旧分时会覆盖新股票视图。

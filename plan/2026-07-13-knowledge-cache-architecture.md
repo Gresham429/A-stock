@@ -24,14 +24,14 @@
 ---
 
 ## L1 · AI 输出短期缓存
-- 缓存文件 `data/ai_cache.json`；键为 `{kind}:{uid}:{输入指纹}:{当日日期}`，跨交易日自然失效。
+- 缓存文件在 `data/ai_cache.json`（仓库根目录的旧文件只读一次作 legacy 迁移；服务器沙箱只放行 data/）；键为 `{kind}:{uid}:{输入指纹}:{当日日期}`，跨交易日自然失效。
 - kind 覆盖 daily / screen / position / market / entry / macro / profile；公开类（macro、profile，
   提示词只含公开资料、不含个人数据）的 uid 段固定为 `-`，跨用户共用一份结果；其余 kind 按当前用户隔离。
 - 输入指纹只取影响结论的输入（自选/持仓/资金/板块/代码），排除实时价格，否则每次报价跳动都会 miss。
 - TTL 按 kind 分类，具体数值看 `ai_cache.py` 的 `_TTL`（daily/screen/position 30 分钟，market 5 分钟，
   profile 12 小时，macro 6 小时；未在 `_TTL` 里列出的 kind 默认 30 分钟）。
 - 命中且未过期，返回缓存（标"命中 · 分析于 X · Y 分钟前"）；未命中、过期、输入变化、跨交易日或点了
-  强制刷新，则重算。
+  强制刷新，则重算。缓存命中不发起 LLM 请求、不计费（计费点只在真实调用 `llm._chat`）。
 - 只保留当日条目，文件大小恒定。
 
 ## L2 · 新闻/政策资讯库（SQLite，滚动 1 年）
@@ -73,5 +73,4 @@
 spec，经你批准，再实现、提交。
 
 ## 待定 / 开放
-- **博查 key**：是否配（决定 L3/L4 联网强度）。你多次打开 `.env`——若要配，用 `BOCHAAI_API_KEY`。
-- 新增 gitignore：`ai_cache.json`、`data/`（含 `news.db`）、私域笔记文件。
+- **博查 key**：是否配（决定 L3/L4 联网强度）。若要配，用 `BOCHAAI_API_KEY`。

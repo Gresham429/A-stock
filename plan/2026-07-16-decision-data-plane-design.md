@@ -1,6 +1,8 @@
 # 决策数据面 —— 让提示词能满足它自己注入的规则
 
-> 2026-07-16。起因：早盘 12 个 agent 跑完，**11 个产出 0 条意向**，且非风控否决。
+状态：已实现（2026-07-16）
+
+> 起因：早盘 12 个 agent 跑完，**11 个产出 0 条意向**，且非风控否决。
 
 ## 问题（有证据）
 
@@ -17,7 +19,7 @@
 
 ### 缺口①：候选股无任何 K 线/结构数据
 
-`agent_loop._decide_prompt`（原 138-142 行）每只候选只给
+`agent_loop._decide_prompt` 每只候选只给
 「现价/形态分/波动/区间位置/20日涨/1手成本/板块」——全是**静态标量**。
 
 而 `blocks` 注入的规则库是**价格行为体系**：84 条启用规则里 **37 条**需要
@@ -30,11 +32,11 @@ K线/均线/趋势/信号棒（市场状态识别8 + 形态结构7 + 趋势与�
 
 ### 缺口②：【今日大盘】传的是一个板块名
 
-`agent_loop.py:522` 原为
-`(universe_store.sector_ranking(kind="sw1", limit=3) or [{}])[0].get("sector","")`
-→ AI 看到的「大盘」字面上就是「传媒」两个字。
+`agent_loop.py` 原为
+`(universe_store.sector_ranking(kind="sw1", limit=3) or [{}])[0].get("sector","")`，
+所以 AI 看到的「大盘」字面上就是「传媒」两个字。
 
-「研判」阶段（484-495 行）只挑了最强板块 + 扫挂单，**从不调**
+「研判」阶段只挑了最强板块 + 扫挂单，**从不调**
 `llm.market_overview` / `ds.index_quotes` / `ds.market_breadth`——这些都写好了没接。
 
 ### 这与 PITFALLS#2 是同一类错误
@@ -54,7 +56,7 @@ K线/均线/趋势/信号棒（市场状态识别8 + 形态结构7 + 趋势与�
 - `digest(bars) -> dict|None`：MA5/20/60、近20日最高/最低、最近3根 OHLC
 - `fmt_stock(d) -> str` / `fmt_market(...) -> str`：紧凑成行
 
-单独建模块而非塞进 `datasources.py`(779行)/`app.py`(1490行)：
+单独建模块而非塞进 `datasources.py`/`app.py`：
 两者都已远超 400 行目标，且纯函数好测（契合本项目零依赖离线测试风格）。
 
 ### 数据源（均已实测，见下「实测结论」）
@@ -72,20 +74,20 @@ K线/均线/趋势/信号棒（市场状态识别8 + 形态结构7 + 趋势与�
 
 ### token 预算
 
-每候选约 +60 字符 × 20 只 ≈ **+1200 字**，提示词 8000 → ~9200。
-v4-pro 决策档 `max_tokens=8000` 覆盖思考+正文（PITFALLS#13），需**跑完实测**
+每候选约 +60 字符 × 20 只 ≈ **+1200 字**，提示词约 8000 到 9200 字符。
+v4-pro 决策档 `max_tokens=8000` 覆盖思考+正文（PITFALLS#13）；每次扩容数据面后要重测辩论档
 `finish_reason`，若逼近上限则加预算而非砍数据。
 
-## 实测结论（2026-07-16 12:16，本机）
+## 实测结论
 
-- ✅ `sina_kline('002354', num=60)` → 60 bars / 0.2s
-- ✅ `index_quotes()` → 5 指数齐全 + 两市成交额 14803.7 亿 / 0.3s
-- ⚠️ **`market_breadth()` 一半是坏的**（文档未记）：行业 `clist` 请求
-  `Remote end closed connection` → `advancers`/`decliners`=None、
+- `sina_kline('002354', num=60)` 通过：60 bars / 0.2s
+- `index_quotes()` 通过：5 指数齐全 + 两市成交额 14803.7 亿 / 0.3s
+- 注意：**`market_breadth()` 一半是坏的**（文档未记）：行业 `clist` 请求
+  `Remote end closed connection`，`advancers`/`decliners`=None、
   `top_industries`=[]；仅 push2ex 的涨停48/跌停5 可用。
-  → **PITFALLS#14「东财按端点封 IP」的影响范围比文档写的大**：不止个股 `clist`，
+  **PITFALLS#14「东财按端点封 IP」的影响范围比文档写的大**：不止个股 `clist`，
   行业板块 `clist`(`fs=m:90+t:2`) 同样被封。涨跌家数改由 `sector_ranking` 侧面反映。
-- ⚠️ `ds.market_prefix('000001')` → `'sz'`（指数误判，故 `index_kline` 前缀硬编码）
+- 注意：`ds.market_prefix('000001')` 判成 `'sz'`（指数误判，故 `index_kline` 前缀硬编码）
 
 ## 步骤
 
@@ -93,46 +95,9 @@ v4-pro 决策档 `max_tokens=8000` 覆盖思考+正文（PITFALLS#13），需**�
 2. `ds.index_kline()`
 3. `app._safe_kline()`（TTL 缓存 + 异常兜底，mirror `_safe_metrics`）
 4. `agent_loop`：研判阶段产出真·大盘块；`_decide_prompt` 候选行加结构
-5. 冒烟：30 例回归 + `dry_run` 实跑，验 `skip_reason` 是否消失、`finish_reason` 是否够用
+5. 冒烟：离线回归 + `dry_run` 实跑，验 `skip_reason` 是否消失、`finish_reason` 是否够用
 
 ## 验收标准
 
 **不是**「代码跑通」，而是：`dry_run` 后决策 `skip_reason` **不再出现「数据不足/缺少K线」**。
 若 AI 仍拒绝出手但理由变成实质判断（如「趋势向下不做多」），那是**正确行为**，算通过。
-
-## 实跑结果（2026-07-16 12:40–13:00）
-
-### ✅ 验收通过
-
-| agent | 改前 skip_reason | 改后 skip_reason |
-|---|---|---|
-| 12 微型-均衡单A | 数据不足：缺少K线、趋势、均线、信号棒 | **大盘下跌趋势，空头 Always In，禁止逆势做多**，传媒板块虽有强势个股但整体环境不利于买入 |
-| 17 微型-激进单A | （唯一出手的） | 大盘空头趋势，个股多数下跌；强势股追高风险大，无合适买点 |
-
-AI 开始用规则库的价格行为术语（**Always In**）做实质判断，并真的在读指数结构
-（上证 3923 < MA5 3973 < MA20 4047 < MA60 4083 = 空头排列）。仍 0 意向，但这次是
-**因为今天大盘确实在跌**（上证 -0.82% / 创业板 -1.73%），不是因为看不到数据 —— 符合验收标准。
-
-### ⚠️ 途中修掉的三个坑（都是「不报错但让 AI 读错」类）
-
-1. **`MA58.01`**：`fmt_stock` 拼出的 `MA5`+`8.01` 与「MA58」无法区分 → 加 `=` 分隔。
-   我的测试原本断言 `"MA20" in s`，**照样通过**——测试太弱，已补 `test_fmt_stock_ma_unambiguous`。
-2. **K线日期错位（最严重）**：盘中日K最后一根是**上一交易日**，而候选行「现价」是实时价。
-   实测 07-16 12:35 午休：工商银行日K末根=07-15 收 7.51(=昨收)，实时价 7.43。
-   不标日期 AI 会把昨天的 bar 当今日信号棒读——**价格行为体系读的就是这根**。
-   → 每根K线加 `MMDD:` 前缀 + 提示词表头明写「日K只到上一交易日」。顺带能暴露停牌股。
-3. **`sina_kline` 未知代码崩溃（既存 bug，非本次引入）**：新浪对未知/退市代码回 `null`
-   → `json.loads` 得 `None` → `for x in arr` 抛 `TypeError`，而 except 只捕 `OSError/ValueError`
-   → **穿透调用方**。全市场池必踩（PITFALLS#11 同类）。已加 `isinstance(arr, list)` 兜底。
-
-### 🔴 PITFALLS#13 二次踩中：辩论档裁判 token 耗尽
-
-提示词 8900 → **11584 字符**（prompt_tokens 8108，实测 ≈1.43 字符/token）后，
-**辩论档 `finish_reason=length`、正文返回空**（`runs[482] ok=0`）。
-
-实测定位（不猜，逐个量）：
-- 空头档 max_tokens=4000：`finish=stop`，completion 2246（其中 **reasoning 2080**）→ **宽裕**
-- 裁判档 max_tokens=12000：**炸** ← 它读 base + 多空双方论点，上下文最长
-
-**教训**：数据面每次扩容都要重测辩论档——它是 token 预算的**最短板**，
-且 single 档跑通**不代表** debate 档跑通（本次 single 全过、debate 全炸）。

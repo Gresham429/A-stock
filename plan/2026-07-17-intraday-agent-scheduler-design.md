@@ -1,24 +1,29 @@
 # 盘中 agent 调度器（长期挂机也能每桶自动跑）
 
-> 2026-07-17。解决「app 在非交易时段启动、此后当日决策永不自动触发」。
+状态：已实现（2026-07-17）
+
+> 解决「app 在非交易时段启动、此后当日决策永不自动触发」。
 
 ## 问题
 
-日循环唯一的自动触发点是 `_agent_boot()`，只在 **app 启动时**跑一次（`_universe_boot` 末尾）。
+日循环唯一的自动触发点是 `_agent_boot()`，只在 **app 启动时**跑一次。
 用户长期挂机、常在盘前（如 00:13）启动 app：那一次启动带 `require_open=True` 命中非交易
-时段 → 只补条件单、跳过决策；此后**没有任何再触发**，于是当天早盘/尾盘两个桶全空。
+时段，只补条件单、跳过决策；此后**没有任何再触发**，于是当天早盘/尾盘两个桶全空。
 
 实测 2026-07-17：app 00:13 启动，到 09:58 仍 `runs=179`（全是昨天的）、当日 0 claims、
 0 挂单。`current_slot()` 已是「早盘」、门全通，但没有东西去调用它。
 
 ## 方案（A：后台定时线程 + 单飞锁）
 
-新增守护线程 `_agent_scheduler()`，在 `_universe_boot` 末尾**替代**原来那一次 `_agent_boot()`：
+新增守护线程 `_agent_scheduler()`，**替代**原来那一次 `_agent_boot()`。位置：本地在
+`app.py` 的 `__main__` 里、`as_fleet()` 站长上下文下起（启动时能解析到站长才起）；服务器
+gunicorn（`wsgi.py`）不执行 `__main__` 不起它，`scheduler.py` 要 `ASTOCK_AGENT_AUTO=1`
+才以同样节奏在站长上下文里跑，默认关（保留「不开 app 就不炒股」，否则站长只能手动触发）。
 
 1. **先立刻跑一次** `_agent_tick()`——完全保留「启动即尝试」的旧行为。
 2. 之后每 `_AGENT_TICK_SEC=300`（5 分钟）再 `_agent_tick()` 一次。
 
-`_agent_tick()` = 非阻塞抢单飞锁 → `_agent_boot()`（即 `run_all(require_open=True)`）→ 释放。
+`_agent_tick()` = 非阻塞抢单飞锁，然后 `_agent_boot()`（即 `run_all(require_open=True)`），再释放。
 
 ### 为什么安全（全部复用现有门）
 
@@ -33,7 +38,7 @@
 ### 成本
 
 与「设计意图」完全一致：每桶恰好一次真决策 = 20 agent × 2 桶/天。多出来的 tick 近乎零成本
-（占位已满 → 秒返回；或非交易时段只扫条件单）。**5 分钟间隔不增加 LLM 花费。**
+（占位已满则秒返回；或非交易时段只扫条件单）。**5 分钟间隔不增加 LLM 花费。**
 
 ### 效果
 
@@ -42,8 +47,9 @@
 ## 改动面
 
 - `app.py`：新增 `_AGENT_TICK_SEC` / `_agent_tick_lock` / `_agent_tick()` / `_agent_scheduler()`；
-  `_universe_boot` 末尾 `_agent_boot()` → 起 `_agent_scheduler` 守护线程。约 25 行，纯增量。
-- 冒烟：AST 语法 + `import app` 不炸 + 现有 74 例离线测试仍全过。
+  `__main__` 里（站长上下文）起 `_agent_scheduler` 守护线程；服务器在 `scheduler.py`，
+  需 `ASTOCK_AGENT_AUTO=1`。纯增量。
+- 冒烟：AST 语法 + `import app` 不炸 + 离线测试仍全过（测试数见 `python3 tools/status.py`）。
 - 落地验证：交易时段重启 app，观察当前桶 5 分钟内产生当日 runs/claims。
 
 ## 未做（YAGNI）

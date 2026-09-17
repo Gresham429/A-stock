@@ -15,7 +15,7 @@
   再给这些标的和自选股补基本面、舆情、财务、驱动；不给买卖点（买卖点归 B）。
 - D 浅色主题 + 手机适配：整站浅白色；手机与电脑都能正常用。
 
-## 二、多用户收尾（2026-09-16 review 判定可延后，修法明确）
+## 二、可直接做的收尾（修法明确，时间自定）
 
 - 推送 `main` 到 GitHub，用户定。
 - `ratelimit.allow_llm` 与 `record_ai_call` 非原子：并发下日预算可超出，上限是同时在飞的调用数
@@ -38,6 +38,11 @@
   `notes_store` / `astockctl` / `scheduler`。
 - 运行时输出里还有装饰符号（`tests/test_review_metrics.py` 的通过提示、前端芯片文案）；文档已清完，
   代码按同一口径改时顺手处理。
+- 本地 `python3 app.py` 的盘中 agent 调度器只在启动瞬间能解析到站长时启动（app.py `__main__`），全新安装
+  「先起 app、再 adduser」会没有盘中调度器，重启才恢复。修法：站长 resolver 解出后补启，或启动后按
+  60 秒节奏重试到有站长为止。
+- `universe_store.refresh_roster` 只增不改：退市股票残留全 A 名单与池子。修法：按新浪 `hs_a` 名单对本地
+  名单做下线标记/清理（因子回测的历史样本不受影响，只影响实时名单）。
 
 ## 三、需用户签字才改（自主会话只分析、列建议，不直接改）
 
@@ -56,6 +61,9 @@
 - `DebateDecider` 默认不启用（UI 可选）：先用 single 拿基线，用数据证明需要再切。
 - 逐笔费率快照：画像只存单一费率、无 as-of 快照。用户单笔超过 20000 元（万 2.5 的 5 元分界）之后
   历史笔与新笔才会用到不同费率；小单都触 5 元最低，无影响，暂不做。
+- `llm.py` 的 `daily_recommendation` 与 `market_screen` 提示词里硬编码「本金约 1 万、偏好科技股」的画像
+  文字（llm.py 约 296/510 行），与注入的 `_tier_block` 动态档位块可能互相矛盾。删掉硬编码或改成从画像
+  取值会改变这两类 AI 输出，改前需用户认可。
 
 ## 四、卡在外部条件
 
@@ -87,3 +95,7 @@
 - 溯源（provenance）推广：现仅 entry/position；daily/screen/market 也可加；picks 自带 basis 但没走
   `provenance.verify_basis`。
 - 玩法 template 文案可编辑：现 5 档玩法是代码常量，只读展示。
+- 新闻增量抓取只轮询精选龙头池（`universe.all_codes()`）+ 自选股（news_store 的 `_universe_slice` 与研报
+  路径），全市场其余个股新闻靠深挖时惰性抓取。要全市场滚动新闻需扩池（抓取量约 30 倍），未承诺。
+- `agent_store.runs.detail` 原文截断 20000 字符（agent_store.py:232）：debate 原始输出较长时被截，
+  复盘追溯能力受存储上限约束。可调大或改摘要策略，未承诺。

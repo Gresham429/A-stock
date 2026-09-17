@@ -1626,16 +1626,19 @@ async function _alertPost(url, body, what){
   loadAlerts();
   return j;
 }
-// 生成一个只属于这个账号的 ntfy 主题：ntfy.sh 是公开服务器，主题名就是密码，
-// 所以用随机串而不是 astock 这种谁都能猜到、别人一订阅就能看到你持仓提醒的名字。
+// 生成一个只属于这个账号的 ntfy 主题：ntfy.sh 上没有注册，**主题名就是密码**，
+// 所以用随机后缀而不是 astock 这种谁都能猜到、别人一订阅就能看到你持仓提醒的名字。
+// 主题名**不会自己变**（服务端不轮换），只有点这个按钮才会换；换的时候把旧的 ntfy 行替掉，
+// 免得越点越多、也免得提示里报的名字和框里那行不是同一个（首版就是这个 bug）。
 function genNtfyTopic(){
   const rand = (Math.random().toString(36).slice(2, 8) + Math.random().toString(36).slice(2, 6));
   const topic = `ntfy astock-${rand} 我的手机`;
   const el = document.getElementById('alertTargets');
-  if(!el.value.trim()){ el.value = topic; }
-  else if(!/^\s*ntfy\b/m.test(el.value)){ el.value = el.value.replace(/\s*$/, '\n') + topic; }
+  const kept = el.value.split('\n').filter(l => l.trim() && !/^\s*ntfy\b/i.test(l));
+  el.value = kept.concat([topic]).join('\n');
   document.getElementById('alertMsg').textContent =
-    `已生成主题 astock-${rand}：手机装 ntfy App → 订阅这个主题 → 回来点「发测试」。记得点「保存手机」。`;
+    `主题 astock-${rand}：手机装 ntfy App → 订阅这个主题名 → 回来点「保存手机」→ 再点「发测试」。` +
+    `主题名不会自己变，只有再点一次这个按钮才会换（换完记得重新保存并在 App 里改订阅）。`;
 }
 function saveAlertTargets(){ return _alertPost('/api/alerts/targets',{targets:document.getElementById('alertTargets').value},'保存手机'); }
 function saveAlertPoints(){ return _alertPost('/api/alerts/points',{points:document.getElementById('alertPoints').value},'保存点位'); }

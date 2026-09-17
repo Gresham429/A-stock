@@ -172,6 +172,8 @@ for name, fn in [("涨停池", fetch.zt_pool), ("炸板池", fetch.zb_pool),
     r = fn(d); print(name, "通" if r else "不通/空", len(r or []))
 r = fetch.dragon_tiger(fetch.to_dash(d)); print("龙虎榜", "通" if r else "不通/空")
 r = fetch.sector_flow(); print("板块资金流 clist", "通" if r else "不通（复盘降级为 4 角色）")
+import moneyflow_store as mf
+print("资金流快照 clist", len(mf.fetch_snapshot()), "只")
 import datasources as ds
 print("个股板块 slist", ds.concept_tags("600519") or "不通")
 print("研报 reportapi", "通" if ds.eastmoney_reports("600519") else "不通")
@@ -189,7 +191,10 @@ EOF
 | 个股板块 slist | 全市场池板块归属回填 | 板块面板空 |
 | 研报 reportapi / 个股新闻 | 深挖 | 深挖里对应块为空 |
 
-家里 IP 上 clist 是时通时封的，服务器上再测一遍才算数。
+`push2` 系的 clist 在云 IP 上大概率不通，代码里带镜像备用主机（`push2delay.eastmoney.com`），
+所以上面两项都要看数字才算过。2026-09-17 在阿里云实测：`push2` 与 `push2his` 在 TCP 层就被拒，
+`push2delay` 正常，`datacenter-web` 与 `push2ex` 正常。详细对照表见 `plan/PITFALLS.md` 第 14 条。
+另外这台机器的 DNS 对 `push2*` 只回 AAAA，而它没有 IPv6 默认路由，别用「能解析」判断可达。
 
 ### 3. 建账号并迁移你的数据
 

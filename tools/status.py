@@ -18,7 +18,7 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ROUTE_FILES = ("app.py", "auth.py", "picks_routes.py")
+ROUTE_FILES = ("app.py", "auth.py", "picks_routes.py", "ratelimit.py")
 ROUTE_RE = re.compile(r"^\s*@(?:app|bp)\.(?:route|get|post|put|delete)\(", re.M)
 BIG_LINES = 400
 

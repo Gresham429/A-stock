@@ -85,6 +85,7 @@ migrate 要在第一次登录前跑，否则登录会先建出空库，migrate �
 | `datasources.py` | 行情、指标、K 线、财报、新闻、研报、龙虎榜、解禁；`sina_all_stocks`（全 A 名单 + 快照）；`index_quotes`/`market_breadth`（大盘）；`global_markets`（外围数值）；`concept_tags`（东财板块） |
 | `universe_store.py` | 全市场池 `data/universe.db`：全 A 名单 + 板块归属（东财 slist 逐股回填）+ 板块日变化。`codes_of`/`sector_of`/`sectors_map`/`taxonomy`/`snapshot_daily`/`sector_ranking`/`backfill_sector_daily`（逐股日 K 补历史，`_agg_sector_payload` 与 live 共用口径）。名单刷新把本轮没再出现的代码标 `active=0`（退市下线；覆盖率不足九成时跳过，防分页抓取不全误伤半个池子）。另有 `valuation_daily`：交易日收盘后落一份全市场 PE/PB 快照（`valuation_snapshot`，保留 2 年，写入路径自动清理），给长线估值因子攒历史时点数据 |
 | `universe.py` | 「精选龙头」fallback（10 一级 x 48 二级 x 170 只）。`universe_store` 未就绪时兜底 + `is_leader` 标记 |
+| `fundamentals_store.py` | 财务面板 `data/fundamentals.db`：把新浪财报的多期数据落库（`sync` 分批断点续传，`python3 fundamentals_store.py sync\|status`），给中长线攒基本面历史。主键 `(code, period)`，行数受报告期数约束，不需要 purge |
 | `news_store.py` | L2 新闻库（滚动 1 年）+ `is_trading_day`（动态节假日） |
 | `notes_store.py` | L5 私域笔记（永久） |
 | `store.py` / `config.py` | 自选股持久化 / 读 `.env` |
@@ -135,7 +136,7 @@ migrate 要在第一次登录前跑，否则登录会先建出空库，migrate �
 改判罪/分布跑 `test_excess_dist`；改 `agent_store`/`agent_loop`/`ai_blocks` 的记忆部分跑 `test_agent_memory`
 与 `test_excess_dist`；改板块聚合跑 `test_sector_backfill`；改 `fees`/`portfolio`/`paper_store` 跑同名测试；
 改复盘指标跑 `test_review_metrics`；改 `userctx`/`auth`/`ratelimit`/复盘锁/舰队路由跑同名测试；
-改 picks 五个模块跑 `test_picks_*` 与 `test_llm_picks`。
+改 picks 五个模块跑 `test_picks_*` 与 `test_llm_picks`；改 `fundamentals_store` 跑 `test_fundamentals_store`。
 
 ## 复盘模块（`/review`）
 
@@ -369,7 +370,7 @@ curl -s -b cj.txt 127.0.0.1:5000/api/picks/public       # 三周期各 5 只
 ## 数据文件（全部 gitignore）
 
 公共 `data/`：`news.db` `universe.db` `factors.db` `templates.db` `auth.db` `usage.db` `review/`
-`picks_public.db` `ai_cache.json` `.em_last_call` `.picks-running-public` `.picks-last.json`。
+`picks_public.db` `ai_cache.json` `fundamentals.db` `.em_last_call` `.picks-running-public` `.picks-last.json`。
 个人 `data/users/<uid>/`：`watchlist.json` `portfolio.json` `notes.db` `rules.db` `paper.db` `profiles.db`
 `agents.db` `picks.db` `.init.lock` `.picks-running`。舰队只读站长目录里的 `agents.db` / `paper.db` / `profiles.db`。
 旧布局（根目录 `watchlist.json`、`data/agents.db` 等）由 `deploy/migrate_to_multiuser.py <uid>` 复制进

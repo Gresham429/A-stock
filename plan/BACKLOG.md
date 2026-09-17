@@ -31,8 +31,6 @@
   `notes_store` / `astockctl` / `scheduler`。
 - 运行时输出里还有装饰符号（`tests/test_review_metrics.py` 的通过提示、前端芯片文案）；文档已清完，
   代码按同一口径改时顺手处理。
-- `universe_store.refresh_roster` 只增不改：退市股票残留全 A 名单与池子。修法：按新浪 `hs_a` 名单对本地
-  名单做下线标记/清理（因子回测的历史样本不受影响，只影响实时名单）。
 
 ## 三、需用户签字才改（自主会话只分析、列建议，不直接改）
 

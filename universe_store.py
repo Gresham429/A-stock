@@ -46,6 +46,7 @@ OTHER = "其他"
 _SUB_SCAN = 4          # 细分只在前 N 个标签里找（再往后是概念/地域/指数）
 _HEARTBEAT_STALE = 120  # 回填心跳超过该秒数视为进程已死、锁可抢占
 SECTOR_KEEP_DAYS = 365  # 板块日统计滚动保留天数（977 板块 ≈ 24 万行/年 ≈ 82MB，不清则无限涨）
+ROSTER_COVER_MIN = 0.9  # 名单刷新覆盖率低于该比例视为抓取不全，不做退市下线（防误伤半个池子）
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS stocks(
@@ -61,6 +62,7 @@ CREATE TABLE IF NOT EXISTS stocks(
   is_leader INTEGER DEFAULT 0,
   eligible INTEGER DEFAULT 1,
   sectors_at TEXT DEFAULT '',
+  active INTEGER DEFAULT 1,        -- 0 = 本轮名单刷新里没再出现（退市/被移出），不再进池子
   updated_at TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_stocks_sw1 ON stocks(sw1);
@@ -94,6 +96,11 @@ def _conn() -> sqlite3.Connection:
 def init() -> None:
     with _LOCK, _conn() as c:
         c.executescript(_SCHEMA)
+        # 旧库迁移：stocks.active 是「退市标的要下线」之后加的（CREATE TABLE IF NOT EXISTS
+        # 不会给已存在的表补列）。默认 1，历史行一律先视为在册，等下一次刷新再判。
+        have = {r["name"] for r in c.execute("PRAGMA table_info(stocks)")}
+        if "active" not in have:
+            c.execute("ALTER TABLE stocks ADD COLUMN active INTEGER DEFAULT 1")
 
 
 # ── 代码分类 helper ────────────────────────────────────────────────────────
@@ -176,24 +183,40 @@ def refresh_roster() -> int:
         payload.append((code, name, board_of(code), r["price"], r["float_mcap"],
                         is_st, susp, 1 if code in leaders else 0, elig, now))
     with _LOCK, _conn() as c:
+        prev = c.execute("SELECT COUNT(*) n FROM stocks").fetchone()["n"] or 0
         c.executemany(
             "INSERT INTO stocks(code,name,board,price,float_mcap,is_st,is_suspended,"
-            "is_leader,eligible,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?) "
+            "is_leader,eligible,active,updated_at) VALUES(?,?,?,?,?,?,?,?,?,1,?) "
             "ON CONFLICT(code) DO UPDATE SET name=excluded.name, board=excluded.board, "
             "price=excluded.price, float_mcap=excluded.float_mcap, is_st=excluded.is_st, "
             "is_suspended=excluded.is_suspended, is_leader=excluded.is_leader, "
-            "eligible=excluded.eligible, updated_at=excluded.updated_at",
+            "eligible=excluded.eligible, active=1, updated_at=excluded.updated_at",
             payload)
+        # 下线：本轮没被更新到的行（退市、被移出 hs_a）标记 active=0，不再进选股池。
+        # 只在覆盖率正常时做：分页抓取失败会只回来一部分，那种时候批量下线会把大半个池子
+        # 误判成退市（比留着几只退市股更糟）。按代码集合判定，不依赖时间戳（同秒两次刷新的场景）。
+        offline = 0
+        if prev and len(payload) >= prev * ROSTER_COVER_MIN:
+            keep = {p[0] for p in payload}
+            stale = [r["code"] for r in c.execute("SELECT code FROM stocks WHERE active=1")
+                     if r["code"] not in keep]
+            if stale:
+                c.executemany("UPDATE stocks SET active=0 WHERE code=?",
+                              [(code,) for code in stale])
+                offline = len(stale)
+        elif prev:
+            logger.warning("名单只回来 %d 行（库里 %d 行），覆盖率不足，跳过下线标记",
+                           len(payload), prev)
         c.execute("INSERT INTO meta(k,v) VALUES('roster_at',?) "
                   "ON CONFLICT(k) DO UPDATE SET v=excluded.v", (now,))
-    logger.info("全市场名单刷新: %d 只（eligible %d）",
-                len(payload), sum(1 for p in payload if p[8]))
+    logger.info("全市场名单刷新: %d 只（eligible %d，下线 %d）",
+                len(payload), sum(1 for p in payload if p[8]), offline)
     return len(payload)
 
 
 # ── 板块归属回填 ───────────────────────────────────────────────────────────
 def pending_sector_codes(eligible_only: bool = True) -> list[str]:
-    sql = "SELECT code FROM stocks WHERE sectors_at='' "
+    sql = "SELECT code FROM stocks WHERE sectors_at='' AND active=1 "
     if eligible_only:
         sql += "AND eligible=1 "
     sql += "ORDER BY code"
@@ -339,7 +362,7 @@ def codes_of(focus: str = "", eligible_only: bool = True) -> list[str]:
     """板块名（申万一级/细分/概念）-> 成分股代码；空 focus -> 全池。db 未就绪时降级手工池。"""
     if not _ready():
         return universe.codes_of(focus)
-    elig = " AND s.eligible=1" if eligible_only else ""
+    elig = (" AND s.active=1 AND s.eligible=1" if eligible_only else " AND s.active=1")
     try:
         with _conn() as c:
             if not focus:
@@ -361,7 +384,7 @@ def taxonomy() -> dict[str, list[str]]:
     try:
         with _conn() as c:
             rows = c.execute(
-                "SELECT sw1, sub FROM stocks WHERE eligible=1 AND sw1!='' AND sw1!=? "
+                "SELECT sw1, sub FROM stocks WHERE active=1 AND eligible=1 AND sw1!='' AND sw1!=? "
                 "GROUP BY sw1, sub ORDER BY sw1, sub", (OTHER,)).fetchall()
     except sqlite3.Error as e:
         logger.warning("taxonomy 查询失败: %s", e)
@@ -380,8 +403,10 @@ def status() -> dict[str, Any]:
     try:
         with _conn() as c:
             g = c.execute(
-                "SELECT COUNT(*) total, SUM(eligible) elig, SUM(is_st) st, "
-                "SUM(CASE WHEN sectors_at!='' THEN 1 ELSE 0 END) tagged, "
+                "SELECT COUNT(*) total, SUM(active) act, "
+                "SUM(CASE WHEN active=1 AND eligible=1 THEN 1 ELSE 0 END) elig, "
+                "SUM(is_st) st, "
+                "SUM(CASE WHEN active=1 AND sectors_at!='' THEN 1 ELSE 0 END) tagged, "
                 "SUM(is_leader) leaders FROM stocks").fetchone()
             sectors = c.execute(
                 "SELECT COUNT(DISTINCT sector) n FROM stock_sectors").fetchone()["n"]
@@ -396,7 +421,9 @@ def status() -> dict[str, Any]:
     except OSError:
         db_mb = 0.0
     total = g["total"] or 0
-    return {"ready": total > 0, "total": total, "eligible": g["elig"] or 0,
+    active = g["act"] or 0
+    return {"ready": total > 0, "total": total, "active": active, "inactive": total - active,
+            "eligible": g["elig"] or 0,
             "st": g["st"] or 0, "leaders": g["leaders"] or 0,
             "sectors_tagged": g["tagged"] or 0,
             "sectors_pending": (g["elig"] or 0) - (g["tagged"] or 0),

@@ -7,6 +7,7 @@
 """
 import os
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -95,6 +96,58 @@ def test_board_of():
              "688981": "kcb", "920000": "bj", "830799": "bj"}
     for code, exp in cases.items():
         assert us.board_of(code) == exp, f"{code} -> {us.board_of(code)}, 期望 {exp}"
+
+
+# ── 退市下线：名单刷新要把不再出现的代码标 active=0（临时库，离线）────────────────
+
+def _fake_snapshot(codes: list) -> list:
+    return [{"code": c, "name": f"股票{c}", "price": 10.0, "float_mcap": 50.0} for c in codes]
+
+
+def _fresh_db(codes: list) -> int:
+    """临时库 + 假名单，跑一次 refresh_roster。"""
+    us.DB_PATH = os.path.join(tempfile.mkdtemp(), "universe.db")
+    us.init()
+    us.ds.sina_all_stocks = lambda: _fake_snapshot(codes)
+    us.universe.all_codes = lambda: []
+    return us.refresh_roster()
+
+
+def test_refresh_roster_marks_delisted_inactive():
+    """第二次刷新里少掉的那只必须被下线：不清理的话退市股永远留在选股池里。"""
+    codes = [f"60000{i}" for i in range(10)]
+    _fresh_db(codes)
+    assert us.status()["active"] == 10, us.status()
+    us.ds.sina_all_stocks = lambda: _fake_snapshot(codes[:9])   # 退市一只，覆盖率 90% 达标
+    us.refresh_roster()
+    st = us.status()
+    assert st["inactive"] == 1, f"应下线 1 只: {st}"
+    assert "600009" not in us.codes_of(), "下线标的不能再进池子"
+    assert len(us.codes_of()) == 9, us.codes_of()
+
+
+def test_refresh_roster_skips_offline_when_fetch_partial():
+    """抓取只回来一部分时绝不能批量下线：那是把大半个池子误判成退市。"""
+    codes = [f"60000{i}" for i in range(10)]
+    _fresh_db(codes)
+    us.ds.sina_all_stocks = lambda: _fake_snapshot(codes[:5])   # 只回来一半
+    us.refresh_roster()
+    st = us.status()
+    assert st["inactive"] == 0, f"覆盖率不足时不该下线: {st}"
+    assert st["active"] == 10, st
+
+
+def test_refresh_roster_reactivates_returning_code():
+    """被移出后又回来的代码要重新激活（重新上市或名单恢复）。"""
+    codes = [f"60000{i}" for i in range(10)]
+    _fresh_db(codes)
+    us.ds.sina_all_stocks = lambda: _fake_snapshot(codes[:9])
+    us.refresh_roster()
+    assert us.status()["inactive"] == 1
+    us.ds.sina_all_stocks = lambda: _fake_snapshot(codes)
+    us.refresh_roster()
+    st = us.status()
+    assert st["inactive"] == 0 and st["active"] == 10, st
 
 
 if __name__ == "__main__":

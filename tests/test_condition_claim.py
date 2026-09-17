@@ -162,6 +162,47 @@ def test_no_position_still_cancels():
     assert status_of(cid) == "cancelled"
 
 
+HOLDING = [{"code": "600000", "name": "测试股", "shares": 100, "sellable": 100,
+            "avg_cost": 12.0, "lock_date": None}]
+
+
+def test_rejected_order_keeps_condition_live():
+    """跌停封板卖不出：止损单不能就此作废，要放回 live 等下次重试。"""
+    fresh_db()
+    aid = mk_agent()
+    cid = mk_stop(aid)
+
+    def reject(*_a, **_k):
+        return {"ok": False, "msg": "跌停封板，卖不出"}
+
+    with patched({"agent_loop.ds.sina_kline": triggering_kline,
+                  "agent_loop.profile_store.fee_schedule": lambda pid: None,
+                  "agent_loop.paper_store.positions_of": lambda _aid: HOLDING,
+                  "agent_loop.paper_store.order": reject}):
+        fired = agent_loop.sweep_conditions(aid)
+    assert fired == [], "没成交就不该记成交"
+    assert status_of(cid) == "live", "被拒后应放回 live 供次日重试，而不是作废"
+
+
+def test_retry_after_rejection_can_fill():
+    """放回 live 之后，下一次补判要能真的成交（保护不会凭空消失也不会永远悬着）。"""
+    fresh_db()
+    aid = mk_agent()
+    cid = mk_stop(aid)
+    common = {"agent_loop.ds.sina_kline": triggering_kline,
+              "agent_loop.profile_store.fee_schedule": lambda pid: None,
+              "agent_loop.paper_store.positions_of": lambda _aid: HOLDING}
+    with patched({**common, "agent_loop.paper_store.order":
+                  lambda *_a, **_k: {"ok": False, "msg": "跌停封板，卖不出"}}):
+        assert agent_loop.sweep_conditions(aid) == []
+    assert status_of(cid) == "live"
+    with patched({**common, "agent_loop.paper_store.order":
+                  lambda *_a, **_k: {"ok": True, "fill": 10.0, "amount": 1000.0, "fee": 1.0}}):
+        fired = agent_loop.sweep_conditions(aid)
+    assert len(fired) == 1, f"第二天应能成交: {fired}"
+    assert status_of(cid) == "triggered"
+
+
 def test_old_db_migrates_claimed_at():
     """旧库（conditions 无 claimed_at 列）必须能自动补列，否则线上升级即报错。"""
     path = os.path.join(tempfile.mkdtemp(), "agents.db")

@@ -545,6 +545,9 @@ def sweep_conditions(agent_id: int) -> list[dict[str, Any]]:
     **跨进程互斥**：补判可能被两个进程同时触发（两个 worker 的管理员各点一次 run_all、
     或 scheduler 撞手动触发）。每张条件单先原子占为 settling（`claim_condition`）再动手，
     抢不到就跳过；取数或撮合失败时放回 live 供下次重试，不留无人负责的占位。
+
+    **触发但没卖出去**（跌停封板、行情异常）同样放回 live 下次再试，不作废：止损保护不该
+    因为一天的封板消失。只有仓位已经不在（清仓）时才作废。
     """
     ag = agent_store.get_agent(agent_id)
     if not ag:
@@ -597,20 +600,25 @@ def sweep_conditions(agent_id: int) -> list[dict[str, Any]]:
                 logger.warning("条件单 %s 补判失败，放回 live: %s", c["id"], e)
                 agent_store.release_condition(c["id"])
                 continue
-            agent_store.close_condition(c["id"], "triggered" if r.get("ok") else "cancelled",
-                                        bar["date"], c["trigger_price"])
-            if r.get("ok"):
-                fired.append({"code": code, "kind": c["kind"], "date": bar["date"],
-                              "price": c["trigger_price"], "shares": shares})
-                # 止损触发才记教训，且必须**真的亏了**——止损价高于成本时是止盈性质的
-                # 保护性离场，记成「止损迟滞」是错的（会污染教训统计）。
-                cost = pos.get("avg_cost") or 0
-                if c["kind"] == "stop_loss" and cost > 0:
-                    ret_pct = (c["trigger_price"] / cost - 1) * 100
-                    if ret_pct < 0:
-                        agent_store.add_lesson(agent_id, "loss_cut_late",
-                                               str(round(ret_pct, 1)), code)
-                agent_store.cancel_conditions(agent_id, code)
+            if not r.get("ok"):
+                # 撮合被拒（典型是跌停封板卖不出、行情异常）：止损保护不能因为一天的封板
+                # 就此消失，放回 live 让下一个 tick / 次日继续尝试；真没仓可卖才作废
+                # （上面 not pos 那支）。
+                logger.info("条件单 %s 已触发但未成交（%s），保留待重试", c["id"], r.get("msg"))
+                agent_store.release_condition(c["id"])
+                continue
+            agent_store.close_condition(c["id"], "triggered", bar["date"], c["trigger_price"])
+            fired.append({"code": code, "kind": c["kind"], "date": bar["date"],
+                          "price": c["trigger_price"], "shares": shares})
+            # 止损触发才记教训，且必须**真的亏了**——止损价高于成本时是止盈性质的
+            # 保护性离场，记成「止损迟滞」是错的（会污染教训统计）。
+            cost = pos.get("avg_cost") or 0
+            if c["kind"] == "stop_loss" and cost > 0:
+                ret_pct = (c["trigger_price"] / cost - 1) * 100
+                if ret_pct < 0:
+                    agent_store.add_lesson(agent_id, "loss_cut_late",
+                                           str(round(ret_pct, 1)), code)
+            agent_store.cancel_conditions(agent_id, code)
     if fired:
         agent_store.log_run(agent_id, date_cls.today().isoformat(), "条件单",
                             f"补判触发 {len(fired)} 笔", detail=fired)

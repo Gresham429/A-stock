@@ -300,7 +300,8 @@ agent 交易与学习闭环的端到端全景见 `plan/2026-07-18-agent-logic-ma
   或非交易时段启动也能每桶自动跑；`claim_slot` 幂等保证每桶只真跑一次，`_agent_tick_lock` 单飞。
   服务器 gunicorn 不起它，`scheduler.py` 要 `ASTOCK_AGENT_AUTO=1` 才跑。
 - 限价挂单：AI 给 `limit_price`，`place()` 挂单不即时成交；`sweep_orders()` 用分时（当日）或日 K（隔夜）
-  判定触及，成交价锁 limit 不取更优。当日有效。
+  判定触及，成交价锁 limit 不取更优。当日有效。条件单补判（`sweep_conditions`）触发后若卖不出
+  （跌停封板、行情异常），放回 `live` 下次再试、不作废；只有仓位已不在时才作废。
 - agent 记忆（一份 journal、多个视图）：底座 `agent_store.journal`（append-only），每次决策入一行，含
   `regime` tag、`signals` 快照、`action`、`summary`（当时写下的理由原话，零新增 LLM 调用）；结算时贴回
   20 日超额与冻结分位（`journal_staple_outcome`）。判罪分位 `entries.x20_pctile` 结算算一次即冻结，不随

@@ -37,6 +37,7 @@ import config
 import datasources as ds
 import factor_lab
 import fees
+import fundamentals_store
 import llm
 import news_store
 import notes_store
@@ -1497,6 +1498,8 @@ def _universe_boot() -> None:
         # 估值快照循环：交易日收盘后落一份全市场 PE/PB 历史，幂等。它自己的异常在循环内兜住，
         # 不影响这里的预热。历史只能从今天开始攒，攒够才谈得上验证长线估值规则（BACKLOG 子项目 E）。
         userctx.Thread(target=_valuation_snapshot_loop, daemon=True).start()
+        # 财务面板循环：每周把全市场财报刷一遍（落 fundamentals.db），同样是为了攒基本面历史。
+        userctx.Thread(target=_fundamentals_sync_loop, daemon=True).start()
         # 这里不起 agent 调度器（上面的 _agent_tick / _agent_scheduler）。原因：gunicorn
         # 起多个 worker 时，每个 worker 都会各起一份调度器，同一个 agent 会被并发决策、
         # 重复下单、重复写教训——正确性问题不是性能问题，所以必须单实例。scheduler.py
@@ -1522,6 +1525,28 @@ def _valuation_snapshot_loop(interval_sec: int = 1800) -> None:
                 universe_store.valuation_snapshot(d)
         except Exception as e:  # noqa: BLE001 快照失败不影响其它功能，下个心跳再试
             logger.warning("估值快照心跳异常（下次继续）: %s", e)
+        time.sleep(interval_sec)
+
+
+def _fundamentals_sync_loop(interval_sec: int = 6 * 3600) -> None:
+    """每周把全市场财报刷一遍（落 `data/fundamentals.db`），给中长线攒基本面历史。
+
+    一轮约 5000 次请求，六并发放限流下要一到两小时；分批断点续传，中途被杀下次接着跑。
+    上次跑完一轮不满 `SYNC_INTERVAL_DAYS` 天就跳过，心跳另有一层并发保护（见 fundamentals_store）。
+    """
+    while True:
+        try:
+            ts = fundamentals_store.status().get("synced_at") or ""
+            due = True
+            if ts:
+                try:
+                    due = (datetime.now() - datetime.fromisoformat(ts)).days >= fundamentals_store.SYNC_INTERVAL_DAYS
+                except ValueError:
+                    due = True
+            if due:
+                fundamentals_store.sync()
+        except Exception as e:  # noqa: BLE001 同步失败不影响其它功能，下个心跳再试
+            logger.warning("财务面板同步心跳异常（下次继续）: %s", e)
         time.sleep(interval_sec)
 
 

@@ -147,6 +147,7 @@ def setup_env(public_rows, watch_rows, quotes):
 
 def _ledger_row(code="600519", name="贵州茅台", horizon="short", **kw):
     row = {"code": code, "name": name, "horizon": horizon, "status": "open", "scope": "public",
+           "created_at": "2026-01-05 16:00:00",
            "entry_lo": 10.0, "entry_hi": 10.5, "exit_lo": 20.0, "exit_hi": 21.0, "stop": 9.0,
            "thesis": "AI 依据", "valid_until": "2030-01-01"}
     row.update(kw)
@@ -167,6 +168,27 @@ def test_check_only_visible_horizons():
     sent = setup_env([_ledger_row(horizon="long")], [], {"600519": {"price": 10.2}})
     r = alerts.check("u1")
     ck(r["sent"] == 0 and not sent, f"不可见周期不该触发: {r}")
+
+
+def test_check_skips_rows_created_today():
+    """AI 的价位当天不推（就贴着生成时的现价，推了等于复读面板），第二天起才生效。"""
+    import datetime as dt
+    today = dt.date.today().isoformat()
+    sent = setup_env([_ledger_row(created_at=f"{today} 16:00:00")], [],
+                     {"600519": {"price": 10.2}})
+    r = alerts.check("u1")
+    ck(r["sent"] == 0 and not sent, f"当天生成的 AI 点位不该推: {r}")
+    ck(r["skipped"] == "没有有效期内的点位", f"当天生成的行应被整行过滤掉: {r}")
+
+
+def test_manual_point_active_same_day():
+    """手设点位不受「当天不推」约束：那是用户当场写下的意思。"""
+    import datetime as dt
+    today = dt.date.today().isoformat()
+    setup_env([_ledger_row(created_at=f"{today} 16:00:00")], [], {"600519": {"price": 12.0}})
+    alerts_store.replace_points(["600519 11.5 12.5 - - 8"])
+    r = alerts.check("u1")
+    ck(r["sent"] == 1 and r["hits"][0]["source"] == "manual", f"手设点位当天应生效: {r}")
 
 
 def test_manual_point_overrides_ai():

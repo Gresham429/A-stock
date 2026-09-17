@@ -58,6 +58,11 @@ def _ledger_rows(scope: str, visible: list[str]) -> list[dict[str, Any]]:
             continue
         if (r.get("valid_until") or "") and r["valid_until"] < today:
             continue
+        # 生成当天不提醒：AI 的价位是贴着生成时的现价给的（`picks_levels` 从当前结构算候选），
+        # 当天推等于把用户 16:00 刚在面板上看过的结论再念一遍。从第二个交易日起，
+        # 价格再摸到才算新信息。手设点位不受这条约束（那是用户当场的意思）。
+        if str(r.get("created_at") or "")[:10] >= today:
+            continue
         out.append(r)
     return out
 

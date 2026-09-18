@@ -341,6 +341,24 @@ def test_post_reads_business_code():
         notify.urllib.request.urlopen = orig
 
 
+def test_notify_test_summarises_failure_reason():
+    """发测试失败时要把原因汇总到 error：只读 error 的客户端也能知道为什么（真事：pushplus 要实名）。"""
+    alerts_store.DB_PATH = os.path.join(tempfile.mkdtemp(), "alerts.db")
+    alerts_store.init()
+    alerts_store.replace_targets(["pushplus 0000000000000000000000000000dead 我的微信"])
+    notify.send_all = lambda tg, title, body: {
+        "sent": 0, "failed": 1, "total": 1,
+        "detail": [{"label": "我的微信", "channel": "pushplus", "ok": False,
+                    "msg": '200 {"code":905,"msg":"账户未进行实名认证"}'}]}
+    try:
+        r = alerts.notify_test()
+        ck(r["ok"] is False, "一台都没发出时 ok 必须是 False")
+        ck("实名" in (r.get("error") or ""), f"error 要带上真实原因: {r.get('error')}")
+        ck("我的微信" in (r.get("error") or ""), "error 要指明是哪台")
+    finally:
+        notify.send_all = _REAL_SEND_ALL
+
+
 def test_send_all_isolates_failures():
     notify.send_all = _REAL_SEND_ALL        # 还原真实现（前面的用例把它换成了假的）
 

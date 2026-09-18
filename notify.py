@@ -8,7 +8,9 @@
 | `bark` | device key，或 `自建地址|key` | iPhone 专用；key 在 Bark App 里 |
 | `wecom` | 企业微信群机器人 webhook | 国内稳定，群里几个人就几台手机 |
 | `dingtalk` | `webhook` 或 `webhook|加签密钥` | 有加签密钥时自动算 HMAC 签名 |
-| `pushplus` | token | **微信推送**：pushplus.plus 扫码登录拿 token，安卓苹果都收微信、不用再装 App（免费额度每天 200 条） |
+| `pushplus` | token | **微信推送**：pushplus.plus 扫码登录拿 token，安卓苹果都收微信、不用再装 App。
+  注意 2026-09 实测：**未实名认证的账号发不出去**，接口回 `{"code":905,"msg":"账户未进行实名认证"}`；
+  不想实名就别走这条，用 ntfy 或企业微信/钉钉 |
 | `log` | 不用填 | 只写日志，用来验证触发逻辑，不推到手机 |
 
 **渠道不用自己填**：`alerts_store` 认得出常见的地址（企业微信 webhook、钉钉 webhook、

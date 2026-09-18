@@ -1620,9 +1620,25 @@ async function loadAlerts(){
 async function _alertPost(url, body, what){
   const j = await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})}).then(r=>r.json()).catch(()=>({ok:false,error:'网络错误'}));
   const el = document.getElementById('alertMsg');
-  el.textContent = j.ok===false
-    ? `${what}失败：${(j.errors&&j.errors.length? j.errors.join('；') : (j.error||''))}`
-    : `${what}：${j.count!=null? j.count+' 条' : (j.sent!=null? '触发 '+j.sent+' 条'+(j.pushed!=null?'，已发 '+j.pushed+' 台':'') : (j.sent_ok||'完成'))}`;
+  // 失败必须把**原因**摆出来。首版只显示「触发 0 条」，用户看到的就是「失败了但不知道为什么」
+  // （2026-09-17 真事：pushplus 要求实名认证，面板却只报 0 条，白查了一圈）。
+  const fails = ((j.detail)||[]).filter(d=>!d.ok);
+  let txt;
+  // 先看逐台结果：ok:false + 有 detail 时要报「哪台、什么原因」，不能只说「失败」或「未知原因」
+  // （首版把 ok:false 放在前面，于是 pushplus 的「账户未进行实名认证」被吞掉了）。
+  if(fails.length){
+    txt = `${what}未发出（${fails.length} 台）：` +
+      fails.map(d=>`${d.label||d.channel||''} ${d.msg||''}`.trim()).join('；');
+  }else if(j.ok===false){
+    txt = `${what}失败：${(j.errors&&j.errors.length? j.errors.join('；') : (j.error||'未知原因'))}`;
+  }else if(j.count!=null){
+    txt = `${what}：${j.count} 条`;
+  }else if(j.sent!=null){
+    txt = `${what}：已发 ${j.sent}/${j.total!=null? j.total : j.sent} 台`;
+  }else{
+    txt = `${what}：完成`;
+  }
+  el.textContent = txt;
   loadAlerts();
   return j;
 }

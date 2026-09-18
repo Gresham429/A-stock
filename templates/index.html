@@ -522,7 +522,8 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("ast
             一行一台，四种接法选一个就行（备注可写可不写）：<br>
             1. <b>ntfy</b>（最省事，安卓苹果都有）：手机装 ntfy App → 点下面「生成 ntfy 主题」→
             在 App 里订阅同一个主题名 → 回来点「保存手机」→ 点「发测试」。主题名不会自己变。<br>
-            2. <b>微信</b>：pushplus.plus 扫码登录拿 token → 写 <code>pushplus 你的token</code>（不用装新 App）。<br>
+            2. <b>微信</b>：pushplus.plus 扫码登录拿 token → 写 <code>pushplus 你的token</code>。
+            <b>它现在要求先实名认证</b>（没实名会回「账户未进行实名认证」，发不出去），不想实名就用第 1 或第 3 条。<br>
             3. <b>企业微信 / 钉钉</b>：建一个只有自己的群 → 加群机器人 → 把 webhook 整条粘进来（只粘地址即可，渠道自动认）。<br>
             4. <b>Bark</b>（iPhone）：装 Bark App → 把它给的那条 <code>https://api.day.app/xxxx</code> 粘进来。</div>
           <textarea id="alertTargets" rows="3" placeholder="ntfy astock-7k3f9q2x 我的手机&#10;https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx 家用群"></textarea>

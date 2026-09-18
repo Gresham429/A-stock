@@ -215,4 +215,10 @@ def notify_test(user: str = "") -> dict[str, Any]:
     if news_store.is_trading_day():
         body += " 当前是交易日。"
     res = notify.send_all(tg, title, body)
-    return {"ok": res["sent"] > 0, **res}
+    out: dict[str, Any] = {"ok": res["sent"] > 0, **res}
+    fails = [d for d in res["detail"] if not d["ok"]]
+    if fails and not res["sent"]:
+        # 除了逐台的 detail，再给一个汇总的 error：任何客户端只读 error 也能知道为什么失败
+        out["error"] = "；".join(f"{d.get('label') or d.get('channel') or ''} {d.get('msg') or ''}".strip()
+                                for d in fails)
+    return out

@@ -85,7 +85,7 @@ migrate 要在第一次登录前跑，否则登录会先建出空库，migrate �
 | `alerts.py` | 到点提醒的触发逻辑：把账本里 AI 的点位与用户手改的点位合并，价格进入或接近（默认 1% 容差，纪律参数）就推手机；同一标的同一类每天只发一次；只看 `visible_horizons()`（面板上还 mask 着的周期不推） |
 | `alerts_store.py` | 提醒配置与去重（个人库 `data/users/<uid>/alerts.db`）：`targets`（多台手机）、`points`（手改点位，整表替换、错一行整批不落）、`sent`（当天已发）。只存手动覆盖，AI 点位检查时现读账本，避免两边打架 |
 | `alerts_routes.py` | `/api/alerts` Blueprint（读配置 / 存手机 / 存点位 / 发测试 / 立即检查），5 条路由 |
-| `notify.py` | 发送层：ntfy / bark / wecom / dingtalk（含加签）/ log 五个渠道，零 SDK 纯 urllib，逐台发、逐台记结果，永不抛异常影响调度 |
+| `notify.py` | 发送层：ntfy / bark / wecom / dingtalk（含加签）/ pushplus（微信）/ log 六个渠道，零 SDK 纯 urllib，逐台发、逐台记结果，永不抛异常影响调度 |
 
 ### 数据与池子
 
@@ -360,7 +360,8 @@ agent 交易与学习闭环的端到端全景见 `plan/2026-07-18-agent-logic-ma
   判罪线漂移重算。视图：交易 agent 看 `_agent_journal_block`（自己近 8 条）+ 自己教训 + 全舰队只读层
   （`_lesson_block()`，标签区分本账户与全体）；用户面深挖看 `_stock_house_view(code)`；大盘研判与选股看
   `_regime_view`（同类行情下全舰队战绩）。只喂事实原话，不让 agent 写事后反思。
-- 到点提醒（`alerts.py`）：渠道 ntfy / bark / wecom / dingtalk / log，**地址可以不写渠道**——
+- 到点提醒（`alerts.py`）：渠道 ntfy / bark / wecom / dingtalk / pushplus（微信推送）/ log，
+  **地址可以不写渠道**——
   `alerts_store.infer_target` 认域名（企业微信、钉钉、ntfy.sh、api.day.app）与裸串（只有带
   连字符/下划线/数字的才当 ntfy 主题，`telegram` 这种打错的渠道名必须报错，不能静默变成一个
   没人订阅的主题）。页面点「生成 ntfy 主题」直接给一行可用配置：安卓苹果都装 ntfy、不用注册不用备案。

@@ -19,6 +19,7 @@ import notify          # noqa: E402
 # setup_env 会把 notify.send_all 换成假的（它在 alerts 里就是同一个模块），
 # 所以这里先留一份真的，给专门测发送层的那两个用例还原用。
 _REAL_SEND_ALL = notify.send_all
+_REAL_POST = notify._post      # 前面的用例会把 _post 换成假的，测真实现时要还原
 
 N = [0]
 
@@ -284,6 +285,60 @@ def test_ntfy_payload():
     notify.send("ntfy", "https://ntfy.mydomain.com/astock-abc", "t", "b")
     ck(calls[-1][0] == "https://ntfy.mydomain.com" and calls[-1][1]["topic"] == "astock-abc",
        f"自建 ntfy 要拆地址与主题: {calls[-1]}")
+
+
+def test_bark_accepts_app_url():
+    """Bark App 里复制出来的 https://api.day.app/<key> 必须能直接粘（用户就是这么配的）。"""
+    calls = []
+    notify._post = lambda url, payload, ok_field="", ok_value=200: (
+        calls.append((url, payload)) or (True, "200"))
+    notify.send("bark", "mykey", "t", "b")
+    ck(calls[-1][0] == "https://api.day.app/push" and calls[-1][1]["device_key"] == "mykey",
+       f"裸 key 要能发: {calls[-1]}")
+    notify.send("bark", "https://api.day.app/AbCd1234", "t", "b")
+    ck(calls[-1][0] == "https://api.day.app/push" and calls[-1][1]["device_key"] == "AbCd1234",
+       f"粘官方 URL 要能发: {calls[-1]}")
+    notify.send("bark", "https://bark.mydomain.com/K3y", "t", "b")
+    ck(calls[-1][0] == "https://bark.mydomain.com/push" and calls[-1][1]["device_key"] == "K3y",
+       f"自建 URL 要能发: {calls[-1]}")
+    notify.send("bark", "https://api.day.app/k1|k2", "t", "b")
+    ck(calls[-1][1]["device_key"] == "k2", f"地址|key 的老写法仍要支持: {calls[-1]}")
+    ok, msg = notify.send("bark", "https://api.day.app/", "t", "b")
+    ck(not ok and "没有 key" in msg, f"没有 key 要报错而不是瞎猜: {(ok, msg)}")
+
+
+def test_pushplus_judges_business_code():
+    """pushplus 的 HTTP 一律 200、成败在 body 的 code 里，不能只看 HTTP 状态。"""
+    calls = []
+    notify._post = lambda url, payload, ok_field="", ok_value=200: (
+        calls.append((url, payload, ok_field)) or (ok_field == "code", "stub"))
+    ok, _ = notify.send("pushplus", "mytoken", "标题", "正文")
+    ck(calls[-1][0] == notify.PUSHPLUS_URL and calls[-1][1]["token"] == "mytoken",
+       f"pushplus 载荷不对: {calls[-1]}")
+    ck(calls[-1][1]["template"] == "txt", "pushplus 用 txt 模板")
+    ck(calls[-1][2] == "code", "必须按 body 的 code 判成败")
+    ck(ok is True, "stub 返回成功")
+    ok2, msg2 = notify.send("pushplus", "", "t", "b")
+    ck(not ok2 and "缺 token" in msg2, f"没 token 要说清楚: {(ok2, msg2)}")
+
+
+def test_post_reads_business_code():
+    """_post 的 ok_field 分支：HTTP 200 但 body code 不是 200 → 判失败。"""
+    notify._post = _REAL_POST        # 还原真实现（同文件里别的用例会替换它）
+    class FakeResp:
+        status = 200
+        def read(self): return b'{"code":401,"msg":"token error"}'
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    orig = notify.urllib.request.urlopen
+    notify.urllib.request.urlopen = lambda req, timeout=10: FakeResp()
+    try:
+        ok, msg = notify._post("https://example.invalid", {}, ok_field="code")
+        ck(ok is False and "401" in msg, f"业务码 401 应判失败: {(ok, msg)}")
+        ok2, _ = notify._post("https://example.invalid", {})
+        ck(ok2 is True, "不看业务码时 HTTP 200 仍算成功")
+    finally:
+        notify.urllib.request.urlopen = orig
 
 
 def test_send_all_isolates_failures():

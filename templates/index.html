@@ -518,12 +518,13 @@ try{document.documentElement.setAttribute("data-theme",localStorage.getItem("ast
       <div class="alertGrid">
         <div>
           <div class="t2">推到哪些手机（一行一台）</div>
-          <div class="tag" style="margin:4px 0">
-            最省事：手机装 <b>ntfy</b> App（安卓苹果都有，免费、不用注册、不用备案），
-            点下面的按钮生成一个只属于你的主题，在 App 里订阅同一个主题即可。
-            主题名就是密码，<b>不会自己变</b>，只有再点一次按钮才会换。
-            也可以直接粘贴企业微信 / 钉钉群机器人 webhook，或 Bark 的 key（iPhone）。
-            iPhone 上如果觉得 ntfy App 不好用，Bark 或企业微信更省心。备注可写可不写。</div>
+          <div class="tag" style="margin:4px 0;line-height:1.7">
+            一行一台，四种接法选一个就行（备注可写可不写）：<br>
+            1. <b>ntfy</b>（最省事，安卓苹果都有）：手机装 ntfy App → 点下面「生成 ntfy 主题」→
+            在 App 里订阅同一个主题名 → 回来点「保存手机」→ 点「发测试」。主题名不会自己变。<br>
+            2. <b>微信</b>：pushplus.plus 扫码登录拿 token → 写 <code>pushplus 你的token</code>（不用装新 App）。<br>
+            3. <b>企业微信 / 钉钉</b>：建一个只有自己的群 → 加群机器人 → 把 webhook 整条粘进来（只粘地址即可，渠道自动认）。<br>
+            4. <b>Bark</b>（iPhone）：装 Bark App → 把它给的那条 <code>https://api.day.app/xxxx</code> 粘进来。</div>
           <textarea id="alertTargets" rows="3" placeholder="ntfy astock-7k3f9q2x 我的手机&#10;https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx 家用群"></textarea>
           <button class="mini" onclick="genNtfyTopic()">生成 ntfy 主题</button>
           <button class="mini" onclick="saveAlertTargets()">保存手机</button>

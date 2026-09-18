@@ -22,7 +22,7 @@ from typing import Any
 import userctx
 
 KINDS = ("buy", "sell", "stop")
-CHANNELS = ("ntfy", "bark", "wecom", "dingtalk", "log")
+CHANNELS = ("ntfy", "bark", "wecom", "dingtalk", "pushplus", "log")
 DB_PATH: str | None = None      # 测试用覆盖；正常走 userctx.user_path
 KEEP_DAYS = 365
 

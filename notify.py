@@ -8,6 +8,7 @@
 | `bark` | device key，或 `自建地址|key` | iPhone 专用；key 在 Bark App 里 |
 | `wecom` | 企业微信群机器人 webhook | 国内稳定，群里几个人就几台手机 |
 | `dingtalk` | `webhook` 或 `webhook|加签密钥` | 有加签密钥时自动算 HMAC 签名 |
+| `pushplus` | token | **微信推送**：pushplus.plus 扫码登录拿 token，安卓苹果都收微信、不用再装 App（免费额度每天 200 条） |
 | `log` | 不用填 | 只写日志，用来验证触发逻辑，不推到手机 |
 
 **渠道不用自己填**：`alerts_store` 认得出常见的地址（企业微信 webhook、钉钉 webhook、
@@ -36,11 +37,12 @@ logger = logging.getLogger(__name__)
 BARK_BASE = "https://api.day.app"
 NTFY_BASE = "https://ntfy.sh"
 GROUP = "A股观察台"          # 手机端按这个分组折叠，避免和别的推送混在一起
+PUSHPLUS_URL = "https://www.pushplus.plus/api/send"   # 微信推送（扫码绑定 token）
 UA = "Mozilla/5.0 (AStockWatchdesk alert)"
 TIMEOUT = 10
 
 
-def _post(url: str, payload: dict) -> tuple[bool, str]:
+def _post(url: str, payload: dict, ok_field: str = "", ok_value: int = 200) -> tuple[bool, str]:
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST")
     req.add_header("Content-Type", "application/json")
@@ -48,7 +50,15 @@ def _post(url: str, payload: dict) -> tuple[bool, str]:
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
             body = resp.read().decode("utf-8", "ignore")[:200]
-            return (200 <= resp.status < 300), f"{resp.status} {body}"
+            ok = 200 <= resp.status < 300
+            if ok and ok_field:
+                # 有些服务（如 pushplus）HTTP 一律 200，业务错误写在 body 的 code 里，
+                # 只看 HTTP 状态会把「token 错了」当成发送成功。
+                try:
+                    ok = int(json.loads(body).get(ok_field)) == ok_value
+                except (ValueError, TypeError, AttributeError):
+                    ok = False
+            return ok, f"{resp.status} {body}"
     except Exception as e:  # noqa: BLE001 提醒失败不能影响调用方
         return False, f"{type(e).__name__}: {e}"
 
@@ -76,6 +86,11 @@ def send(channel: str, address: str, title: str, body: str) -> tuple[bool, str]:
     channel = (channel or "").strip().lower()
     if channel == "ntfy":
         return _ntfy_publish(address, title, body)
+    if channel == "pushplus":
+        if not address:
+            return False, "缺 token（pushplus.plus 扫码登录后在「一对一推送」里看）"
+        return _post(PUSHPLUS_URL, {"token": address, "title": title,
+                                    "content": body, "template": "txt"}, ok_field="code")
     if channel == "log":
         logger.info("提醒（log 渠道）%s | %s", title, body.replace("\n", " / "))
         return True, "log"
@@ -83,9 +98,17 @@ def send(channel: str, address: str, title: str, body: str) -> tuple[bool, str]:
         if not address:
             return False, "缺 device key"
         if address.startswith("http"):
-            if "|" not in address:
-                return False, "自建 Bark 要写成 地址|device key"
-            base, key = address.split("|", 1)
+            # Bark App 里复制出来的就是 https://api.day.app/<key>（自建则是 https://你的域名/<key>），
+            # 所以「粘 URL」必须能用：取 scheme+host 当服务器、第一段路径当 key。
+            # 也兼容显式的「地址|key」写法。
+            if "|" in address:
+                base, key = address.split("|", 1)
+            else:
+                u = urllib.parse.urlsplit(address)
+                segs = [seg for seg in u.path.split("/") if seg]
+                if not segs:
+                    return False, "Bark 地址里没有 key（应形如 https://api.day.app/你的key）"
+                base, key = f"{u.scheme}://{u.netloc}", segs[0]
         else:
             base, key = BARK_BASE, address
         return _post(f"{base.rstrip('/')}/push",
